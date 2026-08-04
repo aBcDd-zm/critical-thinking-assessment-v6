@@ -28,6 +28,10 @@ services:
     cap_add:
       - CHOWN
       - FOWNER
+      # Docker user-namespace remapping can present a newly created named
+      # volume with an unmapped owner.  This short-lived initializer needs to
+      # traverse that directory before assigning it to the unprivileged app.
+      - DAC_OVERRIDE
     pids_limit: 32
     mem_limit: 64m
     logging:
