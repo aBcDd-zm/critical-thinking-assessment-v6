@@ -9,7 +9,7 @@ type StreamResult = {
 
 async function submitThroughUi(page: Page, answer: string) {
   await page.getByLabel("你的回答").fill(answer);
-  await page.getByRole("button", { name: /提交回答/ }).click();
+  await page.getByLabel("你的回答").press("Enter");
 }
 
 test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型收束与报告", async ({ page }) => {
@@ -25,13 +25,15 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
   expect(sessionUuid).toBeTruthy();
   await expect(page.getByText("访谈官 · 澄澄")).toBeVisible();
   await expect(page.getByText(/最多 12 次回答/)).toHaveCount(0);
+  await expect(page.getByText("已进行 0 轮问答", { exact: true })).toBeVisible();
   await expect(page.getByText("问题界定", { exact: true })).toHaveCount(0);
 
   await submitThroughUi(page, "我需要决定是否申请研究项目，想先核实导师和资金条件。");
-  await expect(page.getByText(/你刚才提到/)).toBeVisible();
+  await expect(page.getByText("听起来这件事对你确实很重要。此刻你最想先厘清的是什么？")).toBeVisible();
+  await expect(page.getByText("已进行 1 轮问答", { exact: true })).toBeVisible();
 
   const replayPayload = {
-    content: "我还需要再看看项目的实际安排。",
+    content: "我还需要再看看项目的实际安排，也想确认它是否符合我目前的长期计划。",
     client_turn_id: "playwright-v6-recovery-0003",
     input_mode: "text",
     answer_duration_ms: 1234,
@@ -79,7 +81,7 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
   await page.reload();
   await expect(page.getByText(replayPayload.content, { exact: true })).toBeVisible();
 
-  await submitThroughUi(page, "我已经想清楚，决定先申请，并补充准备计划。");
+  await submitThroughUi(page, "我已经想清楚，决定先申请，并愿意继续说明自己的准备计划和判断依据。");
   await expect(page.getByText(/最可能让你改变现在的决定/)).toBeVisible();
 
   await submitThroughUi(

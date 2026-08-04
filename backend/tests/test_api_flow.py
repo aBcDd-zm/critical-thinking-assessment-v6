@@ -21,6 +21,7 @@ from app.services.model_gateway import (
     NATURAL_INTERVIEWER_SYSTEM_PROMPT,
     StructuredCallResult,
 )
+from app.services.orchestrator import _quality_flags
 from tests.conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME
 
 
@@ -96,18 +97,34 @@ def test_consent_and_model_generated_opening_are_natural_only(client) -> None:
     detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     opening = detail["traces"][0]
     assert opening["action"] == "natural_opening"
-    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.1"
+    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.2"
 
 
-def test_interviewer_prompt_v6_0_1_probes_key_uncertainty_before_closing() -> None:
+def test_interviewer_prompt_v6_0_2_uses_empathy_open_questions_and_natural_closure() -> None:
     prompt = "".join(NATURAL_INTERVIEWER_SYSTEM_PROMPT.split())
 
-    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.1"
-    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.1"
+    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.2"
+    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.2"
+    assert "共情不是机械复述" in prompt
+    assert "开放式问题" in prompt
+    assert "两个选项" in prompt
+    assert "心理咨询专家" not in prompt
     assert "除非对方明确提出要结束" in prompt
     assert "即使已经听到看似完整的方案、决定或解释，也不要立刻收束" in prompt
     assert "自然地深入一到两层" in prompt
     assert "不确定性、成立条件、潜在反例或可能失效处" in prompt
+    assert "没有新的关键矛盾时，应自然收束并选择finish" in prompt
+
+
+def test_interviewer_style_flags_record_binary_questions_and_verbatim_echoes() -> None:
+    latest_user_text = "我会先核实导师、资金和项目安排，再决定是否继续申请。"
+    flags = _quality_flags(
+        f"你刚才提到“{latest_user_text}”。你会先申请还是先放弃？",
+        latest_user_text,
+    )
+
+    assert "binary_choice_question" in flags
+    assert "repeated_user_wording" in flags
 
 
 def test_mock_interviewer_probes_a_complete_plan_before_natural_closure() -> None:
@@ -154,6 +171,35 @@ def test_mock_interviewer_probes_a_complete_plan_before_natural_closure() -> Non
     assert closed.session_action == "finish"
     assert closed.finish_reason == "natural_closure"
 
+    generic_input = "我最近在认真比较不同方向，也想先弄清楚现实条件。"
+    generic = ModelGatewayService._mock_interviewer(
+        {
+            "participant": {"display_name": "小陈"},
+            "transcript": [{"turn_index": 1, "role": "user", "content": generic_input}],
+        }
+    )
+    assert generic.session_action == "continue"
+    assert generic_input not in generic.interviewer_message
+    assert "你刚才提到" not in generic.interviewer_message
+
+
+def test_turn_requires_at_least_twenty_visible_characters(client) -> None:
+    session_uuid = create_session(client)
+
+    too_short = send(client, session_uuid, "我还在想。", "client-turn-too-short")
+    assert too_short.status_code == 422
+    assert "至少需要 20 个字" in too_short.json()["detail"][0]["msg"]
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 0
+
+    accepted = send(
+        client,
+        session_uuid,
+        "我正在认真比较不同方向，也会补充更具体的判断依据和现实条件。",
+        "client-turn-twenty-or-more",
+    )
+    assert accepted.status_code == 200
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 1
+
 
 def test_interview_payload_has_no_controller_fields_and_idempotently_replays(client, monkeypatch) -> None:
     session_uuid = create_session(client)
@@ -166,7 +212,7 @@ def test_interview_payload_has_no_controller_fields_and_idempotently_replays(cli
         return original(payload)
 
     monkeypatch.setattr(gateway, "generate_interviewer", capture)
-    first = send(client, session_uuid, "我在犹豫是否换方向，最在意长期目标。")
+    first = send(client, session_uuid, "我在犹豫是否换方向，最在意长期目标，也想确认现实条件。")
     assert first.status_code == 200
     events = parse_events(first)
     assert [item["event"] for item in events] == [
@@ -188,7 +234,7 @@ def test_interview_payload_has_no_controller_fields_and_idempotently_replays(cli
     }
     assert not forbidden.intersection(captured[-1])
 
-    replay = send(client, session_uuid, "我在犹豫是否换方向，最在意长期目标。")
+    replay = send(client, session_uuid, "我在犹豫是否换方向，最在意长期目标，也想确认现实条件。")
     assert replay.status_code == 200
     assert replay.text == first.text
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
@@ -263,7 +309,7 @@ def test_public_pdf_score_label_uses_a_hundred_point_presentation() -> None:
 
 def test_short_or_self_evaluative_dialogue_leaves_dimensions_unmeasured(client) -> None:
     session_uuid = create_session(client)
-    self_label = "我觉得自己很擅长证据评估和决策能力。"
+    self_label = "我觉得自己很擅长证据评估和决策能力，而且逻辑一直很好很理性。"
     assert send(client, session_uuid, self_label).status_code == 200
     finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
     assert finalized.status_code == 200, finalized.text
@@ -277,7 +323,12 @@ def test_short_or_self_evaluative_dialogue_leaves_dimensions_unmeasured(client) 
     assert scoring_runs[-1]["manual_review_recommended"] is True
 
     short_session = create_session(client, name="短答用户")
-    assert send(client, short_session, "还没想清楚。", "client-turn-short").status_code == 200
+    assert send(
+        client,
+        short_session,
+        "我现在仍然没有想清楚，还需要一点时间再整理自己的想法。",
+        "client-turn-short",
+    ).status_code == 200
     short_report = client.post(f"/api/v1/sessions/{short_session}/finalize")
     assert short_report.status_code == 200
     assert all(
@@ -289,7 +340,7 @@ def test_self_label_cannot_be_reused_through_a_shorter_substring_quote(
     client, monkeypatch
 ) -> None:
     session_uuid = create_session(client)
-    self_label = "我觉得自己很擅长证据评估和决策能力。"
+    self_label = "我觉得自己很擅长证据评估和决策能力，而且逻辑一直很好很理性。"
     assert send(client, session_uuid, self_label).status_code == 200
     gateway = api_router.sessions.orchestrator.gateway
     original = gateway.generate_final_scorer
@@ -350,7 +401,7 @@ def test_model_natural_close_auto_finalizes_without_fixed_turn_limit(client, mon
     closing = send(
         client,
         session_uuid,
-        "我已经想清楚了，也没有补充。",
+        "我已经想清楚了，也没有补充，现在愿意把这次决定先放在这里。",
     )
     assert closing.status_code == 200
     events = parse_events(closing)
@@ -390,11 +441,11 @@ def test_failed_interviewer_call_preserves_user_turn_and_same_id_recovers(client
         return original(payload)
 
     monkeypatch.setattr(gateway, "generate_interviewer", fail_once)
-    failed = send(client, session_uuid, "我需要慢慢想一想。", "client-turn-retry")
+    failed = send(client, session_uuid, "我需要慢慢想一想，也希望先整理清楚自己的顾虑和条件。", "client-turn-retry")
     assert failed.status_code == 500
     assert parse_events(failed)[0]["code"] == "turn_processing_failed"
 
-    recovered = send(client, session_uuid, "我需要慢慢想一想。", "client-turn-retry")
+    recovered = send(client, session_uuid, "我需要慢慢想一想，也希望先整理清楚自己的顾虑和条件。", "client-turn-retry")
     assert recovered.status_code == 200
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert snapshot["user_answer_count"] == 1
@@ -418,7 +469,7 @@ def test_transient_model_connection_error_has_a_clear_recoverable_message(
         raise ModelGatewayError("model_transport_failed:ConnectError:EOF", transient=True)
 
     monkeypatch.setattr(gateway, "generate_interviewer", interrupted)
-    failed = send(client, session_uuid, "我正在等一个回复。", "client-turn-network-retry")
+    failed = send(client, session_uuid, "我正在等一个重要回复，也想先把接下来需要确认的事情理清楚。", "client-turn-network-retry")
 
     assert failed.status_code == 500
     event = parse_events(failed)[0]
@@ -452,11 +503,11 @@ def test_fortieth_saved_turn_can_recover_with_the_same_id_after_model_failure(
         return original(payload)
 
     monkeypatch.setattr(gateway, "generate_interviewer", fail_once)
-    failed = send(client, session_uuid, "我还需要一点时间。", "client-turn-fortieth")
+    failed = send(client, session_uuid, "我还需要一点时间，也想继续把目前犹豫的原因整理得更清楚。", "client-turn-fortieth")
     assert failed.status_code == 500
     assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 40
 
-    replay = send(client, session_uuid, "我还需要一点时间。", "client-turn-fortieth")
+    replay = send(client, session_uuid, "我还需要一点时间，也想继续把目前犹豫的原因整理得更清楚。", "client-turn-fortieth")
     assert replay.status_code == 200
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert snapshot["user_answer_count"] == 40
@@ -478,12 +529,12 @@ def test_persisted_assistant_turn_replays_after_event_rendering_interruption(
         return original_events(*args)
 
     monkeypatch.setattr(service, "_completed_events", fail_after_persist)
-    failed = send(client, session_uuid, "我还在考虑这件事。", "client-turn-event-replay")
+    failed = send(client, session_uuid, "我还在考虑这件事，也想把真正影响决定的条件逐一理清楚。", "client-turn-event-replay")
     assert failed.status_code == 500
     persisted = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert [turn["role"] for turn in persisted["turns"]] == ["assistant", "user", "assistant"]
 
-    replay = send(client, session_uuid, "我还在考虑这件事。", "client-turn-event-replay")
+    replay = send(client, session_uuid, "我还在考虑这件事，也想把真正影响决定的条件逐一理清楚。", "client-turn-event-replay")
     assert replay.status_code == 200
     recovered = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert [turn["role"] for turn in recovered["turns"]] == ["assistant", "user", "assistant"]
@@ -491,7 +542,7 @@ def test_persisted_assistant_turn_replays_after_event_rendering_interruption(
 
 def test_safety_gate_stops_without_scoring(client) -> None:
     session_uuid = create_session(client)
-    response = send(client, session_uuid, "我现在想自杀，已经准备吞药。")
+    response = send(client, session_uuid, "我现在想自杀，已经准备吞药，而且我身边暂时没有可以求助的人。")
     assert response.status_code == 200
     events = parse_events(response)
     completed = events[-1]["data"]
@@ -520,7 +571,7 @@ def test_harmful_interviewer_output_is_not_persisted_or_shown(client, monkeypatc
         )
 
     monkeypatch.setattr(gateway, "generate_interviewer", unsafe_reply)
-    response = send(client, session_uuid, "我和同事发生了激烈争执。", "client-turn-harmful-output")
+    response = send(client, session_uuid, "我和同事发生了激烈争执，现在仍然很生气，也不知道怎么继续处理。", "client-turn-harmful-output")
     assert response.status_code == 500
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert "你可以去伤害他。" not in [turn["content"] for turn in snapshot["turns"]]
@@ -743,7 +794,7 @@ def test_technical_cap_and_admin_review_expert_and_anonymous_export(client) -> N
         db.commit()
     finally:
         db.close()
-    capped = send(client, session_uuid, "我还想继续。", "client-turn-over-cap")
+    capped = send(client, session_uuid, "我还想继续把这件事情说清楚，也愿意补充更多当前的想法。", "client-turn-over-cap")
     assert capped.status_code == 409
     assert capped.json()["code"] == "technical_turn_cap_reached"
 

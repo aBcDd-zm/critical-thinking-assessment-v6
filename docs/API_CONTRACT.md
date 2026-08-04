@@ -4,7 +4,7 @@
 
 `interviewing | finalizing | completed | exited | safety_stopped`
 
-`interviewing` 不包含阶段、coverage、目标维度或测量轮次。恢复快照会带 `user_answer_count`，但 V6 客户端不得将其渲染为“第 N 阶段”或测量进度；40 次技术保护上限不在公开快照中，只会在命中时返回专用错误。快照还带 transcript 指纹以支持审计，但不带实时评分或路由结论。
+`interviewing` 不包含阶段、coverage、目标维度或测量轮次。恢复快照会带 `user_answer_count`；客户端可将其如实显示为“已进行 N 轮问答”，但不得渲染为阶段、目标进度、必答数量或技术上限。40 次技术保护上限不在公开快照中，只会在命中时返回专用错误。快照还带 transcript 指纹以支持审计，但不带实时评分或路由结论。
 
 ## 会话与同意
 
@@ -49,6 +49,8 @@
 
 `session_finalizing` 只提示 UI 停止继续输入并显示收束状态；真正的最终 session 快照仍以 `agent_completed` 为准。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。访谈官只允许输出 `interviewer_message`、`session_action` 和 `finish_reason`；当 `session_action=finish` 时，服务端转入 `finalizing`，而非要求客户端补任何特定题目。除用户主动结束外，版本化访谈 Prompt 要求在看似完整的方案后先自然探查一到两层关键不确定性、条件或反例；该行为仍由模型根据逐字稿决定，不由 API 传入轮次或维度控制字段。
 
+`content` 去除空白后的可见字符数必须至少为 20。客户端在输入框中即时显示剩余字数；普通 `Enter` 提交有效回答，`Shift+Enter` 保留换行，中文输入法选词期间不得误提交。服务端也会再次校验该限制。
+
 同一 `client_turn_id` 与相同载荷必须回放同一已持久化结果；不同载荷返回 `409 idempotency_payload_mismatch`。模型/JSON 修复用尽时以 `error` 收束流，但用户回答已经保存；客户端应保留同一键并允许刷新恢复，不能伪造一条固定 AI 问题。
 
 ## 结束、报告与语音
@@ -81,7 +83,7 @@
 - `409 session_not_accepting_turns`：状态不是 `interviewing`。
 - `409 idempotency_payload_mismatch`：同一键采用不同提交内容。
 - `409 technical_turn_cap_reached`：已达 40 次不可见技术上限。
-- `422`：请求、同意或模型结构合同无效。
+- `422`：请求、同意、回答少于 20 个可见字符或模型结构合同无效。
 - `500 turn_processing_failed`：一次修复后访谈官仍失败；用户 turn 已保留。
 - `503 scoring_failed`：评分失败，会话保持 `finalizing`，可幂等重试。
 - `503 tts_fallback_required`：语音供应商不可用；文本会话不受影响。
