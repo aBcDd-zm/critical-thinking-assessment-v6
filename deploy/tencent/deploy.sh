@@ -9,7 +9,7 @@ ENV_FILE=${CTA_V6_ENV_FILE:-"$PROJECT_ROOT/.env.production"}
 CADDY_CONTAINER=${CTA_V6_CADDY_CONTAINER:-tencent-caddy-1}
 CADDYFILE_PATH=${CTA_V6_CADDYFILE_PATH:-/etc/caddy/Caddyfile}
 SHARED_NETWORK=tencent_default
-V6_HOSTNAME=124-156-161-53.sslip.io
+V6_HOSTNAME=thinkagent.asia
 
 die() {
   echo "V6 deployment preflight failed: $1" >&2

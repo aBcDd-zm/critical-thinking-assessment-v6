@@ -4,10 +4,10 @@
 # Merge this one additional host block into the shared gateway's existing source
 # of truth, validate it in the running Caddy container, then perform a reload.
 # `cta-v6-web` is a V6-only Docker network alias on external `tencent_default`.
+# This block is the `thinkagent.asia` site route; it replaces the retired V5
+# route for that domain only, while other shared-gateway routes stay intact.
 
-# The explicit scheme is important here: a numeric-leading sslip hostname is
-# otherwise parsed by Caddy as a directive rather than a site address.
-https://124-156-161-53.sslip.io {
+thinkagent.asia {
     encode zstd gzip
 
     # Keep the Docker-only probe private even after this public host exists.

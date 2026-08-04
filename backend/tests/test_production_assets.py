@@ -52,7 +52,8 @@ def test_nginx_keeps_admin_token_server_side_and_streaming_unbuffered() -> None:
 def test_tencent_caddy_fragment_is_additive_and_targets_only_v6() -> None:
     caddy = _text("deploy/tencent/Caddyfile.thinkagent.asia")
 
-    assert "124-156-161-53.sslip.io" in caddy
+    assert "thinkagent.asia" in caddy
+    assert "sslip.io" not in caddy
     assert "reverse_proxy cta-v6-web:8080" in caddy
     assert "turns:stream$" in caddy
     assert "flush_interval -1" in caddy

@@ -19,7 +19,7 @@ shared Caddy `tencent-caddy-1` (80/443, HTTPS)
 ## 服务器前提
 
 - 一台已确认可用于新增 V6 容器的 Tencent Lighthouse Linux 主机，Docker Engine 与 Docker Compose v2 已可用。
-- 已确认的 HTTPS 访问名为 `124-156-161-53.sslip.io`；不要将这个 V6 host block 改到其他已有站点域名。
+- `thinkagent.asia` 的 A 记录已指向这台服务器；此域名原有的 V5 路由已退役，可替换为 V6。不要改动其他已有站点域名。
 - 现有共享 Caddy 容器为 `tencent-caddy-1`，并已加入 `tencent_default`。发布者只能安全地添加一个**新** host block，不能替换全局配置、容器或网络。
 - 服务器有外网访问 `https://api.deepseek.com` 的能力；公网只开放 Caddy 所需的 `80/443`，不要开放 `18060`。
 
@@ -62,7 +62,7 @@ docker compose --env-file .env.production -f docker-compose.production.yml down
 
 ## 接入共享 Caddy（单独变更）
 
-将 [Caddyfile.thinkagent.asia](Caddyfile.thinkagent.asia) 的**完整单个 host block**作为新段落合并到共享 Caddy 的既有配置源中；不要覆盖现有 Caddyfile、容器、网络或其他站点路由。该片段固定将 `124-156-161-53.sslip.io` 反代到 `cta-v6-web:8080`，并在公网隐藏 `/healthz`。
+先备份共享 Caddy 的既有配置源，再用 [Caddyfile.thinkagent.asia](Caddyfile.thinkagent.asia) 的**完整单个 host block**替换其中仅有的 `thinkagent.asia` 旧站点块；不要覆盖整个 Caddyfile、容器、网络或其他站点路由。该片段将 `thinkagent.asia` 反代到 `cta-v6-web:8080`，并在公网隐藏 `/healthz`。
 
 合并但尚未 reload 后，运行：
 
@@ -72,7 +72,7 @@ docker compose --env-file .env.production -f docker-compose.production.yml down
 
 它会在 `tencent-caddy-1` 内先确认当前配置确实含 V6 hostname 与 `cta-v6-web:8080` 路由，再执行 `caddy validate` 和平滑 `caddy reload`。脚本不复制、重写或替换任何共享 Caddy 文件。若该容器或 Caddyfile 路径在服务器上不同，只能显式覆盖 `CTA_V6_CADDY_CONTAINER` 或 `CTA_V6_CADDYFILE_PATH` 后再执行。
 
-在 Caddy 与 DNS 都生效后，使用 HTTPS 在无痕浏览器中验证：Basic Auth、`/assessment`、模型生成开场、一次追问、用户主动完成、报告、PDF 和管理员复核。`https://124-156-161-53.sslip.io/healthz` 应为 `404`；服务器本机 `http://127.0.0.1:18060/healthz` 应为 `200`。
+在 Caddy 与 DNS 都生效后，使用 HTTPS 在无痕浏览器中验证：Basic Auth、`/assessment`、模型生成开场、一次追问、用户主动完成、报告、PDF 和管理员复核。`https://thinkagent.asia/healthz` 应为 `404`；服务器本机 `http://127.0.0.1:18060/healthz` 应为 `200`。
 
 ## 发布边界
 
