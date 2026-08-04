@@ -1,0 +1,8 @@
+# Intentionally empty: 思衡 V6 is a local-only experimental Demo.
+#
+# There are no production services, domains, shared gateways, images, ports,
+# secrets, or databases defined here. A deployment requires a separately
+# reviewed future release and must not be inferred from this V6 workspace.
+name: cta-v6-local-only
+x-v6-local-only:
+  status: no-deployment-authorized

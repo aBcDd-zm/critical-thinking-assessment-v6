@@ -1,0 +1,4 @@
+# Intentionally contains no site block.
+#
+# 思衡 V6 has no authorized public hostname or Caddy route. Do not merge this
+# file into any shared gateway configuration.

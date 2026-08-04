@@ -1,0 +1,119 @@
+# V6 来源源码快照清单
+
+本目录在建立时从本机 V5 工作区复制工程能力；没有复制 `.git`、真实 `.env`、密钥、数据库、日志、缓存、构建产物或依赖目录。该来源工作区当时含有未提交的 V5 工作树变更，因此 Git 提交用于定位历史基线，SHA-256 清单用于定位实际被复制的源码快照。
+
+| 字段 | 值 |
+| --- | --- |
+| 来源目录 | `/Users/abcdd/Projects/厚粲杯开发/critical-thinking-assessment-v5` |
+| 来源分支 | `system/v5-real-issue-demo` |
+| 来源 Git HEAD | `e7ae0246cfa7c9e3cb1e43c8938c740d4cb945ea` |
+| 来源 Git tree | `aeba2a44329988594d4c2abad3d57d915e8b0c66` |
+| 纳入文件数 | `97` |
+| 排序后的 SHA-256 清单聚合值 | `34334b70fb235046996fb04af7580f7c544ce122ecb421b7d5fde1547c16bff1` |
+| V6 分支 | `system/v6-natural-interview-demo` |
+
+聚合值的计算方式是：对下列每个 `SHA256  相对路径` 行按路径排序后再计算 SHA-256。排除规则为 `.git/`、虚拟环境、`node_modules/`、前端构建/测试结果、pytest 缓存、本地数据库、`.local-run/`、`artifacts/`、`.DS_Store` 和所有真实 `.env*` 文件。它记录复制时的来源，不要求 V6 修改后继续与来源一致。
+
+## 来源文件 SHA-256 清单
+
+```text
+59ab63391404009c8bcadc4d4b1dc801c29208f86185485d236dbd71609d73d6  ./.gitignore
+c8d16abcdc0870c5855af7858bd5eaad6e486a40504e7ed5817dbed4fb042020  ./LOCAL_ACCEPTANCE.md
+4faa560cfe36815ea30744bbfd4fd6e982d313c1669be0146127672c49e63f04  ./Makefile
+907d9f4f338f8004775fba0898e539a043b0f4088c9a2a67e6b71662c9f24101  ./README.md
+c402e871696c65e9db88678d4a8a31613fabf2744b5d8cc87b465a141b363b82  ./backend/.dockerignore
+a1b2af22ff4805321b6420ff166d08beb7a0b355e88a4246bedd032d5cee7511  ./backend/Dockerfile
+5305bb159ae83ae8e202a9bddf51bd290a9887bab0c9ce7f59a197a0b2853f24  ./backend/alembic.ini
+9d49f0e0c6fa1b3bda2905757907802565fede8446a8628c7ab3d61f80841838  ./backend/app/__init__.py
+c5e79b75137811726e30acef2fa5cfc649514fce1c86da771535b368f43238c0  ./backend/app/api/__init__.py
+ae6c9b1923c2cbf8bd2374f016a0283f68eff59a99ea5c6703b65e0348d2ecc0  ./backend/app/api/router.py
+a468ea8256404dc68f07ab29315db3379b44e25e6f54656ea8c7b69690e623ae  ./backend/app/core/__init__.py
+84b24298de7b0daf568062d2b7b186a2d82b8c3850bb7ba0e27ef1fb1d4ee9bb  ./backend/app/core/config.py
+85ce25d9b2fda597717bfc0e2c6e46a5c2c35b19d67f979fcb37731cd5ad7c0d  ./backend/app/core/database.py
+2c2d729d115238144de171926c77d993172eb9c55c93b2e4c8379d2edda2508b  ./backend/app/domain/__init__.py
+3745ab7f8416b17b2d08042b1108df0df4024bf31a070e72b2443d9a2b340c59  ./backend/app/domain/catalog.py
+c427b75480d00a4aab1d5d083a060698cead7862b617e64c8c701873ebfbb09b  ./backend/app/main.py
+f7207b050b2002ed4a2083e1ce4189f1ceb0c04305ef0545753e5e3d0a74894e  ./backend/app/models.py
+8eab115f569ee30e02b7788986a03c14a193ab76c6f2ab764fa853ff55d8847f  ./backend/app/schemas.py
+5ee368b8b403ddb926e38792d6c660d7a6ec88ea5bd628ded82a91e52931d2f1  ./backend/app/services/__init__.py
+c91d20b7014fd3d43f2b0ed2cdba6c003b1224b45da3a05b504da4523f81fda8  ./backend/app/services/model_gateway.py
+9e68a2913a506d75efdd3fce8166a5c098e87b0d2b6565ce2eb8cc45f165d06a  ./backend/app/services/orchestrator.py
+dce3c3501a7bdffb400c2dfb36f682fb95b4005db63fdde581fe2384b5645019  ./backend/app/services/session_service.py
+4adf55b7ff1823c9524e637d0c8cb591a35102e627135815c8adf548e5db6be8  ./backend/app/services/tts_service.py
+a72f9cba2d89fa798d3b334ddb88ffd9efa8d3badfc12a11e6e0b72a8e6eaa28  ./backend/docker-entrypoint.sh
+a35215c6e06d21b1999159d41cb0ab5a4b655c9b4fb97f1b71444883dc2feda0  ./backend/migrations/env.py
+c20f6ab92d4ed36d77fbccb82bc410cd2ced42f2c162eebb43ddd45ae93dd90e  ./backend/migrations/script.py.mako
+12cf381fc4d6beae881f449ceb30463e38387ae007f46901bc5f590456b5a7b5  ./backend/migrations/versions/20260803_0001_v5_initial.py
+28b08b24283b07b436ff0273894963af15fed9a91f9d15dbec062ce2e941290b  ./backend/requirements.txt
+176c8f3cad47ee2b3f229373ed60c69f61212bf75a1027d37fede36d541da508  ./backend/scripts/check_real_deepseek_v5.py
+5be1bbb9b1a3231f54da6b9d10d3a6753acf899f571ab9796e07b9ad36df001e  ./backend/tests/__init__.py
+e58177a6c3bae6c7a877bcd581abdad2656d3a39cb0c1fe56496485ea4979607  ./backend/tests/conftest.py
+57e36cf85781baef8d97f75bb610ee9e12289a23e7f4419da1157b540ae13981  ./backend/tests/test_api_flow.py
+0c7827929eb06c7f2b3e5b0d06b5a68845b3ba5222a835207ce06a9d3c46acf2  ./backend/tests/test_migration_contract.py
+96a4998ad9f3c6551bf80a9b12b5833d5e4adf0f3541b6ed7c9edede84d0567a  ./backend/tests/test_production_assets.py
+593418622627913a2832de95ca050bfc56c50f620a69ac430a2b962bcb641ada  ./backend/tests/test_production_safety.py
+f2bf2b6e8255d4f04732e239bd6699106279278956f9e5dcf2fb88d3797dd1f4  ./backend/tests/test_tts_service.py
+e4ce8ccb956cc0b1f4027b0f0304960c7ce78ba0fa1be2c7e417d56c41481b6a  ./deploy/tencent/Caddyfile.thinkagent.asia
+ee3610cbbccdbaa89f33cb5b498e4b027ec097c91cd4f33b4462c9ad47a2f45f  ./deploy/tencent/README.md
+fa7d80d63182ab70d86589f0d8f302e43c1e2690adf38d9b1929c379a1c1bc7a  ./deploy/tencent/backup-sqlite.sh
+994d574bc052a717a8158ccbcb1e047e4d18573b93c4b8aeaaddc495634d4d66  ./deploy/tencent/deploy.sh
+3bd7ee01848c56813399627f6cf3c1cfdac1af1c2514ecf89b9827942ae92148  ./docker-compose.production.yml
+007f9dbf05e8aafb3864b9fa176ffd3e28f6fea4847f5b1dbee1295e210914d3  ./docs/API_CONTRACT.md
+e3c29855f18e14915b59d1922f2676b3ad9b9c7a65f0b88a6280f04a1365e061  ./docs/ARCHITECTURE.md
+00dc9a4ad2ee6579b015188d4f62e5b11af1c07b66c11fccd83a8e3aa1d0160d  ./docs/MEASUREMENT_CONTRACT_V5.md
+cb341797223a106402f01119c0d8d6e6bdcac7d46c93a136508676fcf0b06e21  ./docs/V5_PROMPT_HANDOFF.md
+70f09cb768bb8428ade3af3e34722f7704b91347f6b37a36d46b2d887d367c55  ./docs/V5_提示词原文与交接说明.docx
+81186e235f582eed061c702f14418e9410afe9f1e58637cb7f16ab184c25f800  ./frontend/.dockerignore
+750563d5aa4ad1f3b4b206377a2281269f6ac2bd4ecef407533af385e69c25f2  ./frontend/.gitignore
+8550717b4df353c701c720b0fe8266c32a966225f4459b6d379f7d9a0b7a8965  ./frontend/Dockerfile
+9533e718c7cb2aaf0db113ca0feb45fbacdf775885d938afa60cfe6a8afda329  ./frontend/e2e-stack/real-stack-flow.spec.ts
+1ca5a56843b933b90c3bad03f51885d65a706f2b2df4ba5ce5b636afb37cc265  ./frontend/e2e/v5-flow.spec.ts
+2384772825406b3b89f1b7d1e3d5ae096d8619b5aaae31de05f99954c7d569f2  ./frontend/index.html
+833f928f7e2ee932cd50329691786f6a37a21326221c59f5d47a8a29cc66a3f4  ./frontend/nginx/10-admin-basic-auth.sh
+648bf5cef2ee30dabf35e81a270aedeb42f9e95d40cbad3ef1fc03a265e9bf8a  ./frontend/nginx/default.conf.template
+b66e6e20a18afaa98019218dee2732510e5c3c04a4a0b17e5dd5aa7dfd674615  ./frontend/package-lock.json
+a4f0f4efce5900533a4265b20ab94481cc2693e1ef25c819c00167548809a160  ./frontend/package.json
+019e7a5d83a1cc5633f0a4c4162942c99922d567afae51903d5d4ff56a0e4961  ./frontend/playwright.config.ts
+7ce7a5f62ef8a1845547a3c3ec9fbb3d9ce556108b4859245ed5681e3339aa67  ./frontend/playwright.stack.config.ts
+3bea34fa5dc75a9c85db5d46d83ce6af5694ff30aa8878084f5a830caa5e0952  ./frontend/src/App.vue
+0d9a7511eed245b8069ec8f9d42d9cd651439e467d8411a4752b9922aa766adf  ./frontend/src/api/admin.ts
+27a153777d5cc8e1e5a52adcd842b2f083ed3d5dba350fad539c395274123287  ./frontend/src/api/http.test.ts
+caebf262e5d6c3adf15e203a26ebdddae4e84a8b8a3db11d232a47d1ec4cb5b1  ./frontend/src/api/http.ts
+9118caf826925b3aa882a9af6a60ac8f26d31189542834385a9451a547fa6980  ./frontend/src/api/session.test.ts
+47fe6ba933926c6aa614409fff162ec9cf88d996283df384aa6dc94166091e33  ./frontend/src/api/session.ts
+e34633c1409a77797a56d9a1bfb315ce06dc5f1edb8c4865b0ed4ccca80f84fe  ./frontend/src/components/DimensionCard.test.ts
+1828f083bcd871297f7a04b33d69456a9e5e68ac5f9a55b85ead08ca85b248a2  ./frontend/src/components/DimensionCard.vue
+67576b0f7a88cb034266c47ff45023ebabd4c93d898edf42fe32defc6225dd02  ./frontend/src/components/InterviewProgress.test.ts
+9cb87f9cd19de18734dec6ccdb0a7f76350cc7362c61929baa4ec10b3b8cb4d3  ./frontend/src/components/InterviewProgress.vue
+f0c04d7bf4ac9e2e09301996cb449895643b169bb3f6ac628054c5a703dd96df  ./frontend/src/components/InterviewerAvatar.vue
+de1a7f4bfee86ac30facf068e9be893d9a2689b838c570ce9a5cffa5fc99a6a1  ./frontend/src/components/RadarChart.test.ts
+60672c3435142775e19212c581f071b983f9ba5a752409993a8e6b0fc5d390a8  ./frontend/src/components/RadarChart.vue
+57ee76002b1d455e9c04c88b6de0ab9d30344525be472ad1128ce45b18296d44  ./frontend/src/composables/useSpeechPlayback.test.ts
+82b693ca11ad24f1f731f04872553e5c7deaae3dcfa65a081e3992659f04d417  ./frontend/src/composables/useVoice.test.ts
+bca25eb1e17dc6fc4b86b1cca91fd8604de2f2b800a7d734f4e861e776273d1f  ./frontend/src/composables/useVoice.ts
+89e2670431c17d0eb673f62b9be9b3d9c64005df7e89578286755f7e9adede3e  ./frontend/src/main.ts
+a34aa1333fcfa1bd3bef7425ce3a3b07db2f16f79c91176fa6843acc7022fbfd  ./frontend/src/router/index.ts
+56f02c1c69924a816e451961ecad68b65efa1d8f0b53783c3290f15c1a316f50  ./frontend/src/styles.css
+27740111c95634de9d83c039dc8bd78127600517930004782033bad0a02e5b23  ./frontend/src/tests/setup.ts
+92c364c563ab862f3b078bba63e25a7dec3bec096098e9a1319afcb88c804686  ./frontend/src/types/contracts.ts
+16d78b245109d0daa17e395f064bd00071bf5e4df9c66bb8aa4c6d65b8375e66  ./frontend/src/views/AdminSessionDetailView.vue
+e6106141b1bb4fea6e0ba7d0d4f824c3e4d7b381796664d2778138bb434c3d6d  ./frontend/src/views/AdminSessionsView.vue
+b54a0f5676a44368d39984847140ecc40158edb146187bbb285c4bc7c8d85ede  ./frontend/src/views/ConsentView.test.ts
+af45aae4073825919437b6219e15e959655bfd14e116c7eacf4517244b9fd744  ./frontend/src/views/ConsentView.vue
+e8dfbee51e838d725c47aae323bfc7cf4047bbb906fbe71d7a522dd45868360d  ./frontend/src/views/InterviewView.test.ts
+9ed36a41aa0578c0ea04b175c1ef715ef478eaa86ca790b45a629d20c14272a9  ./frontend/src/views/InterviewView.vue
+843a1a4d9cb8ef8b9dfc577500e9f6e973e4153767de4fb872d420fcfaaf6c28  ./frontend/src/views/ReportView.test.ts
+3b51fbe4d66a428cea9a5c37fc5315f9544de4b27404f4aca439a16740c6fce3  ./frontend/src/views/ReportView.vue
+1c3627df4f3d4671d3c6792e2f23a0466534039f3b64e3ae5b51123881d07313  ./frontend/tsconfig.app.json
+770b4140bbb581e2dfd9ea9946ffc9c75a1d86ba7d2db5f77c83e37cbdf9d808  ./frontend/tsconfig.json
+010f34b171223da908188b341aed45c330bb5845c036d0bcb06810ad841dca8a  ./frontend/tsconfig.node.json
+a09d3c5c6c48a3e164120c44619b64aa05993c7b1863e4b7fa1595c98cab858a  ./frontend/vite.config.ts
+b2c526def5c3b3b9531f38af440dfa004f7897e605022dc232a532e10fabc0f0  ./frontend/vitest.config.ts
+3031c0f7db61b972b65ac7fd02b40fdc6ef9002be7399931701167b43cd18106  ./scripts/check-local.sh
+8bee15d75f62efd99913de69b1669b85f3c3621696beabcede7ca79d80128ea7  ./scripts/generate_prompt_handoff_doc.py
+72c896308322b6daf8faf507f6007682a1b4e2331b2bede0aefe02a89c02eac2  ./scripts/start-local.sh
+af501e4788c8f2077cb6759b157e5a4afe75e34f20896a08d6daa994e9457305  ./scripts/start-playwright-stack-backend.sh
+129928ac124276d3a5aa141f354f01eb1539d80a6e407870e69b8e5d3f96bae1  ./scripts/stop-local.sh
+```
+
+V6 的后续变更应由本仓库的 Git 历史与验收记录追踪；不要把本清单当作 V6 当前代码的完整性校验，也不要把任何凭据、数据库或用户会话加入清单。

@@ -1,0 +1,797 @@
+"""HTTP API for the V6 natural-interview demo."""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import secrets
+import zipfile
+from html import escape
+from typing import Any, Optional
+
+from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from sqlalchemy import or_, select, text
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.core.database import get_db
+from app.domain.catalog import DIMENSION_BY_KEY
+from app.models import (
+    AgentTrace,
+    AssessmentSession,
+    DialogueTurn,
+    EvidenceItem,
+    ExpertScore,
+    HumanReview,
+    ScoringRun,
+    TechnicalAnomaly,
+    utcnow,
+)
+from app.schemas import (
+    CreateSessionRequest,
+    ExitRequest,
+    ExpertScoresRequest,
+    ReviewRequest,
+    SubmitTurnRequest,
+)
+from app.services.model_gateway import ModelGatewayError
+from app.services.session_service import (
+    ServiceError,
+    SessionService,
+    serialize_report,
+    session_snapshot,
+)
+from app.services.tts_service import PersistedAITurn, TTSService
+
+
+router = APIRouter()
+sessions = SessionService()
+
+_PUBLIC_DIMENSION_SUGGESTIONS = {
+    "problem_definition": "继续明确目标、范围和需要核实的边界。",
+    "evidence_evaluation": "继续核实来源、样本范围和仍不确定的信息。",
+    "reasoning_argumentation": "继续区分结论、依据与可能改变结论的假设。",
+    "multiple_perspectives": "继续补充不同相关方和选择可能带来的影响。",
+    "integrative_decision": "继续把目标、约束、风险和回退条件放在一起权衡。",
+    "dynamic_adjustment": "继续提前写下会触发调整的信号和下一步行动。",
+}
+
+
+def _service_error(exc: ServiceError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message},
+    )
+
+
+def _admin_guard(x_admin_token: Optional[str] = Header(default=None)) -> None:
+    if settings.admin_token and x_admin_token != settings.admin_token:
+        raise HTTPException(status_code=401, detail={"code": "admin_unauthorized"})
+
+
+@router.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "version": "v6.0"}
+
+
+@router.get("/health/db")
+def database_health(db: Session = Depends(get_db)) -> dict[str, str]:
+    try:
+        db.execute(text("SELECT 1")).scalar_one()
+        alembic_version = db.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one_or_none()
+        if not alembic_version:
+            raise RuntimeError("alembic version is unavailable")
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "database_unavailable",
+                "message": "Database connectivity or migration state is unavailable.",
+            },
+        ) from exc
+    return {"status": "ok", "alembic_version": str(alembic_version)}
+
+
+@router.post("/sessions", status_code=201)
+def create_session(
+    request: CreateSessionRequest, db: Session = Depends(get_db)
+) -> Any:
+    try:
+        session, initial = sessions.create(db, request)
+        return {"session": session_snapshot(session), "initial_turn": {
+            "id": initial.id,
+            "turn_index": initial.turn_index,
+            "role": initial.role,
+            "content": initial.content,
+            "client_turn_id": initial.client_turn_id,
+            "input_mode": initial.input_mode,
+            "answer_duration_ms": initial.answer_duration_ms,
+            "phase": initial.phase,
+            "session_action": initial.session_action,
+            "finish_reason": initial.finish_reason,
+            "quality_flags": initial.quality_flags or [],
+            "created_at": initial.created_at.isoformat() if initial.created_at else None,
+        }}
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+@router.get("/sessions/{session_uuid}")
+def get_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+    try:
+        return session_snapshot(sessions.get(db, session_uuid))
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+def _ndjson(events: list[dict[str, Any]]):
+    for event in events:
+        yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+@router.post("/sessions/{session_uuid}/turns:stream")
+def submit_turn_stream(
+    session_uuid: str,
+    request: SubmitTurnRequest,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return StreamingResponse(
+            _ndjson(sessions.submit(db, session_uuid, request)),
+            media_type="application/x-ndjson",
+        )
+    except ServiceError as exc:
+        return _service_error(exc)
+    except Exception as exc:
+        model_connection_interrupted = isinstance(exc, ModelGatewayError) and exc.transient
+        event = {
+            "event": "error",
+            "code": (
+                "model_connection_interrupted"
+                if model_connection_interrupted
+                else "turn_processing_failed"
+            ),
+            "message": (
+                "与访谈模型的连接暂时中断，已保存你的回答。请重试。"
+                if model_connection_interrupted
+                else "本轮处理中断，已保留可恢复状态。"
+            ),
+            "data": {"exception_type": type(exc).__name__},
+        }
+        return StreamingResponse(
+            _ndjson([event]),
+            media_type="application/x-ndjson",
+            status_code=500,
+        )
+
+
+@router.post("/sessions/{session_uuid}/finalize")
+def finalize_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+    try:
+        session = sessions.finalize(db, session_uuid)
+        return {"session": session_snapshot(session), "report": serialize_report(session)}
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+@router.post("/sessions/{session_uuid}/exit")
+def exit_session(
+    session_uuid: str,
+    request: ExitRequest = Body(default_factory=ExitRequest),
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return session_snapshot(sessions.exit(db, session_uuid, request.reason))
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+@router.get("/sessions/{session_uuid}/report")
+def get_report(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+    try:
+        session = sessions.get(db, session_uuid)
+        report = serialize_report(session)
+        if not report:
+            raise ServiceError(409, "report_not_ready", "会话尚未完成，报告不可用。")
+        return report
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
+    output = io.BytesIO()
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    styles = getSampleStyleSheet()
+    for style in styles.byName.values():
+        style.fontName = "STSong-Light"
+    doc = SimpleDocTemplate(output, pagesize=A4, title="思衡 V6 自然访谈报告")
+    dimensions = list(report.get("dimensions", []))
+    overall_score, measured_count = _public_overall_score(dimensions)
+    total_note = (
+        f"综合总分：{overall_score}（基于 {measured_count} 个证据充分维度计算）"
+        if measured_count
+        else "综合总分：—（暂无可计算维度）"
+    )
+    story = [
+        Paragraph("思衡访谈报告", styles["Title"]),
+        Spacer(1, 8),
+        Paragraph(escape(str(report.get("summary", ""))), styles["BodyText"]),
+        Paragraph(escape(total_note), styles["Heading2"]),
+        Spacer(1, 10),
+    ]
+    for item in dimensions:
+        score_text = _public_score_label(item["score"]) if item.get("score") is not None else (
+            "证据有限" if item.get("status") == "limited" else "未充分测得"
+        )
+        story.extend(
+            [
+                Paragraph(
+                    f"{escape(item['dimension_name'])}：{escape(score_text)}",
+                    styles["Heading2"],
+                ),
+                Paragraph(escape(item.get("reason", "")), styles["BodyText"]),
+                Paragraph("优势：" + escape(_public_dimension_strength(item)), styles["BodyText"]),
+                Paragraph(
+                    "建议：" + escape(_public_dimension_suggestion(item.get("dimension_key"))),
+                    styles["BodyText"],
+                ),
+            ]
+        )
+        for evidence in item.get("evidences", [])[:3]:
+            story.append(
+                Paragraph(
+                    "用户原话（turn "
+                    + escape(str(evidence.get("turn_index", "")))
+                    + "）："
+                    + escape(evidence.get("quote", "")),
+                    styles["BodyText"],
+                )
+            )
+        story.append(Spacer(1, 8))
+    story.extend(
+        [
+            Spacer(1, 10),
+            Paragraph(escape(report.get("disclaimer", "")), styles["BodyText"]),
+        ]
+    )
+    doc.build(story)
+    return output.getvalue()
+
+
+def _public_score_label(score: int | float) -> str:
+    """Render the fixed 1–5 evidence score as a participant-facing 100-point score."""
+
+    return f"{round(float(score) * 20)} 分"
+
+
+def _public_overall_score(dimensions: list[dict[str, Any]]) -> tuple[str, int]:
+    scores = [
+        float(item["score"])
+        for item in dimensions
+        if item.get("status") == "sufficient" and isinstance(item.get("score"), (int, float))
+    ]
+    if not scores:
+        return "—", 0
+    return _public_score_label(sum(scores) / len(scores)), len(scores)
+
+
+def _public_dimension_strength(item: dict[str, Any]) -> str:
+    if item.get("status") != "sufficient" or item.get("score") is None:
+        return "本次证据有限，暂不形成该维度的优势判断。"
+    return str(item.get("strength") or item.get("reason") or "本次原话支持了这一维度的观察。")
+
+
+def _public_dimension_suggestion(dimension_key: object) -> str:
+    return _PUBLIC_DIMENSION_SUGGESTIONS.get(
+        str(dimension_key), "继续记录判断依据和可能改变想法的条件。"
+    )
+
+
+@router.get("/sessions/{session_uuid}/report.pdf")
+def get_report_pdf(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+    report_response = get_report(session_uuid, db)
+    if isinstance(report_response, JSONResponse):
+        return report_response
+    return Response(
+        _report_pdf_bytes(report_response),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="assessment-v6-{session_uuid}.pdf"'
+        },
+    )
+
+
+@router.get("/sessions/{session_uuid}/turns/{turn_index}/speech")
+async def speech(
+    session_uuid: str, turn_index: int, db: Session = Depends(get_db)
+) -> Any:
+    try:
+        session = sessions.get(db, session_uuid)
+        turn = db.scalar(
+            select(DialogueTurn).where(
+                DialogueTurn.session_id == session.id,
+                DialogueTurn.turn_index == turn_index,
+                DialogueTurn.role == "assistant",
+            )
+        )
+        if not turn:
+            raise ServiceError(
+                404, "assistant_turn_not_found", "指定的已持久化 AI turn 不存在。"
+            )
+        result = await TTSService().synthesize(
+            PersistedAITurn(
+                id=turn.id,
+                session_uuid=session.uuid,
+                turn_index=turn.turn_index,
+                role="assistant",
+                content=turn.content,
+                persisted=True,
+            )
+        )
+        if result.ok:
+            return Response(
+                result.audio,
+                media_type=result.content_type,
+                headers={
+                    "X-TTS-Provider": result.provider,
+                    "X-TTS-Request-ID": result.request_id or "",
+                    "Cache-Control": "no-store",
+                },
+            )
+        db.add(
+            TechnicalAnomaly(
+                session_id=session.id,
+                turn_id=turn.id,
+                category="tts_fallback",
+                detail=result.fallback_reason or "tts_unavailable",
+                recoverable=True,
+            )
+        )
+        db.commit()
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": "tts_fallback_required",
+                "message": "服务端语音不可用，请使用浏览器语音回退。",
+                "provider": result.provider,
+                "fallback_reason": result.fallback_reason,
+            },
+            headers={"X-TTS-Fallback": "browser"},
+        )
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+@router.get("/admin/sessions", dependencies=[Depends(_admin_guard)])
+def admin_sessions(
+    phase: Optional[str] = None,
+    review_status: Optional[str] = None,
+    manual_review_recommended: Optional[bool] = None,
+    low_confidence: Optional[bool] = None,
+    q: Optional[str] = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    stmt = select(AssessmentSession).outerjoin(HumanReview)
+    if phase:
+        stmt = stmt.where(AssessmentSession.phase == phase)
+    if review_status:
+        stmt = stmt.where(HumanReview.status == review_status)
+    if manual_review_recommended is not None:
+        stmt = stmt.where(
+            AssessmentSession.manual_review_recommended == manual_review_recommended
+        )
+    if low_confidence is True:
+        stmt = stmt.where(AssessmentSession.manual_review_recommended.is_(True))
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                AssessmentSession.uuid.like(like),
+                AssessmentSession.display_name.like(like),
+            )
+        )
+    rows = list(db.scalars(stmt.order_by(AssessmentSession.created_at.desc())))
+    return {
+        "items": [
+            {
+                "uuid": item.uuid,
+                "phase": item.phase,
+                "display_name": item.display_name,
+                "occupation": item.occupation,
+                "user_answer_count": item.user_answer_count,
+                "manual_review_recommended": item.manual_review_recommended,
+                "review_status": item.review.status if item.review else "pending",
+                "created_at": item.created_at.isoformat(),
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in rows
+        ],
+        "total": len(rows),
+    }
+
+
+@router.get("/admin/sessions/{session_uuid}", dependencies=[Depends(_admin_guard)])
+def admin_session_detail(
+    session_uuid: str, db: Session = Depends(get_db)
+) -> Any:
+    try:
+        session = sessions.get(db, session_uuid)
+        snapshot = session_snapshot(session)
+        turn_index = {turn.id: turn.turn_index for turn in session.turns}
+        snapshot.update(
+            {
+                "review_status": session.review.status if session.review else "pending",
+                "review_notes": session.review.notes if session.review else None,
+                "review_decision": session.review.decision if session.review else None,
+                "reviewer": session.review.reviewer if session.review else None,
+                "reviewed_at": (
+                    session.review.reviewed_at.isoformat()
+                    if session.review and session.review.reviewed_at
+                    else None
+                ),
+                "evidence_items": [
+                    {
+                        "dimension_key": evidence.dimension_key,
+                        "turn_index": turn_index.get(evidence.user_turn_id),
+                        "quote": evidence.quote,
+                        "quote_start": evidence.quote_start,
+                        "quote_end": evidence.quote_end,
+                        "confidence": evidence.confidence,
+                    }
+                    for evidence in sorted(session.evidence_items, key=lambda item: item.id)
+                ],
+                "scoring_runs": [
+                    {
+                        "id": run.id,
+                        "attempt_number": run.attempt_number,
+                        "status": run.status,
+                        "transcript_fingerprint": run.transcript_fingerprint,
+                        "model": f"{run.model_provider}/{run.model_name}",
+                        "prompt_template_id": run.prompt_template_id,
+                        "prompt_version": run.prompt_version,
+                        "repair_used": run.repair_used,
+                        "error": run.error,
+                        "manual_review_recommended": run.manual_review_recommended,
+                        "result_data": run.result_data,
+                        "created_at": run.created_at.isoformat(),
+                        "completed_at": (
+                            run.completed_at.isoformat() if run.completed_at else None
+                        ),
+                    }
+                    for run in sorted(session.scoring_runs, key=lambda item: item.attempt_number)
+                ],
+                "traces": [
+                    {
+                        "id": trace.id,
+                        "turn_index": turn_index.get(trace.assistant_turn_id),
+                        "action": trace.action,
+                        "model": f"{trace.model_provider}/{trace.model_name}",
+                        "prompt_template_id": trace.prompt_template_id,
+                        "prompt_version": trace.prompt_version,
+                        "input_fingerprint": trace.input_fingerprint,
+                        "output_contract": trace.output_contract,
+                        "renderer_status": trace.renderer_status,
+                        "repair_used": trace.repair_used,
+                        "fallback_used": trace.fallback_used,
+                        "fallback_reason": trace.fallback_reason,
+                        "latency_ms": trace.latency_ms,
+                        "created_at": trace.created_at.isoformat(),
+                    }
+                    for trace in sorted(session.traces, key=lambda item: item.id)
+                ],
+                "technical_anomalies": [
+                    {
+                        "category": anomaly.category,
+                        "detail": anomaly.detail,
+                        "recoverable": anomaly.recoverable,
+                        "turn_index": turn_index.get(anomaly.turn_id),
+                    }
+                    for anomaly in sorted(session.anomalies, key=lambda item: item.id)
+                ],
+                "expert_scores": [
+                    {
+                        "dimension_key": score.dimension_key,
+                        "score": score.score,
+                        "comment": score.comment or "",
+                        "reviewer": score.reviewer,
+                    }
+                    for score in session.expert_scores
+                ],
+                "report": serialize_report(session),
+            }
+        )
+        return snapshot
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+def _update_review(
+    session_uuid: str, request: ReviewRequest, db: Session
+) -> Any:
+    try:
+        session = sessions.get(db, session_uuid)
+        review = session.review
+        if not review:
+            review = HumanReview(session_id=session.id)
+            db.add(review)
+        review.status = request.status
+        review.decision = request.decision
+        review.notes = request.notes
+        review.reviewer = request.reviewer
+        review.reviewed_at = utcnow()
+        db.commit()
+        return {
+            "review_status": review.status,
+            "review_notes": review.notes,
+            "decision": review.decision,
+            "reviewer": review.reviewer,
+            "reviewed_at": review.reviewed_at.isoformat(),
+        }
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+@router.put("/admin/sessions/{session_uuid}/review", dependencies=[Depends(_admin_guard)])
+def put_review(
+    session_uuid: str, request: ReviewRequest, db: Session = Depends(get_db)
+) -> Any:
+    return _update_review(session_uuid, request, db)
+
+
+@router.patch("/admin/sessions/{session_uuid}/review", dependencies=[Depends(_admin_guard)])
+def patch_review(
+    session_uuid: str, request: ReviewRequest, db: Session = Depends(get_db)
+) -> Any:
+    return _update_review(session_uuid, request, db)
+
+
+def _save_expert_scores(
+    session_uuid: str, request: ExpertScoresRequest, db: Session
+) -> Any:
+    try:
+        session = sessions.get(db, session_uuid)
+        saved = []
+        for item in request.scores:
+            if item.dimension_key not in DIMENSION_BY_KEY:
+                raise ServiceError(
+                    422, "unknown_dimension", f"未知维度：{item.dimension_key}"
+                )
+            if item.score is None:
+                continue
+            record = db.scalar(
+                select(ExpertScore).where(
+                    ExpertScore.session_id == session.id,
+                    ExpertScore.dimension_key == item.dimension_key,
+                    ExpertScore.reviewer == request.reviewer,
+                )
+            )
+            if not record:
+                record = ExpertScore(
+                    session_id=session.id,
+                    dimension_key=item.dimension_key,
+                    reviewer=request.reviewer,
+                    score=item.score,
+                )
+                db.add(record)
+            record.score = item.score
+            record.comment = item.comment
+            saved.append(
+                {
+                    "dimension_key": item.dimension_key,
+                    "score": item.score,
+                    "comment": item.comment or "",
+                }
+            )
+        db.commit()
+        return {"saved": saved, "reviewer": request.reviewer}
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+@router.put(
+    "/admin/sessions/{session_uuid}/expert-scores", dependencies=[Depends(_admin_guard)]
+)
+def put_expert_scores(
+    session_uuid: str, request: ExpertScoresRequest, db: Session = Depends(get_db)
+) -> Any:
+    return _save_expert_scores(session_uuid, request, db)
+
+
+@router.post(
+    "/admin/sessions/{session_uuid}/expert-scores", dependencies=[Depends(_admin_guard)]
+)
+def post_expert_scores(
+    session_uuid: str, request: ExpertScoresRequest, db: Session = Depends(get_db)
+) -> Any:
+    return _save_expert_scores(session_uuid, request, db)
+
+
+@router.post("/admin/expert-scores:import", dependencies=[Depends(_admin_guard)])
+async def import_expert_scores(
+    file: UploadFile = File(...), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    raw = await file.read()
+    try:
+        decoded = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return {
+            "imported": 0,
+            "errors": [{"row": 0, "reason": "CSV 必须为 UTF-8 编码"}],
+        }
+    imported = 0
+    errors: list[dict[str, Any]] = []
+    for row_number, row in enumerate(csv.DictReader(io.StringIO(decoded)), start=2):
+        try:
+            session = db.scalar(
+                select(AssessmentSession).where(
+                    AssessmentSession.uuid == row.get("session_uuid", "")
+                )
+            )
+            dimension_key = row.get("dimension_key", "")
+            score = int(row.get("score", ""))
+            reviewer = (row.get("reviewer") or "expert").strip()
+            if not session:
+                raise ValueError("session_not_found")
+            if dimension_key not in DIMENSION_BY_KEY:
+                raise ValueError("unknown_dimension")
+            if score < 1 or score > 5:
+                raise ValueError("score_out_of_range")
+            record = db.scalar(
+                select(ExpertScore).where(
+                    ExpertScore.session_id == session.id,
+                    ExpertScore.dimension_key == dimension_key,
+                    ExpertScore.reviewer == reviewer,
+                )
+            )
+            if not record:
+                record = ExpertScore(
+                    session_id=session.id,
+                    dimension_key=dimension_key,
+                    reviewer=reviewer,
+                    score=score,
+                )
+                db.add(record)
+            record.score = score
+            record.comment = row.get("comment") or None
+            imported += 1
+        except Exception as exc:
+            errors.append({"row": row_number, "reason": str(exc)})
+    db.commit()
+    return {"imported": imported, "errors": errors}
+
+
+def _anonymous_zip(db: Session) -> bytes:
+    all_sessions = list(
+        db.scalars(select(AssessmentSession).order_by(AssessmentSession.id))
+    )
+    anonymous_ids: dict[int, str] = {}
+    used_ids: set[str] = set()
+    for session in all_sessions:
+        anonymous_id = secrets.token_hex(8)
+        while anonymous_id in used_ids:
+            anonymous_id = secrets.token_hex(8)
+        used_ids.add(anonymous_id)
+        anonymous_ids[session.id] = anonymous_id
+
+    sessions_json: list[dict[str, Any]] = []
+    reports_json: list[dict[str, Any]] = []
+    turns_io = io.StringIO()
+    evidence_io = io.StringIO()
+    turns_writer = csv.writer(turns_io)
+    evidence_writer = csv.writer(evidence_io)
+    turns_writer.writerow(
+        [
+            "anonymous_session_id",
+            "turn_index",
+            "role",
+            "phase",
+            "input_mode",
+            "answer_duration_ms",
+        ]
+    )
+    evidence_writer.writerow(
+        [
+            "anonymous_session_id",
+            "turn_index",
+            "dimension_key",
+            "quote_length",
+            "confidence",
+        ]
+    )
+    for session in all_sessions:
+        anonymous_id = anonymous_ids[session.id]
+        sessions_json.append(
+            {
+                "anonymous_session_id": anonymous_id,
+                "phase": session.phase,
+                "user_answer_count": session.user_answer_count,
+                "manual_review_recommended": session.manual_review_recommended,
+            }
+        )
+        turn_indexes = {turn.id: turn.turn_index for turn in session.turns}
+        for turn in sorted(session.turns, key=lambda item: item.turn_index):
+            turns_writer.writerow(
+                [
+                    anonymous_id,
+                    turn.turn_index,
+                    turn.role,
+                    turn.phase,
+                    turn.input_mode,
+                    turn.answer_duration_ms,
+                ]
+            )
+        for evidence in session.evidence_items:
+            evidence_writer.writerow(
+                [
+                    anonymous_id,
+                    turn_indexes.get(evidence.user_turn_id),
+                    evidence.dimension_key,
+                    len(evidence.quote),
+                    evidence.confidence,
+                ]
+            )
+        if session.report:
+            source = session.report.report_data
+            reports_json.append(
+                {
+                    "anonymous_session_id": anonymous_id,
+                    "experimental_notice": source.get("experimental_notice"),
+                    "dimensions": [
+                        {
+                            "dimension_key": dimension.get("dimension_key"),
+                            "dimension_name": dimension.get("dimension_name"),
+                            "status": dimension.get("status"),
+                            "score": dimension.get("score"),
+                            "suggestion": dimension.get("suggestion"),
+                            "observable_behaviors": dimension.get(
+                                "observable_behaviors", []
+                            ),
+                        }
+                        for dimension in source.get("dimensions", [])
+                    ],
+                    "manual_review_recommended": source.get(
+                        "manual_review_recommended", False
+                    ),
+                    "disclaimer": source.get("disclaimer"),
+                }
+            )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "sessions.json", json.dumps(sessions_json, ensure_ascii=False, indent=2)
+        )
+        archive.writestr("turns.csv", turns_io.getvalue().encode("utf-8-sig"))
+        archive.writestr("evidence.csv", evidence_io.getvalue().encode("utf-8-sig"))
+        archive.writestr(
+            "reports.json", json.dumps(reports_json, ensure_ascii=False, indent=2)
+        )
+    return output.getvalue()
+
+
+@router.get("/admin/exports/anonymous", dependencies=[Depends(_admin_guard)])
+@router.get(
+    "/admin/exports/anonymous.zip",
+    dependencies=[Depends(_admin_guard)],
+    include_in_schema=False,
+)
+def anonymous_export(db: Session = Depends(get_db)) -> Response:
+    return Response(
+        _anonymous_zip(db),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="assessment-v6-anonymous.zip"'
+        },
+    )

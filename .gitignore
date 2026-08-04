@@ -1,0 +1,48 @@
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets and local runtime state
+.env
+.env.*
+!.env.example
+!.env.production.example
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+frontend/coverage/
+
+# Local acceptance evidence. Keep the immutable source manifest; ignore
+# transient imports, exports and browser traces.
+artifacts/*
+!artifacts/SOURCE_SNAPSHOT_MANIFEST.md
+!artifacts/source-v5/
+artifacts/source-v5/*
+!artifacts/source-v5/README.md
+backend/generated/
+.local-run/
+/data/
+/backups/
