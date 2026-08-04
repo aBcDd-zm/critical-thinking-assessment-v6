@@ -81,15 +81,15 @@ reload_shared_caddy() {
   docker exec "$CADDY_CONTAINER" test -r "$CADDYFILE_PATH" \
     || die "Caddyfile path is unreadable: ${CADDYFILE_PATH}"
 
-  # Adapt follows imports, so this confirms the running Caddy source actually
-  # contains the V6 route before it is reloaded. It never copies or overwrites
-  # the shared gateway configuration.
+  # Check the mounted source directly.  `caddy adapt` emits JSON where these
+  # literals are not guaranteed to survive verbatim, so grepping its output can
+  # reject a valid V6 route before Caddy gets a chance to validate it.
   docker exec "$CADDY_CONTAINER" sh -ceu \
-    'caddy adapt --config "$1" --adapter caddyfile 2>/dev/null | grep -Fq "$2"' \
+    'grep -Fq "$2" "$1"' \
     sh "$CADDYFILE_PATH" "cta-v6-web:8080" \
     || die "the current Caddy source has no V6 cta-v6-web route"
   docker exec "$CADDY_CONTAINER" sh -ceu \
-    'caddy adapt --config "$1" --adapter caddyfile 2>/dev/null | grep -Fq "$2"' \
+    'grep -Fq "$2" "$1"' \
     sh "$CADDYFILE_PATH" "$V6_HOSTNAME" \
     || die "the current Caddy source has no ${V6_HOSTNAME} host block"
 

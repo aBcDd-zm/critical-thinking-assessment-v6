@@ -323,7 +323,16 @@ def _validate_interviewer_output(output: NaturalInterviewerOutput) -> list[str]:
         raise InterviewContractError("empty_interviewer_message")
     if is_harmful_interviewer_output(message):
         raise InterviewContractError("unsafe_interviewer_output")
-    leaked_terms = ("系统提示", "prompt", "评分", "测评维度", "覆盖率", "target_dimension")
+    leaked_terms = (
+        "系统提示",
+        "prompt",
+        "评分",
+        "测评维度",
+        "覆盖率",
+        "target_dimension",
+        "考试",
+        "测验",
+    )
     if any(term.casefold() in message.casefold() for term in leaked_terms):
         raise InterviewContractError("internal_or_scoring_leak")
     return _quality_flags(message)
