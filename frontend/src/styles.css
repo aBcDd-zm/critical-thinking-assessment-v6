@@ -264,6 +264,101 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 .expert-row { display: grid; grid-template-columns: 110px 100px 1fr; align-items: center; gap: 12px; }
 .expert-row select, .expert-row input { padding: 10px; }
 
+/* Authenticated review console: V3.3-style structure, retained V6 palette. */
+.admin-login-page { display: grid; min-height: 100vh; place-items: center; padding: 28px; background: linear-gradient(135deg, #edf0e9 0%, var(--cream) 55%, #e6eee7 100%); }
+.admin-login-card { display: grid; width: min(450px, 100%); gap: 28px; border: 1px solid var(--line); background: rgb(255 253 248 / 94%); box-shadow: var(--shadow); padding: 42px; }
+.login-brand { align-items: flex-start; flex-direction: column; gap: 4px; width: fit-content; }
+.admin-login-card h1 { margin: 4px 0 10px; font-family: "Songti SC", "STSong", serif; font-size: 37px; font-weight: 500; letter-spacing: -.03em; }
+.admin-login-card p { margin-bottom: 0; color: var(--muted); font-size: 14px; }
+.admin-login-card form { display: grid; gap: 18px; }
+.admin-login-card form .primary-button { width: 100%; margin-top: 4px; }
+.login-boundary { border-top: 1px solid var(--line); padding-top: 18px; font-size: 12px !important; line-height: 1.65; }
+
+.admin-console { display: grid; min-height: 100vh; grid-template-columns: 252px minmax(0, 1fr); background: #f4f2ec; }
+.console-sidebar { position: sticky; top: 0; display: flex; flex-direction: column; height: 100vh; border-right: 1px solid #234d40; background: #183f35; color: #f6f5ee; padding: 30px 22px 22px; }
+.console-brand { display: inline-flex; color: inherit; text-decoration: none; }
+.console-brand span { font-family: "Songti SC", "STSong", serif; font-size: 30px; font-weight: 700; letter-spacing: .16em; }
+.console-brand small { color: #c1d6c4; font-size: 9px; font-weight: 800; letter-spacing: .14em; }
+.console-sidebar .console-brand { align-items: flex-start; flex-direction: column; gap: 5px; padding: 5px 10px 38px; }
+.console-nav { display: grid; gap: 7px; }
+.console-nav a { display: grid; grid-template-columns: 28px 1fr; align-items: center; gap: 8px; border-radius: 4px; padding: 13px 10px; color: #d5e0d7; text-decoration: none; transition: background .16s ease, color .16s ease; }
+.console-nav a b { color: #8ca999; font-size: 11px; letter-spacing: .08em; }
+.console-nav a span { font-size: 14px; font-weight: 700; }
+.console-nav a:hover, .console-nav a.router-link-active { background: #285c4c; color: #fff; }
+.console-nav a.router-link-active b { color: #bfd5c4; }
+.console-sidebar-footer { display: grid; gap: 18px; margin-top: auto; padding: 18px 10px 0; border-top: 1px solid rgb(213 224 215 / 17%); }
+.console-user-link { color: #bfd5c4; font-size: 12px; text-decoration: none; }
+.console-account { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.console-sidebar .console-account { align-items: flex-start; flex-direction: column; color: #e4ece5; }
+.console-account button { border: 0; background: transparent; padding: 2px 0; color: inherit; cursor: pointer; font-size: 12px; text-decoration: underline; text-underline-offset: 4px; }
+.console-workspace { min-width: 0; }
+.console-topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 102px; border-bottom: 1px solid var(--line); padding: 24px 48px; background: rgb(255 253 248 / 72%); }
+.console-topbar .eyebrow { margin-bottom: 6px; font-size: 10px; }
+.console-topbar h1 { margin: 0; font-family: "Songti SC", "STSong", serif; font-size: 27px; font-weight: 500; }
+.topbar-account { color: var(--ink); }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #57906d; box-shadow: 0 0 0 3px rgb(87 144 109 / 13%); }
+.console-page { width: min(1320px, calc(100% - 72px)); margin: 0 auto; padding: 42px 0 72px; }
+.console-page-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 30px; }
+.console-page-heading .eyebrow { margin-bottom: 9px; }
+.console-page-heading h2 { margin: 0 0 8px; font-family: "Songti SC", "STSong", serif; font-size: 38px; font-weight: 500; letter-spacing: -.03em; }
+.console-page-heading p { max-width: 720px; margin: 0; color: var(--muted); font-size: 14px; }
+.console-loading { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 360px; color: var(--muted); }
+.metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px; }
+.metric-grid article, .metric-card-link { display: grid; gap: 8px; min-height: 154px; border: 1px solid var(--line); background: var(--paper); padding: 23px; color: inherit; text-decoration: none; }
+.metric-grid span { color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .05em; }
+.metric-grid strong { color: var(--forest); font-family: "Songti SC", "STSong", serif; font-size: 42px; font-weight: 500; line-height: 1; }
+.metric-grid small { align-self: end; color: var(--muted); font-size: 12px; }
+.metric-card-link.priority { border-color: #c8ac84; background: #fcf6e9; }
+.metric-card-link.priority strong { color: #9a6134; }
+.dashboard-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }
+.console-panel { border: 1px solid var(--line); background: var(--paper); padding: 26px; }
+.panel-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+.panel-heading .eyebrow { margin-bottom: 7px; font-size: 10px; }
+.panel-heading h3 { margin: 0; font-family: "Songti SC", "STSong", serif; font-size: 25px; font-weight: 500; }
+.panel-heading a { color: var(--forest); font-size: 12px; font-weight: 700; text-decoration: none; white-space: nowrap; }
+.panel-heading p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.phase-list { display: grid; gap: 13px; }
+.phase-list > div { position: relative; display: grid; grid-template-columns: 1fr auto; gap: 10px; overflow: hidden; border-bottom: 1px solid #ece9e1; padding-bottom: 10px; color: var(--muted); font-size: 13px; }
+.phase-list b { color: var(--ink); }
+.phase-list i { position: absolute; bottom: -1px; left: 0; height: 2px; background: var(--forest); }
+.queue-list { display: grid; }
+.queue-list > * { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #ece9e1; padding: 11px 0; color: var(--muted); font-size: 13px; text-decoration: none; }
+.queue-list > *:last-child { border-bottom: 0; }
+.queue-list a:hover { color: var(--forest); }
+.queue-list b { color: var(--ink); font-size: 17px; }
+.empty-copy { margin: 0; color: var(--muted); font-size: 13px; }
+.health-panel { margin-bottom: 18px; }
+.health-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.health-grid span { display: grid; gap: 6px; border-left: 2px solid var(--sage); padding-left: 11px; color: var(--muted); font-size: 12px; }
+.health-grid b { color: var(--ink); font-family: "Songti SC", "STSong", serif; font-size: 25px; font-weight: 500; }
+.recent-panel { padding-bottom: 0; }
+.recent-panel .admin-table-wrap { margin: 0 -26px; border-right: 0; border-bottom: 0; border-left: 0; }
+
+/* Views kept from the original review workbench now live inside the console shell. */
+.console-workspace .admin-page { min-height: 0; background: transparent; }
+.console-workspace .admin-header { display: none; }
+.console-workspace .admin-shell { width: min(1320px, calc(100% - 72px)); margin: 0 auto; padding: 42px 0 72px; }
+.console-workspace .admin-title, .console-workspace .detail-title { margin-bottom: 30px; }
+.console-workspace .admin-title-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.console-workspace .detail-page .admin-shell { padding-top: 42px; }
+
+@media (max-width: 900px) {
+  .admin-console { grid-template-columns: 1fr; }
+  .console-sidebar { position: static; display: grid; grid-template-columns: 1fr auto; height: auto; padding: 16px 20px; }
+  .console-sidebar .console-brand { padding: 0; }
+  .console-nav { display: flex; grid-column: 1 / -1; margin-top: 16px; }
+  .console-nav a { grid-template-columns: auto 1fr; padding: 10px; }
+  /* Keep the two required actions reachable when the sidebar turns into a
+     compact mobile navigation bar. */
+  .console-sidebar-footer { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; padding: 12px 10px 0; }
+  .console-sidebar .console-account { align-items: center; flex-direction: row; }
+  .console-topbar { min-height: 84px; padding: 18px 28px; }
+  .topbar-account { display: none; }
+  .console-page, .console-workspace .admin-shell { width: calc(100% - 48px); padding-top: 30px; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .health-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
 @media (max-width: 900px) {
   .interview-layout, .review-forms { grid-template-columns: 1fr; }
   .interview-layout { gap: 10px; padding-top: 16px; }
@@ -310,6 +405,25 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
   .session-code { display: none; }
   .finalizing-card { align-items: stretch; flex-direction: column; }
   .natural-audit-row { grid-template-columns: 1fr; }
+  .admin-login-page { place-items: start center; padding: 18px; }
+  .admin-login-card { padding: 28px 22px; }
+  .admin-login-card h1 { font-size: 31px; }
+  .console-sidebar { padding: 14px; }
+  .console-sidebar .console-brand span { font-size: 24px; }
+  .console-nav { gap: 4px; }
+  .console-nav a b { display: none; }
+  .console-topbar { padding: 16px 18px; }
+  .console-topbar h1 { font-size: 23px; }
+  .topbar-account { display: none; }
+  .console-page, .console-workspace .admin-shell { width: calc(100% - 28px); padding-top: 26px; }
+  .console-page-heading { align-items: start; flex-direction: column; }
+  .console-page-heading h2 { font-size: 33px; }
+  .console-workspace .admin-title-actions { width: 100%; }
+  .console-workspace .admin-title-actions .secondary-button { flex: 1 1 160px; }
+  .metric-grid, .dashboard-columns { grid-template-columns: 1fr; }
+  .health-grid { grid-template-columns: 1fr 1fr; }
+  .console-panel { padding: 20px; }
+  .recent-panel .admin-table-wrap { margin: 0 -20px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -7,6 +7,8 @@
 
 本文件是证据模板，不预填“通过”。每项只有在写明日期、命令、输出摘要和运行环境后才可标为 `VERIFIED`。`MODEL_GATEWAY_MODE=mock`、浏览器 API Mock 和假语音只能证明本地协议闭环，不能证明真实 DeepSeek、TTS、麦克风、断网或测量自然度。
 
+> 说明：下表中 2026-08-04 的既有记录早于“管理员登录与复核看板”升级；涉及完整套件的记录在本次改动后必须重新执行，不能直接当作本版本验收证据。
+
 ## 环境与端口
 
 - 常规本地：后端 `127.0.0.1:8060`、前端 `127.0.0.1:5176`、SQLite `backend/data/v6.db`。
@@ -17,14 +19,17 @@
 
 | 项目 | 命令 | 通过标准 | 状态 |
 | --- | --- | --- | --- |
-| 后端回归 | `cd backend && .venv/bin/python -m pytest -q` | V6 状态、自然访谈、评分、幂等与安全测试通过 | VERIFIED — 2026-08-04：68 passed；`compileall` 通过 |
+| 后端回归 | `cd backend && .venv/bin/python -m pytest -q` | V6 状态、自然访谈、评分、幂等与安全测试通过 | VERIFIED — 2026-08-04：79 passed；含 Argon2id 登录、Cookie 篡改/过期、CSRF、后台接口拦截及看板脱敏断言 |
 | 新库迁移 | `make migrate`（在空 V6 SQLite） | 只生成 V6 初始结构，不导入旧会话 | VERIFIED — 2026-08-04：初始 revision `20260804_0001` 升级通过，`alembic check` clean |
-| 前端单测/类型 | `cd frontend && npm run test && npm run typecheck` | V6 路由、恢复、语音输入与报告合同通过 | VERIFIED — 2026-08-04：9 files / 22 tests；typecheck 通过 |
+| 前端单测/类型 | `cd frontend && npm run test && npm run typecheck` | V6 路由、恢复、语音输入与报告合同通过 | VERIFIED — 2026-08-04：9 files / 24 tests；typecheck 通过 |
 | 生产构建 | `cd frontend && npm run build` | 无 TypeScript/Vite 错误 | VERIFIED — 2026-08-04：通过 |
 | 页面 API Mock | `cd frontend && npm run test:e2e` | 同意、自然流、结束、报告、语音不自动提交 | VERIFIED — 2026-08-04：2 / 2 通过 |
-| 真栈 Mock | `cd frontend && npm run test:e2e:stack` | 使用 `8061/5177` 与临时库；不访问真实供应商 | VERIFIED — 2026-08-04：2 / 2 通过；Vite 5177 与 Uvicorn 8061 均已干净退出 |
-| 完整本地套件 | `make test` | 上述检查全部通过 | VERIFIED — 2026-08-04：后端 68 passed、前端 22 tests、构建通过、Mock E2E 2 / 2、真栈 E2E 2 / 2；8061/5177 已关闭 |
-| 启停与健康 | `make start && make health && make stop && make check-stopped` | `8060/5176` 可用后均无监听 | VERIFIED — 2026-08-04：Alembic 升级 `20260804_0001`，健康检查通过，两个 PID 正常停止，端口均关闭 |
+| 真栈 Mock | `cd frontend && npm run test:e2e:stack` | 使用 `8061/5177` 与临时库；不访问真实供应商 | VERIFIED — 2026-08-04：5 / 5 通过；Vite 5177 与 Uvicorn 8061 均已干净退出 |
+| 管理员后台 | `cd frontend && npm run test:e2e:stack` | 未登录拦截、登录进入看板、刷新恢复、优先复核、保存复核、匿名导出、退出后重新拦截及窄屏入口；不调用真实供应商 | VERIFIED — 2026-08-04：真栈 E2E 覆盖通过 |
+| 完整本地套件 | `make test` | 上述检查全部通过 | VERIFIED — 2026-08-04：后端 79 passed、前端 24 tests、构建通过、页面 Mock E2E 2 / 2、真栈 E2E 5 / 5；8061/5177 已关闭 |
+| 生产配置静态安全检查 | 后端生产资产测试（包含在 `make test`） | 不再注入 Basic Auth、`ADMIN_TOKEN` 或前端认证秘密；生产入口仍有后台/登录限流 | VERIFIED — 2026-08-04：生产资产与 shell 语法断言随 79 项后端测试通过 |
+| 生产 Compose/镜像构建 | `docker compose -f docker-compose.production.yml config --quiet` 与镜像构建 | Compose 配置及两张生产镜像可在无真实密钥前构建 | NOT VERIFIED — 当前本机未安装 `docker`，未执行构建或容器启动 |
+| 启停与健康 | `make start && make health && make stop && make check-stopped` | `8060/5176` 可用后均无监听 | NOT REVALIDATED — 8060/5176 已有本次改动前启动的本地进程；为避免影响现有本地 Demo，本次未停止或覆盖它 |
 
 重点断言：访谈请求中没有题库、目标维度、coverage、阶段命令或固定轮次；格式失败只修复一次并保留用户 turn；同键重放不重复写入；第 40 次后不再无限访谈；评分缺证据时为 `null`；匿名 ZIP 不含真实议题与自由文本。
 

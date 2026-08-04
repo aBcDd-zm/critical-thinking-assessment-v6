@@ -1,6 +1,7 @@
 import { ApiError, apiRequest } from "./http";
 import type {
   AdminSessionDetail,
+  DashboardOverview,
   ExpertScore,
   PagedSessions,
   ReviewStatus,
@@ -12,6 +13,8 @@ export interface SessionFilters {
   manual_review_recommended?: string;
   q?: string;
 }
+
+export const getDashboardOverview = () => apiRequest<DashboardOverview>("/admin/dashboard/overview");
 
 export async function listAdminSessions(filters: SessionFilters): Promise<PagedSessions> {
   const params = new URLSearchParams();

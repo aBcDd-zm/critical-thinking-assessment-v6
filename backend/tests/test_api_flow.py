@@ -21,6 +21,7 @@ from app.services.model_gateway import (
     NATURAL_INTERVIEWER_SYSTEM_PROMPT,
     StructuredCallResult,
 )
+from tests.conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME
 
 
 DENSE_ANSWER = (
@@ -56,6 +57,17 @@ def create_session(client, *, name: str = "测试用户") -> str:
     return payload["session"]["uuid"]
 
 
+def login_admin(client) -> dict[str, str]:
+    response = client.post(
+        "/api/v1/admin/auth/login",
+        json={"username": TEST_ADMIN_USERNAME, "password": TEST_ADMIN_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    csrf_token = client.cookies.get("cta_v6_admin_csrf")
+    assert csrf_token
+    return {"X-CSRF-Token": csrf_token}
+
+
 def send(client, session_uuid: str, content: str, client_turn_id: str = "client-turn-0001"):
     return client.post(
         f"/api/v1/sessions/{session_uuid}/turns:stream",
@@ -80,6 +92,7 @@ def test_consent_and_model_generated_opening_are_natural_only(client) -> None:
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert snapshot["user_answer_count"] == 0
     assert snapshot["turns"][0]["content"].startswith("你好，小陈。")
+    login_admin(client)
     detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     opening = detail["traces"][0]
     assert opening["action"] == "natural_opening"
@@ -229,6 +242,7 @@ def test_user_finalize_scores_only_exact_user_quotes_and_hides_confidence(client
     public_report = client.get(f"/api/v1/sessions/{session_uuid}/report")
     assert public_report.status_code == 200
     assert client.get(f"/api/v1/sessions/{session_uuid}/report.pdf").content.startswith(b"%PDF")
+    login_admin(client)
     admin_detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     assert admin_detail["evidence_items"]
     assert "confidence" in admin_detail["evidence_items"][0]
@@ -258,6 +272,7 @@ def test_short_or_self_evaluative_dialogue_leaves_dimensions_unmeasured(client) 
     assert all(item["score"] is None for item in dimensions)
     assert all(item["status"] == "limited" for item in dimensions)
     assert any("自我评价" in item["reason"] for item in dimensions)
+    login_admin(client)
     scoring_runs = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()["scoring_runs"]
     assert scoring_runs[-1]["manual_review_recommended"] is True
 
@@ -383,6 +398,7 @@ def test_failed_interviewer_call_preserves_user_turn_and_same_id_recovers(client
     assert recovered.status_code == 200
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert snapshot["user_answer_count"] == 1
+    login_admin(client)
     detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     assert any(item["category"] == "interviewer_failure" for item in detail["technical_anomalies"])
     failed_trace = next(
@@ -731,9 +747,11 @@ def test_technical_cap_and_admin_review_expert_and_anonymous_export(client) -> N
     assert capped.status_code == 409
     assert capped.json()["code"] == "technical_turn_cap_reached"
 
+    csrf_headers = login_admin(client)
     review = client.put(
         f"/api/v1/admin/sessions/{session_uuid}/review",
         json={"status": "in_review", "notes": "需要人工查看", "reviewer": "专家A"},
+        headers=csrf_headers,
     )
     assert review.status_code == 200
     scores = client.post(
@@ -742,6 +760,7 @@ def test_technical_cap_and_admin_review_expert_and_anonymous_export(client) -> N
             "reviewer": "专家A",
             "scores": [{"dimension_key": "problem_definition", "score": 4}],
         },
+        headers=csrf_headers,
     )
     assert scores.status_code == 200
     archive = client.get("/api/v1/admin/exports/anonymous")

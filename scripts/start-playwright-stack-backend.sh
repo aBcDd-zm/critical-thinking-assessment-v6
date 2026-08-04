@@ -28,7 +28,13 @@ export MODEL_GATEWAY_MODE="mock"
 export DEEPSEEK_API_KEY=""
 export TTS_MODE="fake"
 export DOUBAO_TTS_API_KEY=""
-export ADMIN_TOKEN=""
+export ADMIN_USERNAME="playwright-admin"
+export ADMIN_PASSWORD_HASH="$("$PROJECT_ROOT/backend/.venv/bin/python" - <<'PY'
+from argon2 import PasswordHasher
+print(PasswordHasher(time_cost=1, memory_cost=8_192, parallelism=1).hash("playwright-admin-password"))
+PY
+)"
+export ADMIN_JWT_SECRET="playwright-admin-jwt-secret-that-is-long-enough-for-hs256"
 export CORS_ORIGINS='["http://127.0.0.1:5177"]'
 
 cd "$PROJECT_ROOT/backend"

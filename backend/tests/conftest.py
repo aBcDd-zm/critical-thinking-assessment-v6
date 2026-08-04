@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from collections.abc import Generator
 
+from argon2 import PasswordHasher
+
 # Tests must never inherit a real database, model mode, or billable TTS key
 # from the developer shell/backend/.env.
 os.environ["DATABASE_URL"] = "sqlite:////tmp/critical-thinking-v6-pytest.db"
@@ -13,6 +15,15 @@ os.environ["TTS_MODE"] = "fake"
 os.environ["DOUBAO_TTS_API_KEY"] = ""
 os.environ["DOUBAO_TTS_RESOURCE_ID"] = "seed-tts-2.0"
 os.environ["DOUBAO_TTS_SPEAKER"] = ""
+TEST_ADMIN_USERNAME = "admin"
+TEST_ADMIN_PASSWORD = "test-admin-password"
+TEST_ADMIN_PASSWORD_HASH = PasswordHasher(
+    time_cost=1, memory_cost=8_192, parallelism=1
+).hash(TEST_ADMIN_PASSWORD)
+TEST_ADMIN_JWT_SECRET = "test-admin-jwt-secret-that-is-long-enough-for-hs256"
+os.environ["ADMIN_USERNAME"] = TEST_ADMIN_USERNAME
+os.environ["ADMIN_PASSWORD_HASH"] = TEST_ADMIN_PASSWORD_HASH
+os.environ["ADMIN_JWT_SECRET"] = TEST_ADMIN_JWT_SECRET
 
 import pytest
 from fastapi.testclient import TestClient

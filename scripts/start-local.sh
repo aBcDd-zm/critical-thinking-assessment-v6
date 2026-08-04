@@ -89,5 +89,5 @@ fi
 
 print "思衡 V6 本地实验环境已启动："
 print "  用户端 http://127.0.0.1:$FRONTEND_PORT/assessment"
-print "  复核台 http://127.0.0.1:$FRONTEND_PORT/admin"
+print "  复核台 http://127.0.0.1:$FRONTEND_PORT/admin/login"
 print "  API    http://127.0.0.1:$BACKEND_PORT/docs"

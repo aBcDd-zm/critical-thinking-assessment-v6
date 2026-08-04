@@ -129,6 +129,39 @@ export interface FinalizeResponse {
 }
 
 /** Administrative contracts stay intentionally separate from participant UI. */
+export interface AdminUser {
+  username: string;
+  display_name: string;
+}
+
+export interface DashboardRecentSession extends AdminSessionSummary {}
+
+export interface DashboardOverview {
+  measurement: {
+    total_sessions: number;
+    completed_sessions: number;
+    active_sessions: number;
+    completion_rate: number;
+    phase_counts: Record<SessionPhase, number>;
+  };
+  review_queue: {
+    pending: number;
+    in_review: number;
+    approved: number;
+    needs_followup: number;
+    manual_review_recommended: number;
+    expert_scored_sessions: number;
+  };
+  pipeline_health: {
+    reports_generated: number;
+    scoring_failures: number;
+    failed_traces: number;
+    repaired_traces: number;
+    technical_anomalies: number;
+  };
+  recent_sessions: DashboardRecentSession[];
+}
+
 export interface AgentTrace {
   id?: number | string;
   turn_index?: number;

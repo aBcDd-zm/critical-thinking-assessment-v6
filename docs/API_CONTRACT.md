@@ -61,7 +61,13 @@
 
 报告不包含数字置信度、人格判断、职业/留学排序或跨议题比较。每一维只公开 `sufficient`、`limited` 或 `unmeasured` 之一；只有充分且有可核验用户原话时接口才可带原始 1–5 分。参与者网页和 PDF 将该固定等级换算为 20–100 分的百分制呈现，并显示综合总分：它是证据充分维度的等权平均换算，证据不足维度不显示为 0 分也不计入平均；管理端仍以原始五级分复核。
 
-## 本地复核与导出
+## 管理员认证、复核与导出
+
+- `POST /admin/auth/login`：提交 `{ "username", "password" }`；成功后仅设置 8 小时、`HttpOnly` 的会话 Cookie 和可读 CSRF Cookie，生产环境同时启用 `Secure`，两者均为 `SameSite=Strict`。响应只返回管理员公开资料，不返回访问令牌。
+- `GET /admin/auth/me`：恢复当前管理员资料；未登录返回 `401 admin_unauthorized`。
+- `POST /admin/auth/logout`：清除会话 Cookie；需携带当前会话和 `X-CSRF-Token`。
+- 除登录外，所有 `/admin/*` 接口均要求会话 Cookie；`POST`、`PUT`、`PATCH` 等写操作还必须以 `X-CSRF-Token` 回传 CSRF Cookie。认证失败为 401，CSRF 不匹配为 403。
+- `GET /admin/dashboard/overview`：返回会话状态聚合、复核待办、链路健康计数和最多 8 条会话摘要；绝不返回逐字稿、证据原话、复核备注、模型原始输出或未校准置信度。
 
 - `GET /admin/sessions`：可按状态、人工复核状态、`manual_review_recommended` 与搜索词筛选。
 - `GET /admin/sessions/{uuid}`：完整对话、逐轮时长、模型/Prompt 版本、调用和修复记录、transcript 指纹、评分运行、逐字证据、质量/安全状态、人工复核与专家评分。

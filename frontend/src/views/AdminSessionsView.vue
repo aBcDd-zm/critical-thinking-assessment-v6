@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
+import { onMounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { downloadBlob } from "@/api/http";
 import { getAnonymousExport, importExpertScores, listAdminSessions } from "@/api/admin";
 import type { AdminSessionSummary } from "@/types/contracts";
@@ -12,6 +13,8 @@ const busy = ref(false);
 const message = ref("");
 const error = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
+const route = useRoute();
+const router = useRouter();
 
 const phaseLabel: Record<string, string> = {
   interviewing: "访谈中",
@@ -39,6 +42,25 @@ async function load() {
   } finally {
     loading.value = false;
   }
+}
+
+function applyRouteFilters() {
+  filters.phase = typeof route.query.phase === "string" ? route.query.phase : "";
+  filters.review_status = typeof route.query.review_status === "string" ? route.query.review_status : "";
+  filters.manual_review_recommended = typeof route.query.manual_review_recommended === "string" ? route.query.manual_review_recommended : "";
+  filters.q = typeof route.query.q === "string" ? route.query.q : "";
+}
+
+async function submitFilters() {
+  const query = Object.fromEntries(Object.entries(filters).filter(([, value]) => Boolean(value)));
+  // Route-driven quick filters (from the overview) and this form share one
+  // source of truth.  A changed URL is loaded by the watcher; submitting the
+  // unchanged URL still refreshes the list explicitly.
+  if (router.resolve({ query }).fullPath === route.fullPath) {
+    await load();
+    return;
+  }
+  await router.replace({ query });
 }
 
 async function exportAnonymous() {
@@ -74,7 +96,15 @@ function formatDate(value?: string) {
   return value ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
 }
 
-onMounted(load);
+watch(() => route.fullPath, async () => {
+  applyRouteFilters();
+  await load();
+});
+
+onMounted(() => {
+  applyRouteFilters();
+  void load();
+});
 </script>
 
 <template>
@@ -84,9 +114,9 @@ onMounted(load);
       <div><span class="local-trust-badge">仅限本地可信环境</span><RouterLink class="quiet-link" to="/assessment">用户端</RouterLink><button class="secondary-button small" :disabled="busy" @click="exportAnonymous">匿名导出</button></div>
     </header>
     <section class="admin-shell">
-      <div class="admin-title"><div><span class="eyebrow">V6 NATURAL INTERVIEW REVIEW</span><h1>自然访谈与证据复核</h1><p>完整对话只在本地可信复核环境中查看；匿名导出默认排除自由文本。</p></div><button class="secondary-button" :disabled="busy" @click="fileInput?.click()">导入专家评分 CSV</button><input ref="fileInput" type="file" accept=".csv,text/csv" hidden @change="importCsv" /></div>
+      <div class="admin-title"><div><span class="eyebrow">V6 NATURAL INTERVIEW REVIEW</span><h1>自然访谈与证据复核</h1><p>完整对话只在本地可信复核环境中查看；匿名导出默认排除自由文本。</p></div><div class="admin-title-actions"><button class="secondary-button" :disabled="busy" @click="exportAnonymous">匿名导出</button><button class="secondary-button" :disabled="busy" @click="fileInput?.click()">导入专家评分 CSV</button><input ref="fileInput" type="file" accept=".csv,text/csv" hidden @change="importCsv" /></div></div>
 
-      <form class="filter-bar" @submit.prevent="load">
+      <form class="filter-bar" @submit.prevent="submitFilters">
         <label><span>搜索</span><input v-model="filters.q" placeholder="会话编号或参与者称呼" /></label>
         <label><span>状态</span><select v-model="filters.phase"><option value="">全部</option><option v-for="(label, key) in phaseLabel" :key="key" :value="key">{{ label }}</option></select></label>
         <label><span>复核状态</span><select v-model="filters.review_status"><option value="">全部</option><option v-for="(label, key) in reviewLabel" :key="key" :value="key">{{ label }}</option></select></label>

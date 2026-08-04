@@ -7,17 +7,21 @@ import io
 import json
 import secrets
 import zipfile
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, UploadFile
+import jwt
+from argon2 import PasswordHasher
+from fastapi import APIRouter, Body, Cookie, Depends, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
-from sqlalchemy import or_, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -25,6 +29,7 @@ from app.core.database import get_db
 from app.domain.catalog import DIMENSION_BY_KEY
 from app.models import (
     AgentTrace,
+    AssessmentReport,
     AssessmentSession,
     DialogueTurn,
     EvidenceItem,
@@ -35,6 +40,7 @@ from app.models import (
     utcnow,
 )
 from app.schemas import (
+    AdminLoginRequest,
     CreateSessionRequest,
     ExitRequest,
     ExpertScoresRequest,
@@ -63,6 +69,20 @@ _PUBLIC_DIMENSION_SUGGESTIONS = {
     "dynamic_adjustment": "继续提前写下会触发调整的信号和下一步行动。",
 }
 
+_ADMIN_SESSION_COOKIE = "admin_session"
+_ADMIN_CSRF_COOKIE = "cta_v6_admin_csrf"
+_ADMIN_SESSION_COOKIE_PATH = "/api/v1/admin"
+_ADMIN_CSRF_COOKIE_PATH = "/"
+_ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
+_CSRF_HEADER_NAME = "X-CSRF-Token"
+_password_hasher = PasswordHasher()
+
+
+@dataclass(frozen=True)
+class AdminIdentity:
+    username: str
+    display_name: str
+
 
 def _service_error(exc: ServiceError) -> JSONResponse:
     return JSONResponse(
@@ -71,9 +91,156 @@ def _service_error(exc: ServiceError) -> JSONResponse:
     )
 
 
-def _admin_guard(x_admin_token: Optional[str] = Header(default=None)) -> None:
-    if settings.admin_token and x_admin_token != settings.admin_token:
-        raise HTTPException(status_code=401, detail={"code": "admin_unauthorized"})
+def _admin_auth_configuration() -> tuple[str, str, str]:
+    """Return the configured single-admin credentials or fail closed."""
+
+    username = settings.admin_username.strip()
+    password_hash = settings.admin_password_hash.strip()
+    jwt_secret = settings.admin_jwt_secret.strip()
+    if (
+        not username
+        or not password_hash.startswith("$argon2id$")
+        or len(jwt_secret) < 32
+    ):
+        raise HTTPException(status_code=503, detail={"code": "admin_auth_unavailable"})
+    return username, password_hash, jwt_secret
+
+
+def _admin_unauthorized() -> None:
+    raise HTTPException(status_code=401, detail={"code": "admin_unauthorized"})
+
+
+def _require_admin(
+    admin_session: Optional[str] = Cookie(default=None, alias=_ADMIN_SESSION_COOKIE),
+) -> AdminIdentity:
+    username, _password_hash, jwt_secret = _admin_auth_configuration()
+    if not admin_session:
+        _admin_unauthorized()
+    try:
+        claims = jwt.decode(
+            admin_session,
+            jwt_secret,
+            algorithms=["HS256"],
+            options={"require": ["exp", "iat", "sub"]},
+        )
+    except jwt.PyJWTError:
+        _admin_unauthorized()
+
+    token_username = claims.get("sub")
+    display_name = claims.get("display_name")
+    if (
+        claims.get("scope") != "v6_admin"
+        or not isinstance(token_username, str)
+        or token_username != username
+        or not isinstance(display_name, str)
+        or not display_name.strip()
+    ):
+        _admin_unauthorized()
+    return AdminIdentity(username=username, display_name=display_name.strip())
+
+
+def _require_csrf(
+    x_csrf_token: Optional[str] = Header(default=None, alias=_CSRF_HEADER_NAME),
+    admin_csrf: Optional[str] = Cookie(default=None, alias=_ADMIN_CSRF_COOKIE),
+) -> None:
+    if not x_csrf_token or not admin_csrf or not secrets.compare_digest(x_csrf_token, admin_csrf):
+        raise HTTPException(status_code=403, detail={"code": "admin_csrf_invalid"})
+
+
+def _set_admin_cookies(response: Response, *, session_token: str, csrf_token: str) -> None:
+    secure = settings.app_env == "production"
+    response.set_cookie(
+        key=_ADMIN_SESSION_COOKIE,
+        value=session_token,
+        max_age=_ADMIN_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        path=_ADMIN_SESSION_COOKIE_PATH,
+    )
+    response.set_cookie(
+        key=_ADMIN_CSRF_COOKIE,
+        value=csrf_token,
+        max_age=_ADMIN_SESSION_TTL_SECONDS,
+        httponly=False,
+        secure=secure,
+        samesite="strict",
+        # JavaScript running at /admin needs to read this double-submit token.
+        # The authenticated session itself remains restricted to management API
+        # paths above.
+        path=_ADMIN_CSRF_COOKIE_PATH,
+    )
+
+
+def _clear_admin_cookies(response: Response) -> None:
+    secure = settings.app_env == "production"
+    for cookie_name, httponly, path in (
+        (_ADMIN_SESSION_COOKIE, True, _ADMIN_SESSION_COOKIE_PATH),
+        (_ADMIN_CSRF_COOKIE, False, _ADMIN_CSRF_COOKIE_PATH),
+    ):
+        response.delete_cookie(
+            key=cookie_name,
+            path=path,
+            secure=secure,
+            httponly=httponly,
+            samesite="strict",
+        )
+
+
+def _effective_reviewer(requested_reviewer: Optional[str], identity: AdminIdentity) -> str:
+    """Keep explicit historical/external labels while defaulting manual work safely."""
+
+    return (requested_reviewer or "").strip() or identity.display_name
+
+
+@router.post("/admin/auth/login")
+def admin_login(request: AdminLoginRequest, response: Response) -> dict[str, Any]:
+    username, password_hash, jwt_secret = _admin_auth_configuration()
+    try:
+        password_valid = _password_hasher.verify(password_hash, request.password)
+    except Exception:
+        # Treat malformed or mismatched values identically so this endpoint
+        # cannot be used as a credential/configuration oracle.
+        password_valid = False
+    if request.username.strip() != username or not password_valid:
+        _admin_unauthorized()
+
+    now = datetime.now(timezone.utc)
+    identity = AdminIdentity(username=username, display_name=username)
+    session_token = jwt.encode(
+        {
+            "sub": identity.username,
+            "display_name": identity.display_name,
+            "scope": "v6_admin",
+            "iat": now,
+            "exp": now + timedelta(seconds=_ADMIN_SESSION_TTL_SECONDS),
+            "jti": secrets.token_urlsafe(16),
+        },
+        jwt_secret,
+        algorithm="HS256",
+    )
+    _set_admin_cookies(
+        response,
+        session_token=session_token,
+        csrf_token=secrets.token_urlsafe(32),
+    )
+    return {"user": {"username": identity.username, "display_name": identity.display_name}}
+
+
+@router.get("/admin/auth/me")
+def admin_me(identity: AdminIdentity = Depends(_require_admin)) -> dict[str, Any]:
+    return {"user": {"username": identity.username, "display_name": identity.display_name}}
+
+
+@router.post("/admin/auth/logout", status_code=204)
+def admin_logout(
+    response: Response,
+    _identity: AdminIdentity = Depends(_require_admin),
+    _csrf: None = Depends(_require_csrf),
+) -> Response:
+    _clear_admin_cookies(response)
+    response.status_code = 204
+    return response
 
 
 @router.get("/health")
@@ -375,7 +542,112 @@ async def speech(
         return _service_error(exc)
 
 
-@router.get("/admin/sessions", dependencies=[Depends(_admin_guard)])
+def _count_rows(db: Session, statement: Any) -> int:
+    return int(db.scalar(statement) or 0)
+
+
+@router.get("/admin/dashboard/overview", dependencies=[Depends(_require_admin)])
+def admin_dashboard_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Return only aggregate operational data needed by the review landing page.
+
+    The dashboard intentionally omits dialogue text, evidence quotations, review
+    notes, raw model payloads, and calibration confidence values.  Those remain
+    available only in the authenticated, per-session review screen.
+    """
+
+    known_phases = (
+        "interviewing",
+        "finalizing",
+        "completed",
+        "exited",
+        "safety_stopped",
+    )
+    phase_counts = {phase: 0 for phase in known_phases}
+    for phase, count in db.execute(
+        select(AssessmentSession.phase, func.count(AssessmentSession.id)).group_by(
+            AssessmentSession.phase
+        )
+    ):
+        phase_counts[str(phase)] = int(count)
+
+    review_counts = {
+        "pending": 0,
+        "in_review": 0,
+        "approved": 0,
+        "needs_followup": 0,
+    }
+    review_status = func.coalesce(HumanReview.status, "pending")
+    for status, count in db.execute(
+        select(review_status, func.count(AssessmentSession.id))
+        .select_from(AssessmentSession)
+        .outerjoin(HumanReview)
+        .group_by(review_status)
+    ):
+        review_counts[str(status)] = int(count)
+
+    total = sum(phase_counts.values())
+    recent_rows = db.execute(
+        select(AssessmentSession, HumanReview.status)
+        .outerjoin(HumanReview)
+        .order_by(AssessmentSession.updated_at.desc())
+        .limit(8)
+    ).all()
+    return {
+        "measurement": {
+            "total_sessions": total,
+            "completed_sessions": phase_counts["completed"],
+            "active_sessions": phase_counts["interviewing"] + phase_counts["finalizing"],
+            "completion_rate": round(phase_counts["completed"] / total, 4) if total else 0,
+            "phase_counts": phase_counts,
+        },
+        "review_queue": {
+            **review_counts,
+            "manual_review_recommended": _count_rows(
+                db,
+                select(func.count(AssessmentSession.id)).where(
+                    AssessmentSession.manual_review_recommended.is_(True)
+                ),
+            ),
+            "expert_scored_sessions": _count_rows(
+                db, select(func.count(func.distinct(ExpertScore.session_id)))
+            ),
+        },
+        "pipeline_health": {
+            "reports_generated": _count_rows(db, select(func.count(AssessmentReport.id))),
+            "scoring_failures": _count_rows(
+                db,
+                select(func.count(ScoringRun.id)).where(ScoringRun.status == "failed"),
+            ),
+            "failed_traces": _count_rows(
+                db,
+                select(func.count(AgentTrace.id)).where(
+                    AgentTrace.renderer_status == "failed"
+                ),
+            ),
+            "repaired_traces": _count_rows(
+                db,
+                select(func.count(AgentTrace.id)).where(AgentTrace.repair_used.is_(True)),
+            ),
+            "technical_anomalies": _count_rows(
+                db, select(func.count(TechnicalAnomaly.id))
+            ),
+        },
+        "recent_sessions": [
+            {
+                "uuid": session.uuid,
+                "display_name": session.display_name,
+                "phase": session.phase,
+                "user_answer_count": session.user_answer_count,
+                "manual_review_recommended": session.manual_review_recommended,
+                "review_status": status or "pending",
+                "updated_at": session.updated_at.isoformat(),
+            }
+            for session, status in recent_rows
+        ],
+    }
+
+
+@router.get("/admin/sessions", dependencies=[Depends(_require_admin)])
 def admin_sessions(
     phase: Optional[str] = None,
     review_status: Optional[str] = None,
@@ -388,7 +660,9 @@ def admin_sessions(
     if phase:
         stmt = stmt.where(AssessmentSession.phase == phase)
     if review_status:
-        stmt = stmt.where(HumanReview.status == review_status)
+        # Historical rows created before review records existed are still
+        # actionable pending sessions, not invisible data.
+        stmt = stmt.where(func.coalesce(HumanReview.status, "pending") == review_status)
     if manual_review_recommended is not None:
         stmt = stmt.where(
             AssessmentSession.manual_review_recommended == manual_review_recommended
@@ -423,7 +697,7 @@ def admin_sessions(
     }
 
 
-@router.get("/admin/sessions/{session_uuid}", dependencies=[Depends(_admin_guard)])
+@router.get("/admin/sessions/{session_uuid}", dependencies=[Depends(_require_admin)])
 def admin_session_detail(
     session_uuid: str, db: Session = Depends(get_db)
 ) -> Any:
@@ -519,7 +793,7 @@ def admin_session_detail(
 
 
 def _update_review(
-    session_uuid: str, request: ReviewRequest, db: Session
+    session_uuid: str, request: ReviewRequest, db: Session, *, reviewer: str
 ) -> Any:
     try:
         session = sessions.get(db, session_uuid)
@@ -530,7 +804,7 @@ def _update_review(
         review.status = request.status
         review.decision = request.decision
         review.notes = request.notes
-        review.reviewer = request.reviewer
+        review.reviewer = reviewer
         review.reviewed_at = utcnow()
         db.commit()
         return {
@@ -544,22 +818,44 @@ def _update_review(
         return _service_error(exc)
 
 
-@router.put("/admin/sessions/{session_uuid}/review", dependencies=[Depends(_admin_guard)])
+@router.put(
+    "/admin/sessions/{session_uuid}/review",
+    dependencies=[Depends(_require_admin), Depends(_require_csrf)],
+)
 def put_review(
-    session_uuid: str, request: ReviewRequest, db: Session = Depends(get_db)
+    session_uuid: str,
+    request: ReviewRequest,
+    db: Session = Depends(get_db),
+    identity: AdminIdentity = Depends(_require_admin),
 ) -> Any:
-    return _update_review(session_uuid, request, db)
+    return _update_review(
+        session_uuid,
+        request,
+        db,
+        reviewer=_effective_reviewer(request.reviewer, identity),
+    )
 
 
-@router.patch("/admin/sessions/{session_uuid}/review", dependencies=[Depends(_admin_guard)])
+@router.patch(
+    "/admin/sessions/{session_uuid}/review",
+    dependencies=[Depends(_require_admin), Depends(_require_csrf)],
+)
 def patch_review(
-    session_uuid: str, request: ReviewRequest, db: Session = Depends(get_db)
+    session_uuid: str,
+    request: ReviewRequest,
+    db: Session = Depends(get_db),
+    identity: AdminIdentity = Depends(_require_admin),
 ) -> Any:
-    return _update_review(session_uuid, request, db)
+    return _update_review(
+        session_uuid,
+        request,
+        db,
+        reviewer=_effective_reviewer(request.reviewer, identity),
+    )
 
 
 def _save_expert_scores(
-    session_uuid: str, request: ExpertScoresRequest, db: Session
+    session_uuid: str, request: ExpertScoresRequest, db: Session, *, reviewer: str
 ) -> Any:
     try:
         session = sessions.get(db, session_uuid)
@@ -575,14 +871,14 @@ def _save_expert_scores(
                 select(ExpertScore).where(
                     ExpertScore.session_id == session.id,
                     ExpertScore.dimension_key == item.dimension_key,
-                    ExpertScore.reviewer == request.reviewer,
+                    ExpertScore.reviewer == reviewer,
                 )
             )
             if not record:
                 record = ExpertScore(
                     session_id=session.id,
                     dimension_key=item.dimension_key,
-                    reviewer=request.reviewer,
+                    reviewer=reviewer,
                     score=item.score,
                 )
                 db.add(record)
@@ -596,30 +892,51 @@ def _save_expert_scores(
                 }
             )
         db.commit()
-        return {"saved": saved, "reviewer": request.reviewer}
+        return {"saved": saved, "reviewer": reviewer}
     except ServiceError as exc:
         return _service_error(exc)
 
 
 @router.put(
-    "/admin/sessions/{session_uuid}/expert-scores", dependencies=[Depends(_admin_guard)]
+    "/admin/sessions/{session_uuid}/expert-scores",
+    dependencies=[Depends(_require_admin), Depends(_require_csrf)],
 )
 def put_expert_scores(
-    session_uuid: str, request: ExpertScoresRequest, db: Session = Depends(get_db)
+    session_uuid: str,
+    request: ExpertScoresRequest,
+    db: Session = Depends(get_db),
+    identity: AdminIdentity = Depends(_require_admin),
 ) -> Any:
-    return _save_expert_scores(session_uuid, request, db)
+    return _save_expert_scores(
+        session_uuid,
+        request,
+        db,
+        reviewer=_effective_reviewer(request.reviewer, identity),
+    )
 
 
 @router.post(
-    "/admin/sessions/{session_uuid}/expert-scores", dependencies=[Depends(_admin_guard)]
+    "/admin/sessions/{session_uuid}/expert-scores",
+    dependencies=[Depends(_require_admin), Depends(_require_csrf)],
 )
 def post_expert_scores(
-    session_uuid: str, request: ExpertScoresRequest, db: Session = Depends(get_db)
+    session_uuid: str,
+    request: ExpertScoresRequest,
+    db: Session = Depends(get_db),
+    identity: AdminIdentity = Depends(_require_admin),
 ) -> Any:
-    return _save_expert_scores(session_uuid, request, db)
+    return _save_expert_scores(
+        session_uuid,
+        request,
+        db,
+        reviewer=_effective_reviewer(request.reviewer, identity),
+    )
 
 
-@router.post("/admin/expert-scores:import", dependencies=[Depends(_admin_guard)])
+@router.post(
+    "/admin/expert-scores:import",
+    dependencies=[Depends(_require_admin), Depends(_require_csrf)],
+)
 async def import_expert_scores(
     file: UploadFile = File(...), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
@@ -781,10 +1098,10 @@ def _anonymous_zip(db: Session) -> bytes:
     return output.getvalue()
 
 
-@router.get("/admin/exports/anonymous", dependencies=[Depends(_admin_guard)])
+@router.get("/admin/exports/anonymous", dependencies=[Depends(_require_admin)])
 @router.get(
     "/admin/exports/anonymous.zip",
-    dependencies=[Depends(_admin_guard)],
+    dependencies=[Depends(_require_admin)],
     include_in_schema=False,
 )
 def anonymous_export(db: Session = Depends(get_db)) -> Response:

@@ -34,9 +34,9 @@ make stop
 make check-stopped
 ```
 
-本地用户端为 <http://127.0.0.1:5176/assessment>，复核台为 <http://127.0.0.1:5176/admin>，后端健康检查为 <http://127.0.0.1:8060/api/v1/health>。真实 Vue → FastAPI 联调测试固定使用临时端口 `5177/8061` 与临时 SQLite，且必须显式设为 Mock 模式；它不能读取、打印或调用真实供应商凭据。
+本地用户端为 <http://127.0.0.1:5176/assessment>，管理员登录页为 <http://127.0.0.1:5176/admin/login>，后端健康检查为 <http://127.0.0.1:8060/api/v1/health>。真实 Vue → FastAPI 联调测试固定使用临时端口 `5177/8061` 与临时 SQLite，且必须显式设为 Mock 模式；它不能读取、打印或调用真实供应商凭据。
 
-首次使用时，将 `backend/.env.example` 复制为只保存在本机的 `backend/.env`，再按实际需要配置模型和语音。默认 `MODEL_GATEWAY_MODE=real`；缺少 DeepSeek 密钥时开场/访谈会明确失败，不会悄悄改用 Mock 或关键词报告。`make start` 默认固定使用 `deepseek-v4-flash`，避免继承其他项目终端中的 `DEEPSEEK_MODEL`；如需仅为 V6 显式覆盖，可设置 `V6_DEEPSEEK_MODEL`。自动化测试必须显式设置 `MODEL_GATEWAY_MODE=mock` 和 `TTS_MODE=fake`。密钥不得写入 Git、文档、日志、截图或聊天记录。Mock 通过仅说明协议、存储和恢复路径可重复；真实 DeepSeek、TTS、麦克风与断网恢复仍须按 [本地验收清单](LOCAL_ACCEPTANCE.md) 单独记录。
+首次使用时，将 `backend/.env.example` 复制为只保存在本机的 `backend/.env`，再按实际需要配置模型和语音。管理员后台也必须设置 `ADMIN_USERNAME`、`ADMIN_PASSWORD_HASH` 和至少 32 位的 `ADMIN_JWT_SECRET`；运行 `make admin-password-hash` 会在可信终端交互式生成 Argon2id 哈希，明文密码不会写入文件。需要重置密码时，在服务器本地再次运行同一命令，并替换环境中的哈希后重启后端。登录态只保存在 8 小时的 HttpOnly Cookie 中（生产环境为 Secure、SameSite=Strict），前端不保存令牌或密码。默认 `MODEL_GATEWAY_MODE=real`；缺少 DeepSeek 密钥时开场/访谈会明确失败，不会悄悄改用 Mock 或关键词报告。`make start` 默认固定使用 `deepseek-v4-flash`，避免继承其他项目终端中的 `DEEPSEEK_MODEL`；如需仅为 V6 显式覆盖，可设置 `V6_DEEPSEEK_MODEL`。自动化测试必须显式设置 `MODEL_GATEWAY_MODE=mock` 和 `TTS_MODE=fake`。密钥不得写入 Git、文档、日志、截图或聊天记录。Mock 通过仅说明协议、存储和恢复路径可重复；真实 DeepSeek、TTS、麦克风与断网恢复仍须按 [本地验收清单](LOCAL_ACCEPTANCE.md) 单独记录。
 
 ## 用户体验合同
 

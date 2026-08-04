@@ -35,7 +35,12 @@ class Settings(BaseSettings):
     )
     doubao_tts_timeout_seconds: float = 25.0
     doubao_tts_max_attempts: int = 2
-    admin_token: str = ""
+    # The V6 review console has one deliberately small administrator surface.
+    # Keep credentials in deployment environment variables; neither the
+    # plaintext password nor an API token belongs in the frontend bundle.
+    admin_username: str = ""
+    admin_password_hash: str = ""
+    admin_jwt_secret: str = ""
     cors_origins: list[str] = ["http://127.0.0.1:5176", "http://localhost:5176"]
 
     @field_validator("cors_origins", mode="before")
@@ -57,8 +62,12 @@ class Settings(BaseSettings):
             violations.append("MODEL_GATEWAY_MODE must be real")
         if not self.deepseek_api_key.strip():
             violations.append("DEEPSEEK_API_KEY must be non-empty")
-        if not self.admin_token.strip():
-            violations.append("ADMIN_TOKEN must be non-empty")
+        if not self.admin_username.strip():
+            violations.append("ADMIN_USERNAME must be non-empty")
+        if not self.admin_password_hash.strip().startswith("$argon2id$"):
+            violations.append("ADMIN_PASSWORD_HASH must be an Argon2id hash")
+        if len(self.admin_jwt_secret.strip()) < 32:
+            violations.append("ADMIN_JWT_SECRET must be at least 32 characters")
         if self.tts_mode.strip().lower() == "fake":
             violations.append("TTS_MODE must not be fake")
         if violations:

@@ -2,7 +2,7 @@ SHELL := /bin/zsh
 PYTHON := backend/.venv/bin/python
 PIP := backend/.venv/bin/pip
 
-.PHONY: setup setup-backend setup-frontend migrate test test-backend test-frontend test-e2e test-e2e-stack build start health stop check-stopped local-info
+.PHONY: setup setup-backend setup-frontend migrate test test-backend test-frontend test-e2e test-e2e-stack build start health stop check-stopped local-info admin-password-hash
 
 setup: setup-backend setup-frontend
 
@@ -48,3 +48,6 @@ check-stopped:
 
 local-info:
 	@print "思衡 V6 仅限本地实验：后端 8060，前端 5176；联调临时端口 8061 / 5177。"
+
+admin-password-hash:
+	cd backend && .venv/bin/python scripts/generate_admin_password_hash.py

@@ -24,3 +24,36 @@ describe("absoluteApiUrl", () => {
     );
   });
 });
+
+describe("administrator API transport", () => {
+  afterEach(() => {
+    document.cookie = "cta_v6_admin_csrf=; Max-Age=0; path=/";
+  });
+
+  it("sends the readable CSRF nonce and credentials for unsafe protected admin requests", async () => {
+    document.cookie = "cta_v6_admin_csrf=csrf-test-value; path=/";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ review_status: "approved" }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const { apiRequest } = await import("./http");
+
+    await apiRequest("/admin/sessions/demo/review", { method: "PUT", body: JSON.stringify({ status: "approved" }) });
+
+    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(options.credentials).toBe("include");
+    expect(new Headers(options.headers).get("X-CSRF-Token")).toBe("csrf-test-value");
+  });
+
+  it("does not require a CSRF nonce to create a login session", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ user: { username: "teacher", display_name: "教师" } }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const { apiRequest } = await import("./http");
+
+    await apiRequest("/admin/auth/login", { method: "POST", body: JSON.stringify({ username: "teacher", password: "secret" }) });
+
+    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(options.credentials).toBe("include");
+    expect(new Headers(options.headers).get("X-CSRF-Token")).toBeNull();
+  });
+});

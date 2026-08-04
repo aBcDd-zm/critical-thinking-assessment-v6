@@ -120,3 +120,82 @@ test("真实栈中可以在任意时刻主动结束并生成报告", async ({ pa
   await page.getByRole("button", { name: "结束并生成报告" }).click();
   await expect(page).toHaveURL(/\/assessment\/report\/[0-9a-f-]+$/);
 });
+
+test("真实栈管理员登录后可进入复核概览并安全退出", async ({ page }) => {
+  await page.goto("/admin/dashboard");
+  await expect(page).toHaveURL(/\/admin\/login/);
+  await page.getByLabel("管理员账号").fill("playwright-admin");
+  await page.getByLabel("密码").fill("playwright-admin-password");
+  await page.getByRole("button", { name: "登录后台" }).click();
+  await expect(page).toHaveURL(/\/admin\/dashboard$/);
+  await expect(page.getByRole("heading", { name: "复核概览" })).toBeVisible();
+  await page.reload();
+  await expect(page).toHaveURL(/\/admin\/dashboard$/);
+  await expect(page.getByRole("heading", { name: "复核概览" })).toBeVisible();
+  await expect(page.getByText("数据概览", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "退出", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/login$/);
+  await page.goto("/admin/sessions");
+  await expect(page).toHaveURL(/\/admin\/login/);
+});
+
+test("管理员可从优先复核进入详情、保存复核并导出匿名数据", async ({ page }) => {
+  await page.goto("/assessment");
+  const sessionUuid = await page.evaluate(async (apiBaseUrl) => {
+    const created = await fetch(`${apiBaseUrl}/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        consent_version: "v6.0.0",
+        consent_given: true,
+        participant: { display_name: "优先复核验收", identity_type: "student" },
+      }),
+    });
+    if (!created.ok) throw new Error(`create failed: ${created.status}`);
+    const uuid = (await created.json()).session.uuid as string;
+    const finalized = await fetch(`${apiBaseUrl}/sessions/${uuid}/finalize`, { method: "POST" });
+    if (!finalized.ok) throw new Error(`finalize failed: ${finalized.status}`);
+    return uuid;
+  }, API_BASE_URL);
+
+  await page.goto("/admin/login");
+  await page.getByLabel("管理员账号").fill("playwright-admin");
+  await page.getByLabel("密码").fill("playwright-admin-password");
+  await page.getByRole("button", { name: "登录后台" }).click();
+  await expect(page.getByRole("link", { name: /优先复核/ })).toContainText("优先复核");
+  await page.getByRole("link", { name: /优先复核/ }).click();
+  await expect(page).toHaveURL(/\/admin\/sessions\?manual_review_recommended=true$/);
+
+  const sessionRow = page.locator("tr").filter({ hasText: "优先复核验收" });
+  await expect(sessionRow).toContainText(sessionUuid.slice(0, 8));
+  await sessionRow.getByRole("link", { name: /打开复核/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/admin/sessions/${sessionUuid}$`));
+  await page.getByRole("button", { name: "人工复核" }).click();
+  await expect(page.getByLabel("复核人")).toHaveValue("playwright-admin");
+  await page.getByLabel("复核状态").selectOption("in_review");
+  await page.getByLabel("复核备注").fill("端到端复核保存验证");
+  await page.getByRole("button", { name: "保存复核" }).click();
+  await expect(page.getByText("人工复核状态已保存。")).toBeVisible();
+
+  await page.goBack();
+  await expect(page).toHaveURL(/\/admin\/sessions\?manual_review_recommended=true$/);
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "匿名导出" }).click();
+  expect((await download).suggestedFilename()).toBe("v6-anonymous-export.zip");
+
+  await page.getByRole("button", { name: "退出", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/login$/);
+  await page.goto(`/admin/sessions/${sessionUuid}`);
+  await expect(page).toHaveURL(/\/admin\/login/);
+});
+
+test("窄屏后台仍保留用户端与退出入口", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/admin/login");
+  await page.getByLabel("管理员账号").fill("playwright-admin");
+  await page.getByLabel("密码").fill("playwright-admin-password");
+  await page.getByRole("button", { name: "登录后台" }).click();
+  await expect(page.getByRole("link", { name: /打开用户端/ })).toBeVisible();
+  await page.getByRole("button", { name: "退出登录", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/login$/);
+});

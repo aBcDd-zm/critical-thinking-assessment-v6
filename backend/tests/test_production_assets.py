@@ -26,9 +26,9 @@ def test_production_compose_isolates_v6_and_uses_the_shared_gateway_network() ->
     assert "read_only: true" in compose
     assert "healthcheck:" in compose
     assert "DEEPSEEK_API_KEY" not in frontend_service
-    assert "ADMIN_TOKEN" in frontend_service
-    assert "SITE_BASIC_USER" in frontend_service
-    assert "SITE_BASIC_PASSWORD" in frontend_service
+    assert "ADMIN_TOKEN" not in frontend_service
+    assert "SITE_BASIC_USER" not in frontend_service
+    assert "SITE_BASIC_PASSWORD" not in frontend_service
 
 
 def test_nginx_keeps_admin_review_protected_and_streaming_unbuffered() -> None:
@@ -36,11 +36,12 @@ def test_nginx_keeps_admin_review_protected_and_streaming_unbuffered() -> None:
     frontend_dockerfile = _text("frontend/Dockerfile")
     frontend_http = _text("frontend/src/api/http.ts")
 
-    assert 'auth_basic "思衡 V6 后台";' in nginx
-    assert "auth_basic_user_file /etc/nginx/auth/admin.htpasswd;" in nginx
-    assert '${ADMIN_TOKEN}' in nginx
+    assert "auth_basic" not in nginx
+    assert '${ADMIN_TOKEN}' not in nginx
+    assert "X-Admin-Token" not in nginx
     assert "location ^~ /api/v1/admin" in nginx
-    assert "location = /admin" in nginx
+    assert "location = /api/v1/admin/auth/login" in nginx
+    assert "limit_req zone=admin_login" in nginx
     assert "location = /api/v1/health" in nginx
     assert "location = /api/v1/health/db" in nginx
     assert "return 404;" in nginx
@@ -50,11 +51,13 @@ def test_nginx_keeps_admin_review_protected_and_streaming_unbuffered() -> None:
     assert "proxy_request_buffering off" in nginx
     assert "limit_req zone=turn_submit" in nginx
     assert "ARG VITE_API_BASE_URL=/api/v1" in frontend_dockerfile
+    assert 'credentials: "include"' in frontend_http
     assert "ADMIN_TOKEN" not in frontend_http
+    assert "admin_token" not in frontend_http
     assert "client_body_temp_path /tmp/nginx/client" in nginx
     assert "10-runtime-dirs.sh" in frontend_dockerfile
-    assert "10-admin-basic-auth.sh" in frontend_dockerfile
-    assert "apache2-utils" in frontend_dockerfile
+    assert "10-admin-basic-auth.sh" not in frontend_dockerfile
+    assert "apache2-utils" not in frontend_dockerfile
 
 
 def test_tencent_caddy_fragment_is_additive_and_targets_only_v6() -> None:
@@ -74,9 +77,11 @@ def test_production_example_keeps_deepseek_out_of_the_frontend_build() -> None:
     dockerfile = _text("frontend/Dockerfile")
 
     assert "DEEPSEEK_API_KEY=REPLACE_" in example
-    assert "ADMIN_TOKEN=REPLACE_" in example
-    assert "SITE_BASIC_USER=teacher" in example
-    assert "SITE_BASIC_PASSWORD=REPLACE_" in example
+    assert "ADMIN_USERNAME=teacher" in example
+    assert "ADMIN_PASSWORD_HASH=REPLACE_" in example
+    assert "ADMIN_JWT_SECRET=REPLACE_" in example
+    assert "ADMIN_TOKEN" not in example
+    assert "SITE_BASIC_" not in example
     assert "DEEPSEEK_API_KEY" not in dockerfile
 
 
@@ -101,3 +106,4 @@ def test_deployment_scripts_are_valid_shell_without_triggering_server_actions() 
     assert "caddy reload" in deploy_script
     assert "docker cp" in backup_script
     assert "source.backup" in backup_script
+    assert "ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET" in deploy_script

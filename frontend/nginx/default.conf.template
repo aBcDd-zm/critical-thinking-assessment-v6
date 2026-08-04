@@ -1,6 +1,7 @@
 limit_req_zone $binary_remote_addr zone=session_create:10m rate=10r/m;
 limit_req_zone $binary_remote_addr zone=turn_submit:10m rate=30r/m;
 limit_req_zone $binary_remote_addr zone=admin_api:10m rate=60r/m;
+limit_req_zone $binary_remote_addr zone=admin_login:10m rate=5r/m;
 limit_req_status 429;
 
 # Tencent's Docker host uses user-namespace remapping.  Pre-created paths on
@@ -25,10 +26,9 @@ server {
     index index.html;
     client_max_body_size 2m;
 
-    # The teacher-facing interview is intentionally open.  Only the review
-    # workbench and its API require the separate administrator credential
-    # configured at container startup; that credential is never bundled into
-    # the Vue application.
+    # The teacher-facing interview is intentionally open.  The review
+    # workbench uses application-level, HttpOnly-cookie authentication; this
+    # proxy intentionally contains no administrator credential.
 
     real_ip_header X-Forwarded-For;
     real_ip_recursive on;
@@ -66,7 +66,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Authorization "";
-        proxy_set_header X-Admin-Token "";
     }
 
     location ~ ^/api/v1/sessions/[0-9A-Fa-f-]+/turns:stream$ {
@@ -78,7 +77,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Authorization "";
-        proxy_set_header X-Admin-Token "";
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_cache off;
@@ -97,15 +95,12 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Authorization "";
-        proxy_set_header X-Admin-Token "";
         proxy_read_timeout 90s;
         proxy_send_timeout 90s;
     }
 
-    location ^~ /api/v1/admin {
-        limit_req zone=admin_api burst=20 nodelay;
-        auth_basic "思衡 V6 后台";
-        auth_basic_user_file /etc/nginx/auth/admin.htpasswd;
+    location = /api/v1/admin/auth/login {
+        limit_req zone=admin_login burst=5 nodelay;
         proxy_pass http://cta_v6_backend;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -113,7 +108,17 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Authorization "";
-        proxy_set_header X-Admin-Token "${ADMIN_TOKEN}";
+    }
+
+    location ^~ /api/v1/admin {
+        limit_req zone=admin_api burst=20 nodelay;
+        proxy_pass http://cta_v6_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization "";
     }
 
     location /api/v1/ {
@@ -124,19 +129,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Authorization "";
-        proxy_set_header X-Admin-Token "";
-    }
-
-    location = /admin {
-        auth_basic "思衡 V6 后台";
-        auth_basic_user_file /etc/nginx/auth/admin.htpasswd;
-        try_files $uri /index.html;
-    }
-
-    location ^~ /admin/ {
-        auth_basic "思衡 V6 后台";
-        auth_basic_user_file /etc/nginx/auth/admin.htpasswd;
-        try_files $uri $uri/ /index.html;
     }
 
     location / {

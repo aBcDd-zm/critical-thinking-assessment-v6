@@ -13,8 +13,6 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 
-RUN apk add --no-cache apache2-utils
-
 # The Tencent host runs Docker with user-namespace remapping, so changing
 # tmpfs ownership from container root to nginx (uid 101) is forbidden. Keep
 # Nginx workers at container uid 0 so no ownership transition is attempted;
@@ -23,9 +21,8 @@ RUN apk add --no-cache apache2-utils
 RUN sed -i 's/^user  nginx;/user  root;/' /etc/nginx/nginx.conf
 
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
-COPY nginx/10-admin-basic-auth.sh /docker-entrypoint.d/10-admin-basic-auth.sh
 COPY nginx/10-runtime-dirs.sh /docker-entrypoint.d/10-runtime-dirs.sh
 COPY --from=build /app/dist /usr/share/nginx/html
-RUN chmod 0755 /docker-entrypoint.d/10-admin-basic-auth.sh /docker-entrypoint.d/10-runtime-dirs.sh
+RUN chmod 0755 /docker-entrypoint.d/10-runtime-dirs.sh
 
 EXPOSE 8080

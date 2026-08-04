@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute } from "vue-router";
 import { getAdminSession, saveExpertScores, updateReview } from "@/api/admin";
+import { useAdminAuth } from "@/composables/useAdminAuth";
 import {
   DIMENSIONS,
   answerCount,
@@ -15,6 +16,7 @@ type ReviewTab = "conversation" | "interview" | "trace" | "review";
 
 const route = useRoute();
 const uuid = String(route.params.sessionUuid);
+const auth = useAdminAuth();
 const detail = ref<AdminSessionDetail | null>(null);
 const activeTab = ref<ReviewTab>("conversation");
 const loading = ref(true);
@@ -83,7 +85,7 @@ async function load() {
     detail.value = await getAdminSession(uuid);
     review.review_status = detail.value.review_status ?? "pending";
     review.review_notes = detail.value.review_notes ?? "";
-    review.reviewer = detail.value.reviewer ?? "";
+    review.reviewer = detail.value.reviewer ?? auth.user.value?.display_name ?? auth.user.value?.username ?? "";
     const existing = new Map((detail.value.expert_scores ?? []).map((item) => [item.dimension_key, item]));
     scores.value = DIMENSIONS.map((item) => existing.get(item.key) ?? { dimension_key: item.key, score: null, comment: "" });
   } catch {
@@ -164,7 +166,7 @@ onMounted(load);
 
 <template>
   <main class="admin-page detail-page">
-    <header class="admin-header"><RouterLink class="back-link" to="/admin">← 返回会话列表</RouterLink><span class="session-code">{{ uuid }}</span></header>
+    <header class="admin-header"><RouterLink class="back-link" to="/admin/sessions">← 返回会话列表</RouterLink><span class="session-code">{{ uuid }}</span></header>
     <section v-if="loading" class="center-state">正在读取记录…</section>
     <section v-else-if="detail" class="admin-shell">
       <div class="detail-title">

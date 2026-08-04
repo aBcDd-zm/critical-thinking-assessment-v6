@@ -9,7 +9,7 @@ from sqlalchemy import text
 from app.api.router import database_health
 from app.core.config import Settings
 from app.main import create_app
-from tests.conftest import test_engine
+from tests.conftest import TEST_ADMIN_PASSWORD_HASH, TEST_ADMIN_JWT_SECRET, test_engine
 
 
 def _production_settings(**overrides: object) -> Settings:
@@ -17,7 +17,9 @@ def _production_settings(**overrides: object) -> Settings:
         "app_env": "production",
         "model_gateway_mode": "real",
         "deepseek_api_key": "deepseek-test-key",
-        "admin_token": "admin-test-token",
+        "admin_username": "admin",
+        "admin_password_hash": TEST_ADMIN_PASSWORD_HASH,
+        "admin_jwt_secret": TEST_ADMIN_JWT_SECRET,
         "tts_mode": "disabled",
     }
     values.update(overrides)
@@ -29,7 +31,9 @@ def _production_settings(**overrides: object) -> Settings:
     [
         ({"model_gateway_mode": "mock"}, "MODEL_GATEWAY_MODE must be real"),
         ({"deepseek_api_key": "   "}, "DEEPSEEK_API_KEY must be non-empty"),
-        ({"admin_token": ""}, "ADMIN_TOKEN must be non-empty"),
+        ({"admin_username": ""}, "ADMIN_USERNAME must be non-empty"),
+        ({"admin_password_hash": ""}, "ADMIN_PASSWORD_HASH must be an Argon2id hash"),
+        ({"admin_jwt_secret": "too-short"}, "ADMIN_JWT_SECRET must be at least 32 characters"),
         ({"tts_mode": "fake"}, "TTS_MODE must not be fake"),
     ],
 )
@@ -47,7 +51,9 @@ def test_development_configuration_keeps_mock_and_fake_compatibility() -> None:
         app_env="development",
         model_gateway_mode="mock",
         deepseek_api_key="",
-        admin_token="",
+        admin_username="",
+        admin_password_hash="",
+        admin_jwt_secret="",
         tts_mode="fake",
     )
 

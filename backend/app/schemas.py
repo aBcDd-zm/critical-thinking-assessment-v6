@@ -164,7 +164,18 @@ class ExpertScoreInput(BaseModel):
 
 class ExpertScoresRequest(BaseModel):
     scores: list[ExpertScoreInput] = Field(min_length=1, max_length=6)
-    reviewer: str = Field(default="expert", min_length=1, max_length=120)
+    reviewer: Optional[str] = Field(default=None, max_length=120)
+
+
+class AdminLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def reject_blank_credentials(self) -> "AdminLoginRequest":
+        if not self.username.strip() or not self.password:
+            raise ValueError("username and password must not be blank")
+        return self
 
 
 class ExitRequest(BaseModel):

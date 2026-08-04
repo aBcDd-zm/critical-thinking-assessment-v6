@@ -1,5 +1,6 @@
 const rawBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8060/api/v1";
 export const API_BASE_URL = rawBaseUrl.replace(/\/$/, "");
+const ADMIN_CSRF_COOKIE = "cta_v6_admin_csrf";
 
 export class ApiError extends Error {
   constructor(
@@ -22,6 +23,26 @@ function errorMessage(body: unknown, fallback: string): string {
   return fallback;
 }
 
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const prefix = `${encodeURIComponent(name)}=`;
+  const part = document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith(prefix));
+  if (!part) return null;
+  try {
+    return decodeURIComponent(part.slice(prefix.length));
+  } catch {
+    return null;
+  }
+}
+
+function isUnsafeMethod(method?: string): boolean {
+  return !["GET", "HEAD", "OPTIONS"].includes((method || "GET").toUpperCase());
+}
+
+function isAuthenticatedAdminPath(path: string): boolean {
+  return path.startsWith("/admin/") && path !== "/admin/auth/login";
+}
+
 export async function apiRequest<T>(
   path: string,
   init: RequestInit = {},
@@ -32,11 +53,19 @@ export async function apiRequest<T>(
     headers.set("Content-Type", "application/json");
   }
   headers.set("Accept", responseType === "json" ? "application/json" : "application/pdf, application/zip");
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  if (isAuthenticatedAdminPath(path) && isUnsafeMethod(init.method)) {
+    const csrfToken = readCookie(ADMIN_CSRF_COOKIE);
+    if (csrfToken) headers.set("X-CSRF-Token", csrfToken);
+  }
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers, credentials: "include" });
   if (!response.ok) {
     const contentType = response.headers.get("content-type") ?? "";
     const body = contentType.includes("json") ? await response.json().catch(() => null) : await response.text();
-    throw new ApiError(errorMessage(body, `请求失败（${response.status}）`), response.status, body);
+    const error = new ApiError(errorMessage(body, `请求失败（${response.status}）`), response.status, body);
+    if (response.status === 401 && isAuthenticatedAdminPath(path) && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("cta-v6:admin-auth-expired"));
+    }
+    throw error;
   }
   if (responseType === "blob") return (await response.blob()) as T;
   if (response.status === 204) return undefined as T;

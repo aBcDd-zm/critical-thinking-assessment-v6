@@ -17,7 +17,8 @@ if [ "${APP_ENV:-}" != "production" ]; then
   exit 1
 fi
 
-if [ -z "${DEEPSEEK_API_KEY:-}" ] || [ -z "${ADMIN_TOKEN:-}" ]; then
+if [ -z "${DEEPSEEK_API_KEY:-}" ] || [ -z "${ADMIN_USERNAME:-}" ] \
+  || [ -z "${ADMIN_PASSWORD_HASH:-}" ] || [ -z "${ADMIN_JWT_SECRET:-}" ]; then
   echo "Refusing production start: required server credentials are missing" >&2
   exit 1
 fi
