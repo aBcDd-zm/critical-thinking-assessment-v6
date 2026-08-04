@@ -94,6 +94,12 @@ services:
         VITE_API_BASE_URL: /api/v1
     image: cta-v6-frontend:local
     restart: unless-stopped
+    environment:
+      # Used only by Nginx for the protected review workbench and its API.
+      # Neither value is present in the built Vue assets.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env.production}
+      SITE_BASIC_USER: ${SITE_BASIC_USER:?set SITE_BASIC_USER in .env.production}
+      SITE_BASIC_PASSWORD: ${SITE_BASIC_PASSWORD:?set SITE_BASIC_PASSWORD in .env.production}
     depends_on:
       backend:
         condition: service_healthy
@@ -110,6 +116,7 @@ services:
       - /var/cache/nginx:rw,noexec,nosuid,size=16m,mode=0755
       - /var/run:rw,noexec,nosuid,size=1m,mode=0755
       - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m,mode=0755
+      - /etc/nginx/auth:rw,noexec,nosuid,size=1m,mode=0755
     security_opt:
       - no-new-privileges:true
     cap_drop:

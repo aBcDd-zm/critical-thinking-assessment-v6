@@ -14,7 +14,7 @@ shared Caddy `tencent-caddy-1` (80/443, HTTPS)
                                            cta-v6-sqlite-data named volume
 ```
 
-`18060` 只绑定到 `127.0.0.1`，因此不会被公网直接访问；公网流量必须经现有共享 Caddy 的 443 转入外部 Docker 网络 `tencent_default`，再访问 V6 专用别名 `cta-v6-web:8080`。访谈入口不要求用户名或密码；管理员 UI、管理员 API 和健康检查均不向公网提供。DeepSeek Key 仅注入后端容器。
+`18060` 只绑定到 `127.0.0.1`，因此不会被公网直接访问；公网流量必须经现有共享 Caddy 的 443 转入外部 Docker 网络 `tencent_default`，再访问 V6 专用别名 `cta-v6-web:8080`。访谈入口不要求用户名或密码；`/admin` 与 `/api/v1/admin` 单独要求管理员凭据，健康检查不向公网提供。DeepSeek Key 仅注入后端容器。
 
 ## 服务器前提
 
@@ -36,6 +36,7 @@ chmod 600 .env.production
 
 - `DEEPSEEK_API_KEY`：真实模型 Key；不得复制到前端、Git、终端回显、截图或聊天记录。
 - `ADMIN_TOKEN`：可用 `openssl rand -hex 32` 生成的 64 位十六进制值。
+- `SITE_BASIC_USER` 与 `SITE_BASIC_PASSWORD`：只用于 `https://thinkagent.asia/admin` 的浏览器认证；不影响公开访谈入口，密码至少 16 位且不应复用日常账户密码。
 
 不要在服务器仓库内创建 `backend/.env`；生产 Compose 只读取工程根的 `.env.production`，并将 DeepSeek Key 传给后端容器，不传给前端容器。
 
@@ -71,7 +72,7 @@ docker compose --env-file .env.production -f docker-compose.production.yml down
 
 它会在 `tencent-caddy-1` 内先确认当前配置确实含 V6 hostname 与 `cta-v6-web:8080` 路由，再执行 `caddy validate` 和平滑 `caddy reload`。脚本不复制、重写或替换任何共享 Caddy 文件。若该容器或 Caddyfile 路径在服务器上不同，只能显式覆盖 `CTA_V6_CADDY_CONTAINER` 或 `CTA_V6_CADDYFILE_PATH` 后再执行。
 
-在 Caddy 与 DNS 都生效后，使用 HTTPS 验证：`/assessment`、模型生成开场、一次追问、用户主动完成、报告和 PDF。`https://thinkagent.asia/healthz`、公开管理员路径和 API health 应为 `404`；服务器本机 `http://127.0.0.1:18060/healthz` 应为 `200`。
+在 Caddy 与 DNS 都生效后，使用 HTTPS 验证：`/assessment`、模型生成开场、一次追问、用户主动完成、报告和 PDF。`https://thinkagent.asia/admin` 应要求管理员认证，认证后可加载复核台；`https://thinkagent.asia/healthz` 与 API health 应为 `404`；服务器本机 `http://127.0.0.1:18060/healthz` 应为 `200`。
 
 ## 发布边界
 
