@@ -1,8 +1,141 @@
-# Intentionally empty: 思衡 V6 is a local-only experimental Demo.
-#
-# There are no production services, domains, shared gateways, images, ports,
-# secrets, or databases defined here. A deployment requires a separately
-# reviewed future release and must not be inferred from this V6 workspace.
-name: cta-v6-local-only
-x-v6-local-only:
-  status: no-deployment-authorized
+name: cta-v6
+
+# This stack deliberately owns only the V6 application containers and its
+# SQLite volume. It does not start or replace shared Caddy, alter DNS, or
+# expose a public host port. The frontend joins the existing shared Caddy
+# network with a V6-only alias; 18060 stays loopback-only for host maintenance.
+services:
+  db-init:
+    image: busybox:1.36.1
+    restart: "no"
+    user: "0:0"
+    command:
+      - sh
+      - -ec
+      - |
+        mkdir -p /data
+        chown 10001:10001 /data
+        chmod 0700 /data
+        find /data -maxdepth 1 -type f \( -name 'v6.db' -o -name 'v6.db-wal' -o -name 'v6.db-shm' \) -exec chown 10001:10001 {} \; -exec chmod 0600 {} \;
+    volumes:
+      - cta-v6-sqlite-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # This one-shot bootstrap must take ownership of its own named volume so
+    # the long-running backend can stay unprivileged, including with userns.
+    cap_add:
+      - CHOWN
+      - FOWNER
+    pids_limit: 32
+    mem_limit: 64m
+    logging:
+      driver: local
+      options:
+        max-size: 2m
+        max-file: "2"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: cta-v6-backend:local
+    restart: unless-stopped
+    env_file:
+      - ${CTA_V6_BACKEND_ENV_FILE:-.env.production}
+    environment:
+      APP_ENV: production
+      AUTO_CREATE_DB: "false"
+      DATABASE_URL: sqlite:////app/data/v6.db
+      MODEL_GATEWAY_MODE: real
+      TTS_MODE: disabled
+      CORS_ORIGINS: "[]"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    volumes:
+      - cta-v6-sqlite-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 768m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8060/api/v1/health/db', timeout=3); assert response.status == 200"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1
+    image: cta-v6-frontend:local
+    restart: unless-stopped
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env.production}
+      SITE_BASIC_USER: ${SITE_BASIC_USER:?set SITE_BASIC_USER in .env.production}
+      SITE_BASIC_PASSWORD: ${SITE_BASIC_PASSWORD:?set SITE_BASIC_PASSWORD in .env.production}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      default: {}
+      shared_caddy:
+        aliases:
+          - cta-v6-web
+    ports:
+      - "127.0.0.1:18060:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m,mode=0755
+      - /var/run:rw,noexec,nosuid,size=1m,mode=0755
+      - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m,mode=0755
+      - /etc/nginx/auth:rw,noexec,nosuid,size=1m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep -qx ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  cta-v6-sqlite-data:
+    name: cta-v6-sqlite-data
+
+networks:
+  # Created and owned by the existing Tencent shared gateway deployment.
+  # `external: true` prevents Compose from recreating, changing, or removing it.
+  shared_caddy:
+    external: true
+    name: tencent_default

@@ -1,4 +1,32 @@
-# Intentionally contains no site block.
+# Shared-Caddy fragment for 思衡 V6 on the existing Tencent gateway.
 #
-# 思衡 V6 has no authorized public hostname or Caddy route. Do not merge this
-# file into any shared gateway configuration.
+# Do NOT load this file directly and do NOT replace an existing Caddyfile.
+# Merge this one additional host block into the shared gateway's existing source
+# of truth, validate it in the running Caddy container, then perform a reload.
+# `cta-v6-web` is a V6-only Docker network alias on external `tencent_default`.
+
+124-156-161-53.sslip.io {
+    encode zstd gzip
+
+    # Keep the Docker-only probe private even after this public host exists.
+    @private_health path /healthz
+    respond @private_health 404
+
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000"
+    }
+
+    # Preserve the natural-interview NDJSON stream end-to-end.  The generic
+    # proxy remains intentionally ordinary for all other static and API paths.
+    @turn_stream path_regexp turn_stream ^/api/v1/sessions/[^/]+/turns:stream$
+    handle @turn_stream {
+        reverse_proxy cta-v6-web:8080 {
+            flush_interval -1
+        }
+    }
+
+    handle {
+        reverse_proxy cta-v6-web:8080
+    }
+}

@@ -11,13 +11,22 @@ def _text(relative_path: str) -> str:
     return (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_production_compose_explicitly_refuses_v6_deployment() -> None:
+def test_production_compose_isolates_v6_and_uses_the_shared_gateway_network() -> None:
     compose = _text("docker-compose.production.yml")
-    assert "cta-v6-local-only" in compose
-    assert "no-deployment-authorized" in compose
-    assert "services:" not in compose
-    assert "image:" not in compose
-    assert "DATABASE_URL" not in compose
+    frontend_service = compose.split("  frontend:\n", 1)[1]
+
+    assert "name: cta-v6" in compose
+    assert "cta-v6-sqlite-data" in compose
+    assert 'DATABASE_URL: sqlite:////app/data/v6.db' in compose
+    assert '"127.0.0.1:18060:8080"' in compose
+    assert "external: true" in compose
+    assert "name: tencent_default" in compose
+    assert "cta-v6-web" in compose
+    assert "condition: service_healthy" in compose
+    assert "read_only: true" in compose
+    assert "healthcheck:" in compose
+    assert "DEEPSEEK_API_KEY" not in frontend_service
+    assert "ADMIN_TOKEN" in frontend_service
 
 
 def test_nginx_keeps_admin_token_server_side_and_streaming_unbuffered() -> None:
@@ -25,9 +34,9 @@ def test_nginx_keeps_admin_token_server_side_and_streaming_unbuffered() -> None:
     frontend_dockerfile = _text("frontend/Dockerfile")
     frontend_http = _text("frontend/src/api/http.ts")
 
-    assert 'auth_basic "Siheng V6 review"' in nginx
+    assert 'auth_basic "Siheng V6 demo"' in nginx
     assert 'proxy_set_header X-Admin-Token "' in nginx
-    assert "ADMIN_API_TOKEN" in nginx
+    assert "ADMIN_TOKEN" in nginx
     assert "location ^~ /api/v1/admin" in nginx
     assert "turns:stream$" in nginx
     assert "/finalize$" in nginx
@@ -35,11 +44,33 @@ def test_nginx_keeps_admin_token_server_side_and_streaming_unbuffered() -> None:
     assert "proxy_request_buffering off" in nginx
     assert "limit_req zone=turn_submit" in nginx
     assert "ARG VITE_API_BASE_URL=/api/v1" in frontend_dockerfile
-    assert "ADMIN_API_TOKEN" not in frontend_http
+    assert "ADMIN_TOKEN" not in frontend_http
     assert "client_body_temp_path /tmp/nginx/client" in nginx
+    assert "auth_basic off;" in nginx
 
 
-def test_deployment_scripts_are_valid_shell_and_refuse_side_effects() -> None:
+def test_tencent_caddy_fragment_is_additive_and_targets_only_v6() -> None:
+    caddy = _text("deploy/tencent/Caddyfile.thinkagent.asia")
+
+    assert "124-156-161-53.sslip.io" in caddy
+    assert "reverse_proxy cta-v6-web:8080" in caddy
+    assert "turns:stream$" in caddy
+    assert "flush_interval -1" in caddy
+    assert "reverse_proxy 127.0.0.1" not in caddy
+    assert "Do NOT" in caddy
+
+
+def test_production_example_keeps_deepseek_out_of_the_frontend_build() -> None:
+    example = _text(".env.production.example")
+    dockerfile = _text("frontend/Dockerfile")
+
+    assert "DEEPSEEK_API_KEY=REPLACE_" in example
+    assert "ADMIN_TOKEN=REPLACE_" in example
+    assert "SITE_BASIC_PASSWORD=REPLACE_" in example
+    assert "DEEPSEEK_API_KEY" not in dockerfile
+
+
+def test_deployment_scripts_are_valid_shell_without_triggering_server_actions() -> None:
     for relative_path in (
         "backend/docker-entrypoint.sh",
         "frontend/nginx/10-admin-basic-auth.sh",
@@ -53,11 +84,10 @@ def test_deployment_scripts_are_valid_shell_and_refuse_side_effects() -> None:
             text=True,
         )
 
-    for relative_path in ("deploy/tencent/deploy.sh", "deploy/tencent/backup-sqlite.sh"):
-        result = subprocess.run(
-            [str(PROJECT_ROOT / relative_path)],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 64
-        assert "Refusing" in result.stderr
+    deploy_script = _text("deploy/tencent/deploy.sh")
+    backup_script = _text("deploy/tencent/backup-sqlite.sh")
+    assert "reload-caddy" in deploy_script
+    assert "caddy validate" in deploy_script
+    assert "caddy reload" in deploy_script
+    assert "docker cp" in backup_script
+    assert "source.backup" in backup_script

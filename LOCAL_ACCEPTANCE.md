@@ -1,7 +1,7 @@
 # 思衡 V6 本地验收记录
 
 验收范围：`/Users/abcdd/Projects/厚粲杯开发/critical-thinking-assessment-v6`
-运行边界：本机 Demo；不部署、不推送、不合并、不使用生产数据。
+运行边界：本文件只记录本机 Demo 验收；不替代腾讯云部署、HTTPS、真实模型或共享网关的验收证据，也不使用生产数据。
 
 ## 结论写入规则
 

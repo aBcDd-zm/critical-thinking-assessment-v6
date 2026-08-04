@@ -25,6 +25,13 @@ server {
     index index.html;
     client_max_body_size 2m;
 
+    # The Tencent deployment is a teacher-facing demo that stores free text.
+    # Keep the entire site behind a server-side gate by default; this credential
+    # is never bundled into Vue. The local /healthz endpoint is intentionally
+    # exempt so the host can verify the isolated loopback service.
+    auth_basic "Siheng V6 demo";
+    auth_basic_user_file /etc/nginx/auth/site.htpasswd;
+
     real_ip_header X-Forwarded-For;
     real_ip_recursive on;
     set_real_ip_from 10.0.0.0/8;
@@ -39,6 +46,7 @@ server {
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; media-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
 
     location = /healthz {
+        auth_basic off;
         access_log off;
         default_type text/plain;
         return 200 "ok\n";
@@ -90,8 +98,6 @@ server {
     }
 
     location ^~ /api/v1/admin {
-        auth_basic "Siheng V6 review";
-        auth_basic_user_file /etc/nginx/auth/admin.htpasswd;
         limit_req zone=admin_api burst=20 nodelay;
         proxy_pass http://cta_v6_backend;
         proxy_http_version 1.1;
@@ -100,7 +106,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Authorization "";
-        proxy_set_header X-Admin-Token "${ADMIN_API_TOKEN}";
+        proxy_set_header X-Admin-Token "${ADMIN_TOKEN}";
     }
 
     location /api/v1/ {
@@ -115,14 +121,10 @@ server {
     }
 
     location = /admin {
-        auth_basic "Siheng V6 review";
-        auth_basic_user_file /etc/nginx/auth/admin.htpasswd;
         try_files $uri /index.html;
     }
 
     location ^~ /admin/ {
-        auth_basic "Siheng V6 review";
-        auth_basic_user_file /etc/nginx/auth/admin.htpasswd;
         try_files $uri $uri/ /index.html;
     }
 
