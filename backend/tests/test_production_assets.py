@@ -26,18 +26,19 @@ def test_production_compose_isolates_v6_and_uses_the_shared_gateway_network() ->
     assert "read_only: true" in compose
     assert "healthcheck:" in compose
     assert "DEEPSEEK_API_KEY" not in frontend_service
-    assert "ADMIN_TOKEN" in frontend_service
+    assert "ADMIN_TOKEN" not in frontend_service
 
 
-def test_nginx_keeps_admin_token_server_side_and_streaming_unbuffered() -> None:
+def test_nginx_keeps_admin_review_private_and_streaming_unbuffered() -> None:
     nginx = _text("frontend/nginx/default.conf.template")
     frontend_dockerfile = _text("frontend/Dockerfile")
     frontend_http = _text("frontend/src/api/http.ts")
 
-    assert 'auth_basic "Siheng V6 demo"' in nginx
-    assert 'proxy_set_header X-Admin-Token "' in nginx
-    assert "ADMIN_TOKEN" in nginx
+    assert "auth_basic" not in nginx
+    assert '${ADMIN_TOKEN}' not in nginx
     assert "location ^~ /api/v1/admin" in nginx
+    assert "location = /admin" in nginx
+    assert "return 404;" in nginx
     assert "turns:stream$" in nginx
     assert "/finalize$" in nginx
     assert "proxy_buffering off" in nginx
@@ -46,7 +47,8 @@ def test_nginx_keeps_admin_token_server_side_and_streaming_unbuffered() -> None:
     assert "ARG VITE_API_BASE_URL=/api/v1" in frontend_dockerfile
     assert "ADMIN_TOKEN" not in frontend_http
     assert "client_body_temp_path /tmp/nginx/client" in nginx
-    assert "auth_basic off;" in nginx
+    assert "10-runtime-dirs.sh" in frontend_dockerfile
+    assert "10-admin-basic-auth.sh" not in frontend_dockerfile
 
 
 def test_tencent_caddy_fragment_is_additive_and_targets_only_v6() -> None:
@@ -67,14 +69,14 @@ def test_production_example_keeps_deepseek_out_of_the_frontend_build() -> None:
 
     assert "DEEPSEEK_API_KEY=REPLACE_" in example
     assert "ADMIN_TOKEN=REPLACE_" in example
-    assert "SITE_BASIC_PASSWORD=REPLACE_" in example
+    assert "SITE_BASIC_PASSWORD" not in example
     assert "DEEPSEEK_API_KEY" not in dockerfile
 
 
 def test_deployment_scripts_are_valid_shell_without_triggering_server_actions() -> None:
     for relative_path in (
         "backend/docker-entrypoint.sh",
-        "frontend/nginx/10-admin-basic-auth.sh",
+        "frontend/nginx/10-runtime-dirs.sh",
         "deploy/tencent/deploy.sh",
         "deploy/tencent/backup-sqlite.sh",
     ):
