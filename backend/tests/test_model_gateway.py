@@ -56,3 +56,22 @@ def test_empty_model_content_retries_original_payload(monkeypatch: pytest.Monkey
     assert result.repair_used is False
     assert len(calls) == 2
     assert calls[0] == calls[1]
+
+
+def test_final_scorer_uses_its_separate_completion_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "model_gateway_mode", "real")
+    monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
+    captured: dict[str, object] = {}
+
+    def fake_typed_call(self: ModelGatewayService, **kwargs: object) -> object:
+        captured.update(kwargs)
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr(ModelGatewayService, "_typed_call", fake_typed_call)
+
+    with pytest.raises(RuntimeError, match="captured"):
+        ModelGatewayService().generate_final_scorer({"transcript": []})
+
+    assert captured["max_tokens"] == settings.deepseek_scoring_max_tokens

@@ -189,6 +189,7 @@ class ModelGatewayService:
             system_prompt=NATURAL_FINAL_SCORER_SYSTEM_PROMPT,
             payload=payload,
             schema=FinalScorerOutput,
+            max_tokens=settings.deepseek_scoring_max_tokens,
         )
 
     @staticmethod
@@ -217,7 +218,12 @@ class ModelGatewayService:
                 raise ModelGatewayError("invalid_transcript_content")
 
     def _typed_call(
-        self, *, system_prompt: str, payload: dict[str, Any], schema: type[T]
+        self,
+        *,
+        system_prompt: str,
+        payload: dict[str, Any],
+        schema: type[T],
+        max_tokens: int | None = None,
     ) -> StructuredCallResult[T]:
         if not settings.deepseek_api_key.strip():
             raise ModelGatewayError("missing_deepseek_api_key")
@@ -234,7 +240,10 @@ class ModelGatewayService:
         transport_retry_used = False
         while True:
             try:
-                raw = self._post_json(messages)
+                if max_tokens is None:
+                    raw = self._post_json(messages)
+                else:
+                    raw = self._post_json(messages, max_tokens=max_tokens)
                 output = schema.model_validate(raw)
                 return StructuredCallResult(
                     output=output,
@@ -274,7 +283,12 @@ class ModelGatewayService:
                     repair_used=repair_used,
                 ) from exc
 
-    def _post_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def _post_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
         base_url = settings.deepseek_base_url.rstrip("/")
         # The configured DeepSeek root already exposes /chat/completions. Also
         # accept a user-supplied legacy /v1 suffix without duplicating it.
@@ -292,7 +306,11 @@ class ModelGatewayService:
                     "model": settings.deepseek_model,
                     "messages": messages,
                     "temperature": 0.35,
-                    "max_tokens": settings.deepseek_max_tokens,
+                    "max_tokens": (
+                        settings.deepseek_max_tokens
+                        if max_tokens is None
+                        else max_tokens
+                    ),
                     "response_format": {"type": "json_object"},
                 },
                 timeout=settings.deepseek_timeout_seconds,

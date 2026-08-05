@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # reverse-proxy timeout so the server can return a retryable result.
     deepseek_timeout_seconds: float = 90.0
     deepseek_max_tokens: int = 3000
+    # Final scoring spends tokens on six dimensions plus exact evidence quotes;
+    # keep its completion budget separate from short interviewer turns.
+    deepseek_scoring_max_tokens: int = 12000
     tts_mode: Literal["fake", "doubao", "disabled"] = "fake"
     doubao_tts_api_key: str = ""
     doubao_tts_resource_id: str = "seed-tts-2.0"
