@@ -78,6 +78,20 @@ class FinalScorerOutput(StrictModelOutput):
     strengths: list[str] = Field(default_factory=list, max_length=2)
     priorities: list[str] = Field(default_factory=list, max_length=2)
 
+    @model_validator(mode="before")
+    @classmethod
+    def bound_public_summary_lists(cls, value: Any) -> Any:
+        """Keep an overlong provider summary from blocking the whole report."""
+
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        for field_name in ("strengths", "priorities"):
+            items = normalized.get(field_name)
+            if isinstance(items, list) and len(items) > 2:
+                normalized[field_name] = items[:2]
+        return normalized
+
     @model_validator(mode="after")
     def dimensions_are_exactly_the_contract(self) -> "FinalScorerOutput":
         expected = {

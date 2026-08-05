@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app.core.config import settings
-from app.schemas import NaturalInterviewerOutput
+from app.schemas import FinalScorerOutput, NaturalInterviewerOutput
 from app.services.model_gateway import ModelGatewayError, ModelGatewayService
 
 
@@ -75,3 +75,35 @@ def test_final_scorer_uses_its_separate_completion_budget(
         ModelGatewayService().generate_final_scorer({"transcript": []})
 
     assert captured["max_tokens"] == settings.deepseek_scoring_max_tokens
+
+
+def test_final_scorer_bounds_overlong_summary_lists() -> None:
+    dimensions = [
+        {
+            "dimension_key": key,
+            "score": None,
+            "quotes": [],
+            "reason": "证据有限，未充分测得该视角。",
+            "confidence": 0.0,
+            "sufficient": False,
+        }
+        for key in (
+            "problem_definition",
+            "evidence_evaluation",
+            "reasoning_argumentation",
+            "multiple_perspectives",
+            "integrative_decision",
+            "dynamic_adjustment",
+        )
+    ]
+
+    output = FinalScorerOutput.model_validate(
+        {
+            "dimensions": dimensions,
+            "strengths": ["一", "二", "三", "四", "五"],
+            "priorities": ["甲", "乙", "丙"],
+        }
+    )
+
+    assert output.strengths == ["一", "二"]
+    assert output.priorities == ["甲", "乙"]
