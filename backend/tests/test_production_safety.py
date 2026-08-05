@@ -35,6 +35,9 @@ def _production_settings(**overrides: object) -> Settings:
         ({"admin_password_hash": ""}, "ADMIN_PASSWORD_HASH must be an Argon2id hash"),
         ({"admin_jwt_secret": "too-short"}, "ADMIN_JWT_SECRET must be at least 32 characters"),
         ({"tts_mode": "fake"}, "TTS_MODE must not be fake"),
+        ({"tts_mode": "doubao", "doubao_tts_api_key": ""}, "DOUBAO_TTS_API_KEY must be non-empty"),
+        ({"tts_mode": "doubao", "doubao_tts_resource_id": ""}, "DOUBAO_TTS_RESOURCE_ID must be non-empty"),
+        ({"tts_mode": "doubao", "doubao_tts_speaker": ""}, "DOUBAO_TTS_SPEAKER must be non-empty"),
     ],
 )
 def test_production_configuration_fails_closed(
@@ -59,6 +62,18 @@ def test_development_configuration_keeps_mock_and_fake_compatibility() -> None:
 
     assert config.model_gateway_mode == "mock"
     assert config.tts_mode == "fake"
+
+
+def test_production_doubao_configuration_is_accepted_without_exposing_the_key() -> None:
+    config = _production_settings(
+        tts_mode="doubao",
+        doubao_tts_api_key="doubao-test-key",
+        doubao_tts_resource_id="seed-tts-2.0",
+        doubao_tts_speaker="zh_female_cancan_uranus_bigtts",
+    )
+
+    assert config.tts_mode == "doubao"
+    assert config.doubao_tts_resource_id == "seed-tts-2.0"
 
 
 def test_production_disables_interactive_api_documentation() -> None:

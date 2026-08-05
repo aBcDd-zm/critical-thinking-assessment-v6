@@ -74,6 +74,7 @@ def test_tencent_caddy_fragment_is_additive_and_targets_only_v6() -> None:
 
 def test_production_example_keeps_deepseek_out_of_the_frontend_build() -> None:
     example = _text(".env.production.example")
+    compose = _text("docker-compose.production.yml")
     dockerfile = _text("frontend/Dockerfile")
 
     assert "DEEPSEEK_API_KEY=REPLACE_" in example
@@ -83,6 +84,14 @@ def test_production_example_keeps_deepseek_out_of_the_frontend_build() -> None:
     assert "ADMIN_TOKEN" not in example
     assert "SITE_BASIC_" not in example
     assert "DEEPSEEK_API_KEY" not in dockerfile
+    assert "TTS_MODE=doubao" in example
+    assert "DOUBAO_TTS_API_KEY=REPLACE_" in example
+    assert "DOUBAO_TTS_RESOURCE_ID" in example
+    assert "DOUBAO_TTS_SPEAKER" in example
+    assert "TTS_MODE: ${TTS_MODE:?" in compose
+    assert "TTS_MODE: disabled" not in compose
+    assert "proxy_read_timeout 120s;" in _text("frontend/nginx/default.conf.template")
+    assert "proxy_send_timeout 120s;" in _text("frontend/nginx/default.conf.template")
 
 
 def test_deployment_scripts_are_valid_shell_without_triggering_server_actions() -> None:
@@ -107,3 +116,5 @@ def test_deployment_scripts_are_valid_shell_without_triggering_server_actions() 
     assert "docker cp" in backup_script
     assert "source.backup" in backup_script
     assert "ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET" in deploy_script
+    assert "TTS_MODE" in deploy_script
+    assert "DOUBAO_TTS_API_KEY DOUBAO_TTS_RESOURCE_ID DOUBAO_TTS_SPEAKER" in deploy_script

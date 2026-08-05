@@ -332,7 +332,7 @@ def _protocol_gate_result(
         provider="protocol_gate",
         model="none",
         prompt_template_id="natural_interviewer_v6.1_release_gate",
-        prompt_version="v6.1.0",
+        prompt_version=NATURAL_INTERVIEWER_PROMPT_VERSION,
         repair_used=False,
         latency_ms=0,
         quality_flags=quality_flags,

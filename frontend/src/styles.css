@@ -226,6 +226,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 .empty-cell { padding: 50px !important; color: var(--muted); text-align: center !important; }
 .detail-page .admin-header { justify-content: flex-start; }
 .detail-page .session-code { margin-left: auto; color: var(--muted); }
+.detail-title-actions { display: grid; justify-items: end; gap: 16px; }
 .detail-stats { display: flex; gap: 28px; }
 .detail-stats span { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
 .detail-stats strong { color: var(--ink); font-size: 16px; }

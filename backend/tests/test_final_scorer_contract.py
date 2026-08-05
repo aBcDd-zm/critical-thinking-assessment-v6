@@ -26,7 +26,7 @@ EXPECTED_BARS_CONTRACT_SHA256 = (
     "7f0cc87f0b3e0a6cae5b8c65e3208d6be2944bff194f6d540060f16290c77984"
 )
 EXPECTED_INTERVIEWER_PROMPT_SHA256 = (
-    "227561c2c2807f7202c92edd6f97240c80ad9fff51cc7571c8f5b252b6d6ca79"
+    "76c59963cdc639cfc7b7a44e30241b126d4814fd7a0ddca55cdafe623a10245a"
 )
 
 
@@ -118,9 +118,9 @@ def test_contract_rejects_missing_or_reordered_adjudication_rules() -> None:
         frozen_contract._validate_contract_shape(payload)
 
 
-def test_interviewer_prompt_v6_1_0_is_byte_for_byte_frozen() -> None:
-    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.1.0"
-    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.1.0"
+def test_interviewer_prompt_v6_1_1_is_byte_for_byte_frozen() -> None:
+    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.1.1"
+    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.1.1"
     assert (
         hashlib.sha256(NATURAL_INTERVIEWER_SYSTEM_PROMPT.encode("utf-8")).hexdigest()
         == EXPECTED_INTERVIEWER_PROMPT_SHA256

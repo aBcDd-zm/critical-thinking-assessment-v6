@@ -152,15 +152,21 @@ def test_consent_and_model_generated_opening_are_natural_only(client) -> None:
     detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     opening = detail["traces"][0]
     assert opening["action"] == "natural_opening"
-    assert opening["prompt_template_id"] == "natural_interviewer_v6.1.0"
+    assert opening["prompt_template_id"] == "natural_interviewer_v6.1.1"
 
 
-def test_interviewer_prompt_v6_1_0_preserves_natural_control_with_release_gates() -> None:
+def test_interviewer_prompt_v6_1_1_preserves_natural_control_with_release_gates() -> None:
     prompt = "".join(NATURAL_INTERVIEWER_SYSTEM_PROMPT.split())
 
-    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.1.0"
-    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.1.0"
+    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.1.1"
+    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.1.1"
     assert "共情不是机械复述" in prompt
+    assert "极短的陪伴性回应" in prompt
+    assert "短关键词或短语" in prompt
+    assert "不抢戏" in prompt
+    assert "不能让短回应代替真正的理解或追问" in prompt
+    assert "不连续逐字复述用户12个以上字符" in prompt
+    assert "不输出教学、咨询、人格判断或评分语言" in prompt
     assert "开放式问题" in prompt
     assert "两个选项" in prompt
     assert "心理咨询专家" not in prompt
@@ -183,6 +189,15 @@ def test_interviewer_style_flags_record_binary_questions_and_verbatim_echoes() -
 
     assert "binary_choice_question" in flags
     assert "repeated_user_wording" in flags
+
+
+def test_interviewer_style_allows_a_short_keyword_echo_but_flags_long_echo() -> None:
+    keyword_flags = _quality_flags("……被误解了。你愿意再展开一点吗？", "我最难受的是一直被误解了。")
+    long_user_text = "我会先核实导师、资金和项目安排，再决定是否继续申请。"
+    long_echo_flags = _quality_flags(long_user_text + " 你愿意再展开一点吗？", long_user_text)
+
+    assert "repeated_user_wording" not in keyword_flags
+    assert "repeated_user_wording" in long_echo_flags
 
 
 def test_mock_interviewer_probes_a_complete_plan_before_natural_closure() -> None:

@@ -57,6 +57,7 @@
 ## 结束、报告与语音
 
 - `POST /sessions/{uuid}/finalize`：达到 40 个有效回答后由用户主动结束，或对已经冻结且评分失败的会话作幂等评分重试；不足 40 时返回稳定的 409 门禁错误。
+- `POST /admin/sessions/{uuid}/finalize`：管理员保护的同一幂等终评/报告重试入口；要求管理员会话 Cookie 与 CSRF，不能重新开启访谈或追加用户回答。
 - `POST /sessions/{uuid}/exit`：任何时候都可明确退出；不足 40 个有效回答时标记 `withdrawn_incomplete`，不生成正式完整报告。
 - `GET /sessions/{uuid}/report`：获取唯一的结构化报告；未完成时返回相应状态错误。
 - `GET /sessions/{uuid}/report.pdf`：下载服务端生成的报告 PDF。
@@ -74,6 +75,7 @@
 
 - `GET /admin/sessions`：可按状态、人工复核状态、`manual_review_recommended` 与搜索词筛选。
 - `GET /admin/sessions/{uuid}`：完整对话、逐轮时长、模型/Prompt 版本、调用和修复记录、transcript 指纹、评分运行、逐字证据、质量/安全状态、人工复核与专家评分。
+- `POST /admin/sessions/{uuid}/finalize`：对 `finalizing` 且报告尚未生成的冻结会话执行终评或重试；最近一次失败写入评分运行并由详情页展示。
 - `PUT /admin/sessions/{uuid}/review`：写入人工复核状态、决定与备注。
 - `PUT /admin/sessions/{uuid}/expert-scores`：独立保存专家分数。
 - `POST /admin/expert-scores:import`：导入 CSV，逐行报告成功或失败。

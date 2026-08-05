@@ -435,6 +435,29 @@ describe("InterviewView", () => {
     expect(wrapper.text()).toContain("服务端尚未确认完成条件");
   });
 
+  it("routes to the report when a finalize timeout is followed by a completed sync", async () => {
+    const completedSession = {
+      uuid: "session-v6",
+      phase: "completed",
+      turns: [openingTurn],
+      report_available: true,
+    };
+    mocks.getSession
+      .mockResolvedValueOnce({ uuid: "session-v6", phase: "interviewing", user_answer_count: 40, turns: [openingTurn] })
+      .mockResolvedValueOnce(completedSession);
+    mocks.finalizeSession.mockRejectedValue(new Error("请求超时"));
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    await wrapper.get("button.compact-action").trigger("click");
+    await flushPromises();
+
+    expect(mocks.getSession).toHaveBeenCalledTimes(2);
+    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
   it("keeps a whitespace-only answer disabled", async () => {
     const wrapper = mount(InterviewView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },

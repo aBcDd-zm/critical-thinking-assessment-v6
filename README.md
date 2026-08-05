@@ -8,7 +8,7 @@
 
 - 独立目录、分支和 SQLite：不读取、迁移或修改 V3.3、V4、V5 的会话数据。
 - 会话只经历 `interviewing → finalizing → completed`；用户可随时 `exit`，高风险内容进入 `safety_stopped`。
-- 首问和每一次追问均由 `natural_interviewer_v6.1.0` 生成。服务端不提供候选题库、目标维度、coverage、阶段命令或六维轮询；访谈官仍自主选择问题内容、顺序与表达，以简短共情承接而非机械复述。
+- 首问和每一次追问均由 `natural_interviewer_v6.1.1` 生成。服务端不提供候选题库、目标维度、coverage、阶段命令或六维轮询；访谈官仍自主选择问题内容、顺序与表达，以克制的微观陪伴回应和短关键词承接而非机械复述。
 - V6.1 的正式访谈协议要求至少保存 40 个有效用户回答，第 45 个有效回答后由服务端确定性收束，并明确记录为 `finish_reason=technical_limit`，而非模型的自然收束。该门禁只控制数据完整性和结束资格，不指定话题、阶段、维度或题目。页面显示“有效回答 x/40”；40–44 个回答之间，访谈官可在证据足够时自然结束，用户也可主动生成报告。
 - 首个有效回答只需包含非空的字母或数字；第 2–45 个有效回答至少包含 20 个经 NFKC 归一化后的字母或数字。标点、空白、emoji 与装饰符号不计数。只有经服务端认可的短、完整澄清意图不计入有效回答；客户端自行标记但不符合契约的内容仍按普通回答处理。安全输入和退出请求可绕过长度门禁。
 - 访谈冻结后，独立的 `natural_final_scorer_v6.2.2` 按冻结的 `v6.2.0` 完整六维 BARS 合同对逐字稿做一次性取证。证据不足时必须显示“证据有限”或“未充分测得”，不得补问或猜低分。`v6.2.2` 保留 `v6.2.1` 的结构化输出约束，并仅为终评禁用模型 thinking，避免推理过程挤占完整 JSON 的输出预算；不改变访谈官、BARS 锚点或裁决规则。
@@ -52,4 +52,4 @@ make check-stopped
 
 ## Git 与来源
 
-活动分支为 `system/v6-natural-interview-demo`。V6 从 V5 的本地工作区快照建立：来源分支 `system/v5-real-issue-demo`、来源提交 `e7ae0246cfa7c9e3cb1e43c8938c740d4cb945ea`。完整的来源边界、排除项与 SHA-256 聚合指纹见 [来源快照清单](artifacts/SOURCE_SNAPSHOT_MANIFEST.md)。
+活动分支为 `system/v6-report-doubao-20260805`。V6 从 V5 的本地工作区快照建立：来源分支 `system/v5-real-issue-demo`、来源提交 `e7ae0246cfa7c9e3cb1e43c8938c740d4cb945ea`。完整的来源边界、排除项与 SHA-256 聚合指纹见 [来源快照清单](artifacts/SOURCE_SNAPSHOT_MANIFEST.md)。

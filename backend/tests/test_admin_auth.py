@@ -151,6 +151,7 @@ def test_all_existing_admin_routes_require_authentication(client) -> None:
     requests = (
         ("get", "/api/v1/admin/sessions", {}),
         ("get", "/api/v1/admin/sessions/not-a-real-session", {}),
+        ("post", "/api/v1/admin/sessions/not-a-real-session/finalize", {}),
         ("put", "/api/v1/admin/sessions/not-a-real-session/review", {"json": {"status": "pending"}}),
         ("post", "/api/v1/admin/sessions/not-a-real-session/expert-scores", {"json": {"scores": [{"dimension_key": "problem_definition", "score": 4}]}}),
         ("post", "/api/v1/admin/expert-scores:import", {}),
@@ -159,6 +160,36 @@ def test_all_existing_admin_routes_require_authentication(client) -> None:
     )
     for method, path, kwargs in requests:
         assert getattr(client, method)(path, **kwargs).status_code == 401
+
+
+def test_admin_can_retry_frozen_report_and_repeat_is_idempotent(client) -> None:
+    session_uuid = _create_session(client, name="终评重试用户")
+    with TestSession() as db:
+        session = db.scalar(select(AssessmentSession).where(AssessmentSession.uuid == session_uuid))
+        assert session
+        session.user_answer_count = 40
+        db.commit()
+
+    csrf_headers = _login(client)
+    first = client.post(
+        f"/api/v1/admin/sessions/{session_uuid}/finalize",
+        headers=csrf_headers,
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["session"]["phase"] == "completed"
+
+    repeated = client.post(
+        f"/api/v1/admin/sessions/{session_uuid}/finalize",
+        headers=csrf_headers,
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["session"]["phase"] == "completed"
+
+    with TestSession() as db:
+        session = db.scalar(select(AssessmentSession).where(AssessmentSession.uuid == session_uuid))
+        assert session
+        assert len(session.scoring_runs) == 1
+        assert session.report is not None
 
 
 def test_dashboard_uses_aggregates_without_transcript_or_review_note_leakage(client) -> None:

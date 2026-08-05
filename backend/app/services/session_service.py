@@ -660,7 +660,7 @@ class SessionService:
                         model_provider="none",
                         model_name="none",
                         prompt_template_id="v6_1_user_finalize",
-                        prompt_version="v6.1.0",
+                        prompt_version=NATURAL_INTERVIEWER_PROMPT_VERSION,
                         input_fingerprint=self.orchestrator.trace_input_fingerprint(session),
                         output_contract={"session_action": "finish", "finish_reason": "user_requested"},
                         renderer_status="accepted",
