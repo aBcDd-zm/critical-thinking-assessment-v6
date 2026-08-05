@@ -301,7 +301,12 @@ class ModelGatewayService:
             body = response.json()
             content = body["choices"][0]["message"]["content"]
             if not isinstance(content, str) or not content.strip():
-                raise ValueError("model_output_empty")
+                # A successful HTTP response with no model content is an
+                # upstream/provider hiccup, not a malformed JSON response.
+                # Keep the original request so _typed_call can perform its
+                # bounded transport retry instead of asking the provider to
+                # repair an output that was never returned.
+                raise ModelGatewayError("model_output_empty", transient=True)
             cleaned = content.strip()
             if cleaned.startswith(chr(96) * 3):
                 cleaned = cleaned.strip(chr(96)).removeprefix("json").strip()
