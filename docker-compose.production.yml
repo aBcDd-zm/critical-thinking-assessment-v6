@@ -92,6 +92,8 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_BASE_URL: /api/v1
+        VITE_RESEARCH_CONTACT: ${VITE_RESEARCH_CONTACT:?set VITE_RESEARCH_CONTACT in .env.production}
+        VITE_DATA_RETENTION_NOTICE: ${VITE_DATA_RETENTION_NOTICE:?set VITE_DATA_RETENTION_NOTICE in .env.production}
     image: cta-v6-frontend:local
     restart: unless-stopped
     depends_on:

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from app.api.router import _set_admin_cookies
 from app.core.config import settings
 from app.models import AssessmentSession, ExpertScore, HumanReview
+from app.schemas import RESEARCH_CONSENT_VERSION
 from tests.conftest import (
     TEST_ADMIN_JWT_SECRET,
     TEST_ADMIN_PASSWORD,
@@ -22,7 +23,7 @@ def _create_session(client, *, name: str = "复核用户") -> str:
     response = client.post(
         "/api/v1/sessions",
         json={
-            "consent_version": "v6.0.0",
+            "consent_version": RESEARCH_CONSENT_VERSION,
             "consent_given": True,
             "participant": {"display_name": name, "identity_type": "student"},
         },
@@ -174,6 +175,13 @@ def test_dashboard_uses_aggregates_without_transcript_or_review_note_leakage(cli
         },
     )
     assert turn.status_code == 200
+    with TestSession() as db:
+        session = db.scalar(
+            select(AssessmentSession).where(AssessmentSession.uuid == completed_uuid)
+        )
+        assert session
+        session.user_answer_count = 40
+        db.commit()
     finalization = client.post(f"/api/v1/sessions/{completed_uuid}/finalize")
     assert finalization.status_code == 200
 

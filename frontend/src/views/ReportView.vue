@@ -3,7 +3,6 @@ import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 import DimensionCard from "@/components/DimensionCard.vue";
 import RadarChart from "@/components/RadarChart.vue";
-import { averageEvidenceScore, publicScoreLabel } from "@/components/scoreFormat";
 import { ApiError, downloadBlob } from "@/api/http";
 import { getReport, getReportPdf } from "@/api/session";
 import { DIMENSIONS, type AssessmentReport, type ReportDimension } from "@/types/contracts";
@@ -34,15 +33,13 @@ const dimensions = computed<ReportDimension[]>(() => {
       status: item?.status || "unmeasured",
       score: item?.status === "sufficient" ? item.score : null,
       reason: item?.reason || "本次对话中没有获得足够的可追溯证据，因此不做判断。",
-      strength: item?.strength || item?.reason || "本次证据有限，暂不形成该维度的优势判断。",
+      observation: item?.observation || item?.reason || "本次未形成该维度的充分观察。",
+      strength: item?.strength,
       suggestion: dimensionSuggestions[meta.key],
       evidences: item?.evidences ?? [],
     };
   });
 });
-
-const measuredDimensionCount = computed(() => dimensions.value.filter((item) => item.score !== null).length);
-const overallScore = computed(() => averageEvidenceScore(dimensions.value.map((item) => item.score)));
 
 async function loadReport() {
   loading.value = true;
@@ -88,23 +85,16 @@ onMounted(() => {
         <div>
           <h1>访谈结果</h1>
           <p>{{ report.summary || "报告只呈现有原话支持的观察。证据有限或未充分测得，不代表能力不足。" }}</p>
-          <div class="overall-score" aria-label="综合总分">
-            <span>综合总分</span>
-            <strong>{{ publicScoreLabel(overallScore) }}</strong>
-            <small v-if="measuredDimensionCount">基于 {{ measuredDimensionCount }} 个证据充分维度计算</small>
-            <small v-else>暂无可计算维度</small>
-          </div>
-          <p class="report-score-note">分数按百分制呈现；证据不足的维度不按 0 分计入综合总分。</p>
           <p v-if="report.manual_review_recommended" class="report-caution">部分维度证据有限，暂不显示分数。</p>
         </div>
         <figure class="report-radar">
           <RadarChart :dimensions="dimensions" />
-          <figcaption>六维结果（百分制）</figcaption>
+          <figcaption>六维证据等级（1–5，序数）</figcaption>
         </figure>
       </section>
 
       <section class="dimension-section">
-        <div class="report-section-heading"><h2>六维结果</h2><p>展开后可查看优势、原话和建议。</p></div>
+        <div class="report-section-heading"><h2>六维结果</h2><p>展开后可查看本次观察、原话和建议；只有较高等级才标记优势。</p></div>
         <div class="dimension-list"><DimensionCard v-for="dimension in dimensions" :key="dimension.dimension_key" :dimension="dimension" /></div>
       </section>
 

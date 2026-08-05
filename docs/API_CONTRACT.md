@@ -4,7 +4,7 @@
 
 `interviewing | finalizing | completed | exited | safety_stopped`
 
-`interviewing` 不包含阶段、coverage、目标维度或测量轮次。恢复快照会带 `user_answer_count`；客户端可将其如实显示为“已进行 N 轮问答”，但不得渲染为阶段、目标进度、必答数量或技术上限。40 次技术保护上限不在公开快照中，只会在命中时返回专用错误。快照还带 transcript 指纹以支持审计，但不带实时评分或路由结论。
+`interviewing` 不包含阶段、coverage、目标维度、候选题目或六维轮询。恢复快照会带服务端权威的 `user_answer_count`（兼容名）与 `valid_answer_count`，两者均指有效用户回答数；同时返回 `minimum_valid_answers=40`、`maximum_user_answers=45`、`remaining_required_answers` 与 `can_finalize`。客户端可显示“有效回答 x/40”，但不得把它解释为访谈阶段、维度覆盖或评分进度。快照还带 transcript 指纹以支持审计，但不带实时评分或路由结论。
 
 ## 会话与同意
 
@@ -14,7 +14,7 @@
 
 ```json
 {
-  "consent_version": "v6.0",
+  "consent_version": "v6-research-pilot-2026-08",
   "consent_given": true,
   "participant": { "display_name": "可选称呼" }
 }
@@ -34,6 +34,7 @@
 {
   "content": "用户编辑后的回答",
   "client_turn_id": "客户端生成的 UUID",
+  "interaction_kind": "answer|clarification",
   "input_mode": "text|voice|voice_edited",
   "answer_duration_ms": 32000
 }
@@ -44,24 +45,24 @@
 1. `user_turn_saved`
 2. `agent_started`
 3. 零或多个 `agent_delta`
-4. 可选 `session_finalizing`（仅访谈官自然选择 `finish` 时）
+4. 可选 `session_finalizing`（访谈官的 `finish` 被协议接受，或第 45 个有效回答触发技术上限时）
 5. `agent_completed` 或 `error`
 
-`session_finalizing` 只提示 UI 停止继续输入并显示收束状态；真正的最终 session 快照仍以 `agent_completed` 为准。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。访谈官只允许输出 `interviewer_message`、`session_action` 和 `finish_reason`；当 `session_action=finish` 时，服务端转入 `finalizing`，而非要求客户端补任何特定题目。除用户主动结束外，版本化访谈 Prompt 要求在看似完整的方案后先自然探查一到两层关键不确定性、条件或反例；该行为仍由模型根据逐字稿决定，不由 API 传入轮次或维度控制字段。
+`session_finalizing` 只提示 UI 停止继续输入并显示收束状态；真正的最终 session 快照仍以 `agent_completed` 为准。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。访谈官只允许输出 `interviewer_message`、`session_action` 和 `finish_reason`；当 `session_action=finish` 且协议允许结束时，服务端转入 `finalizing`。运行时 `completion_gate` 只向模型提供有效回答数、40/45 边界和 `can_model_finish`，不提供题库、阶段、目标维度或下一题。40 个有效回答前，模型的 `finish` 会被结束门禁拒绝；40–44 个回答之间仍由模型依据完整逐字稿判断是否自然收束；第 45 个有效回答后服务端确定性收束，并在公开事件中标记 `finish_reason=technical_limit`。该理由只能由 `protocol_gate` 产生，不是模型自然收束。
 
-`content` 去除空白后的可见字符数必须至少为 20。客户端在输入框中即时显示剩余字数；普通 `Enter` 提交有效回答，`Shift+Enter` 保留换行，中文输入法选词期间不得误提交。服务端也会再次校验该限制。
+首个 `interaction_kind=answer` 只需含至少 1 个经 NFKC 归一化后的字母或数字；第 2–45 个有效回答至少需要 20 个此类字符。空白、标点、控制字符、emoji 与装饰符号不计入长度。`interaction_kind=clarification` 只是客户端提示；只有服务端认可的、最多 24 个可计字符且整句表达解释/重复/换问法意图的独立澄清才不计入有效回答并可短于 20 字。未命中该契约的内容仍按普通回答处理。安全输入和退出请求同样不受长度门禁阻挡。普通 `Enter` 仅在满足当前门禁时提交，`Shift+Enter` 保留换行，中文输入法选词期间不得误提交。
 
 同一 `client_turn_id` 与相同载荷必须回放同一已持久化结果；不同载荷返回 `409 idempotency_payload_mismatch`。模型/JSON 修复用尽时以 `error` 收束流，但用户回答已经保存；客户端应保留同一键并允许刷新恢复，不能伪造一条固定 AI 问题。
 
 ## 结束、报告与语音
 
-- `POST /sessions/{uuid}/finalize`：用户主动结束访谈，或对已经冻结且评分失败的会话作幂等评分重试。它不检查阶段、coverage、题库或固定轮次。
-- `POST /sessions/{uuid}/exit`：明确退出且不生成报告。
+- `POST /sessions/{uuid}/finalize`：达到 40 个有效回答后由用户主动结束，或对已经冻结且评分失败的会话作幂等评分重试；不足 40 时返回稳定的 409 门禁错误。
+- `POST /sessions/{uuid}/exit`：任何时候都可明确退出；不足 40 个有效回答时标记 `withdrawn_incomplete`，不生成正式完整报告。
 - `GET /sessions/{uuid}/report`：获取唯一的结构化报告；未完成时返回相应状态错误。
 - `GET /sessions/{uuid}/report.pdf`：下载服务端生成的报告 PDF。
 - `GET /sessions/{uuid}/turns/{turn_index}/speech`：只合成已持久化 AI turn；不接受任意正文。
 
-报告不包含数字置信度、人格判断、职业/留学排序或跨议题比较。每一维只公开 `sufficient`、`limited` 或 `unmeasured` 之一；只有充分且有可核验用户原话时接口才可带原始 1–5 分。参与者网页和 PDF 将该固定等级换算为 20–100 分的百分制呈现，并显示综合总分：它是证据充分维度的等权平均换算，证据不足维度不显示为 0 分也不计入平均；管理端仍以原始五级分复核。
+报告不包含综合总分、数字置信度、人格判断、职业/留学排序或跨议题比较。每一维只公开 `sufficient`、`limited` 或 `unmeasured` 之一；只有充分且有可核验用户原话时接口才可带原始 1–5 序数等级。参与者网页和 PDF 保留该 1–5 序数表达，不换算为未经校准的百分制；证据不足维度不显示为 0 或 1，也不进入任何平均或汇总。低等级只描述本次观察，只有 4–5 级才可标记为优势。
 
 ## 管理员认证、复核与导出
 
@@ -82,8 +83,10 @@
 
 - `409 session_not_accepting_turns`：状态不是 `interviewing`。
 - `409 idempotency_payload_mismatch`：同一键采用不同提交内容。
-- `409 technical_turn_cap_reached`：已达 40 次不可见技术上限。
-- `422`：请求、同意、回答少于 20 个可见字符或模型结构合同无效。
+- `409 minimum_valid_answers_not_reached`：不足 40 个有效回答，响应同时返回当前数量和剩余数量。
+- `409 technical_turn_cap_reached`：已达 45 个有效回答的技术硬上限。
+- `422 answer_has_no_visible_characters`：输入不含可计数的字母或数字。
+- `422 answer_too_short`：第 2–45 个有效回答不足 20 个可计数字符；澄清、安全与退出输入不走此错误。
 - `500 turn_processing_failed`：一次修复后访谈官仍失败；用户 turn 已保留。
 - `503 scoring_failed`：评分失败，会话保持 `finalizing`，可幂等重试。
 - `503 tts_fallback_required`：语音供应商不可用；文本会话不受影响。

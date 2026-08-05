@@ -5,7 +5,8 @@ import { publicScoreLabel } from "./scoreFormat";
 
 const props = defineProps<{ dimension: ReportDimension }>();
 const open = ref(false);
-const strength = computed(() => props.dimension.strength || props.dimension.reason);
+const observation = computed(() => props.dimension.observation || props.dimension.reason);
+const strength = computed(() => props.dimension.strength || "");
 
 const statusLabels = {
   sufficient: "证据充分",
@@ -31,6 +32,10 @@ function evidenceSource(source?: string, turnIndex?: number) {
     </button>
     <div v-if="open" class="dimension-body">
       <section>
+        <h3>本次观察</h3>
+        <p>{{ observation }}</p>
+      </section>
+      <section v-if="strength">
         <h3>优势</h3>
         <p>{{ strength }}</p>
       </section>

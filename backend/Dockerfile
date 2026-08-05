@@ -7,6 +7,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# ReportLab must subset-embed a real CJK TrueType font.  Viewer-side CID font
+# substitution produced apparently valid but visually blank PDF downloads.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y fonts-wqy-zenhei \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --create-home --home-dir /home/app app
 

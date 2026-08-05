@@ -35,9 +35,14 @@ chmod 600 .env.production
 仅在服务器上的 `.env.production` 填入：
 
 - `DEEPSEEK_API_KEY`：真实模型 Key；不得复制到前端、Git、终端回显、截图或聊天记录。
+- `DEEPSEEK_MAX_TOKENS=3000`：逐轮自然访谈的输出上限，不要随终评一起调高。
+- `DEEPSEEK_FINAL_SCORER_MAX_TOKENS=8000`：冻结逐字稿六维终评及其一次合同修复的独立输出上限。
+- `DEEPSEEK_FINAL_SCORER_TIMEOUT_SECONDS=90`：仅用于终评及其一次合同修复；逐轮访谈仍使用较短的通用超时。
 - `ADMIN_USERNAME`：管理员登录名。
 - `ADMIN_PASSWORD_HASH`：Argon2id 密码哈希。先在服务器本地运行 `make admin-password-hash`，只将输出的哈希填入此文件；不要保存明文密码。需要重置密码时，再次在服务器本地运行同一命令，替换哈希后重启后端。
 - `ADMIN_JWT_SECRET`：用 `openssl rand -hex 32` 生成的 64 位十六进制值，用于签名后台会话。
+- `VITE_RESEARCH_CONTACT`：与正式招募/知情同意材料一致的研究咨询、撤回与删除联系渠道；会写入参与者可见的前端构建。
+- `VITE_DATA_RETENTION_NOTICE`：与正式材料一致的数据保存期限、用途和删除/处置说明；会写入参与者可见的前端构建。
 
 不要在服务器仓库内创建 `backend/.env`；生产 Compose 只读取工程根的 `.env.production`，并将 DeepSeek Key 传给后端容器，不传给前端容器。
 
@@ -50,6 +55,8 @@ curl -fsS http://127.0.0.1:18060/healthz
 ```
 
 脚本会构建并启动名为 `cta-v6` 的独立 Compose 项目，等待 Nginx 和数据库迁移健康；它不会修改 Caddy、DNS、TLS 或防火墙。SQLite 数据保存在 Docker 命名卷 `cta-v6-sqlite-data` 中，备份脚本使用 SQLite 在线备份 API，在工程的 Git 忽略目录 `backups/` 写入权限为 `0600` 的快照，不会删除任何旧备份。
+
+后端镜像会同时安装文泉驿正黑并将中文字形子集嵌入 PDF，不再依赖下载端的 CID 字体替换。如果未来替换后端基础镜像，必须在发布验收中重新执行 PDF 真实渲染检查；不能只以“文件以 `%PDF` 开头”作为成功条件。
 
 停止或查看这一个项目时，始终带上此 Compose 文件，避免误操作共享容器：
 

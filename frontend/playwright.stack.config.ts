@@ -21,7 +21,7 @@ export default defineConfig({
       command: "../scripts/start-playwright-stack-backend.sh",
       url: `${backendUrl}/api/v1/health`,
       reuseExistingServer: false,
-      timeout: 120_000,
+      timeout: 300_000,
       stdout: "pipe",
       stderr: "pipe",
       gracefulShutdown: { signal: "SIGTERM", timeout: 5_000 },

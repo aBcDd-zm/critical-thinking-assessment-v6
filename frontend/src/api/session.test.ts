@@ -81,6 +81,20 @@ describe("V6 natural interview NDJSON client", () => {
     expect(finalizingSession(events[4]!)).toMatchObject({ uuid: "session-1", phase: "finalizing" });
   });
 
+  it("preserves the server technical-limit finish reason at the 45-answer hard stop", () => {
+    expect(completedData({
+      event: "agent_completed",
+      data: {
+        turn: { turn_index: 90, role: "assistant", content: "谢谢你完成这次访谈。" },
+        session_action: "finish",
+        finish_reason: "technical_limit",
+      },
+    })).toMatchObject({
+      session_action: "finish",
+      finish_reason: "technical_limit",
+    });
+  });
+
   it("awaits each async event callback before processing the next event", async () => {
     const encoder = new TextEncoder();
     const body = new ReadableStream({

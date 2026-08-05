@@ -6,10 +6,12 @@ import csv
 import io
 import json
 import secrets
+import threading
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
+from pathlib import Path
 from typing import Any, Optional
 
 import jwt
@@ -19,7 +21,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
@@ -60,6 +62,20 @@ from app.services.tts_service import PersistedAITurn, TTSService
 router = APIRouter()
 sessions = SessionService()
 
+_REPORT_PDF_FONT_NAME = "SihengEmbeddedCJK"
+_REPORT_PDF_FONT_LOCK = threading.Lock()
+_REPORT_PDF_FONT_CANDIDATES = (
+    # Debian package ``fonts-wqy-zenhei`` installed by backend/Dockerfile.
+    Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+    # Common alternative for operators that provide Noto CJK themselves.
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    # Local macOS development font with TrueType outlines.
+    Path(
+        "/System/Library/AssetsV2/com_apple_MobileAsset_Font8/"
+        "53fe5be564086fefc7523ccd0a31200acf92e0e5.asset/AssetData/STHEITI.ttf"
+    ),
+)
+
 _PUBLIC_DIMENSION_SUGGESTIONS = {
     "problem_definition": "继续明确目标、范围和需要核实的边界。",
     "evidence_evaluation": "继续核实来源、样本范围和仍不确定的信息。",
@@ -85,9 +101,11 @@ class AdminIdentity:
 
 
 def _service_error(exc: ServiceError) -> JSONResponse:
+    content: dict[str, Any] = {"code": exc.code, "message": exc.message}
+    content.update(exc.details)
     return JSONResponse(
         status_code=exc.status_code,
-        content={"code": exc.code, "message": exc.message},
+        content=content,
     )
 
 
@@ -380,23 +398,16 @@ def get_report(session_uuid: str, db: Session = Depends(get_db)) -> Any:
 
 def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
     output = io.BytesIO()
-    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    font_name = _register_report_pdf_font()
     styles = getSampleStyleSheet()
     for style in styles.byName.values():
-        style.fontName = "STSong-Light"
+        style.fontName = font_name
     doc = SimpleDocTemplate(output, pagesize=A4, title="思衡 V6 自然访谈报告")
     dimensions = list(report.get("dimensions", []))
-    overall_score, measured_count = _public_overall_score(dimensions)
-    total_note = (
-        f"综合总分：{overall_score}（基于 {measured_count} 个证据充分维度计算）"
-        if measured_count
-        else "综合总分：—（暂无可计算维度）"
-    )
     story = [
         Paragraph("思衡访谈报告", styles["Title"]),
         Spacer(1, 8),
         Paragraph(escape(str(report.get("summary", ""))), styles["BodyText"]),
-        Paragraph(escape(total_note), styles["Heading2"]),
         Spacer(1, 10),
     ]
     for item in dimensions:
@@ -409,13 +420,21 @@ def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
                     f"{escape(item['dimension_name'])}：{escape(score_text)}",
                     styles["Heading2"],
                 ),
-                Paragraph(escape(item.get("reason", "")), styles["BodyText"]),
-                Paragraph("优势：" + escape(_public_dimension_strength(item)), styles["BodyText"]),
                 Paragraph(
-                    "建议：" + escape(_public_dimension_suggestion(item.get("dimension_key"))),
+                    "本次观察："
+                    + escape(str(item.get("observation") or item.get("reason", ""))),
                     styles["BodyText"],
                 ),
             ]
+        )
+        strength = _public_dimension_strength(item)
+        if strength:
+            story.append(Paragraph("优势：" + escape(strength), styles["BodyText"]))
+        story.append(
+            Paragraph(
+                "建议：" + escape(_public_dimension_suggestion(item.get("dimension_key"))),
+                styles["BodyText"],
+            )
         )
         for evidence in item.get("evidences", [])[:3]:
             story.append(
@@ -438,27 +457,62 @@ def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
     return output.getvalue()
 
 
+def _register_report_pdf_font() -> str:
+    """Register a real embedded CJK font or fail instead of making blank PDFs.
+
+    ``UnicodeCIDFont('STSong-Light')`` only records a viewer-side font name;
+    it does not embed glyphs and therefore rendered as blank pages in the
+    release-gate visual check.  A TrueType font is subset-embedded by
+    ReportLab, making the download portable across browsers and PDF readers.
+    """
+
+    if _REPORT_PDF_FONT_NAME in pdfmetrics.getRegisteredFontNames():
+        return _REPORT_PDF_FONT_NAME
+    configured = settings.report_pdf_font_path.strip()
+    candidates = ([Path(configured)] if configured else []) + list(
+        _REPORT_PDF_FONT_CANDIDATES
+    )
+    failures: list[str] = []
+    with _REPORT_PDF_FONT_LOCK:
+        if _REPORT_PDF_FONT_NAME in pdfmetrics.getRegisteredFontNames():
+            return _REPORT_PDF_FONT_NAME
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont(_REPORT_PDF_FONT_NAME, str(candidate)))
+                return _REPORT_PDF_FONT_NAME
+            except Exception as exc:  # pragma: no cover - candidate-specific parser errors
+                failures.append(f"{candidate.name}:{type(exc).__name__}")
+    detail = ", ".join(failures) if failures else "no candidate font found"
+    raise RuntimeError(
+        "embedded CJK PDF font unavailable; configure REPORT_PDF_FONT_PATH "
+        f"({detail})"
+    )
+
+
 def _public_score_label(score: int | float) -> str:
-    """Render the fixed 1–5 evidence score as a participant-facing 100-point score."""
+    """Render the frozen 1–5 BARS result without implying an interval scale."""
 
-    return f"{round(float(score) * 20)} 分"
-
-
-def _public_overall_score(dimensions: list[dict[str, Any]]) -> tuple[str, int]:
-    scores = [
-        float(item["score"])
-        for item in dimensions
-        if item.get("status") == "sufficient" and isinstance(item.get("score"), (int, float))
-    ]
-    if not scores:
-        return "—", 0
-    return _public_score_label(sum(scores) / len(scores)), len(scores)
+    value = float(score)
+    label = str(int(value)) if value.is_integer() else f"{value:g}"
+    return f"证据等级 {label}/5（序数）"
 
 
-def _public_dimension_strength(item: dict[str, Any]) -> str:
-    if item.get("status") != "sufficient" or item.get("score") is None:
-        return "本次证据有限，暂不形成该维度的优势判断。"
-    return str(item.get("strength") or item.get("reason") or "本次原话支持了这一维度的观察。")
+def _public_dimension_strength(item: dict[str, Any]) -> str | None:
+    score = item.get("score")
+    if (
+        item.get("status") != "sufficient"
+        or not isinstance(score, (int, float))
+        or float(score) < 4
+    ):
+        return None
+    return str(
+        item.get("strength")
+        or item.get("observation")
+        or item.get("reason")
+        or "本次原话支持了这一维度的较高等级观察。"
+    )
 
 
 def _public_dimension_suggestion(dimension_key: object) -> str:
@@ -734,8 +788,17 @@ def admin_session_detail(
                         "status": run.status,
                         "transcript_fingerprint": run.transcript_fingerprint,
                         "model": f"{run.model_provider}/{run.model_name}",
+                        "requested_model": run.requested_model,
+                        "actual_model": run.actual_model,
+                        "response_id": run.response_id,
+                        "request_id": run.request_id,
+                        "prompt_tokens": run.prompt_tokens,
+                        "completion_tokens": run.completion_tokens,
+                        "total_tokens": run.total_tokens,
+                        "transport_retry_count": run.transport_retry_count,
                         "prompt_template_id": run.prompt_template_id,
                         "prompt_version": run.prompt_version,
+                        "final_scorer_contract_sha256": run.final_scorer_contract_sha256,
                         "repair_used": run.repair_used,
                         "error": run.error,
                         "manual_review_recommended": run.manual_review_recommended,
@@ -753,6 +816,14 @@ def admin_session_detail(
                         "turn_index": turn_index.get(trace.assistant_turn_id),
                         "action": trace.action,
                         "model": f"{trace.model_provider}/{trace.model_name}",
+                        "requested_model": trace.requested_model,
+                        "actual_model": trace.actual_model,
+                        "response_id": trace.response_id,
+                        "request_id": trace.request_id,
+                        "prompt_tokens": trace.prompt_tokens,
+                        "completion_tokens": trace.completion_tokens,
+                        "total_tokens": trace.total_tokens,
+                        "transport_retry_count": trace.transport_retry_count,
                         "prompt_template_id": trace.prompt_template_id,
                         "prompt_version": trace.prompt_version,
                         "input_fingerprint": trace.input_fingerprint,

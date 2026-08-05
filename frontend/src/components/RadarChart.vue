@@ -50,7 +50,7 @@ const scoreArea = computed(() => {
 </script>
 
 <template>
-  <svg class="radar-chart" viewBox="0 0 240 240" role="img" aria-label="六维百分制结果图；只有证据充分的维度显示分数位置，未评分维度仅显示状态标记">
+  <svg class="radar-chart" viewBox="0 0 240 240" role="img" aria-label="六维 1 到 5 序数证据等级图；只有证据充分的维度显示等级位置，未评分维度仅显示状态标记">
     <polygon v-for="ring in rings" :key="ring" :points="ring" class="radar-ring" />
     <line v-for="axis in axes" :key="axis.key" :x1="center" :y1="center" :x2="axis.end.split(',')[0]" :y2="axis.end.split(',')[1]" class="radar-axis" />
     <polygon v-if="scoreArea" :points="scoreArea" class="radar-area" />

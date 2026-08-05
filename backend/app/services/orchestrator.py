@@ -11,13 +11,16 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.domain.catalog import DIMENSIONS, DIMENSION_BY_KEY
+from app.domain.final_scorer_contract import FINAL_SCORER_BARS_CONTRACT_SHA256
+from app.domain.interview_protocol import MIN_VALID_ANSWERS, MAX_USER_ANSWERS
 from app.models import (
     AssessmentReport,
     AssessmentSession,
@@ -44,6 +47,14 @@ SAFETY_STOP_MESSAGE = (
     "你刚才提到的内容可能涉及当下的人身安全。此刻比继续访谈更重要的是先获得"
     "现实中的即时支持；如果你或他人有立即危险，请联系当地紧急服务、身边可信的人，"
     "或尽快到安全的地方。我们先在这里停下。"
+)
+
+# This is a release gate, not an interview script or a dimension-coverage
+# controller. It controls when the independently chosen natural conversation
+# may close; it never chooses a topic or question for the model.
+MINIMUM_EVIDENCE_CONTINUATION = (
+    "我们先不急着收束。为了不把你的意思理解得太快，你愿意再讲一个"
+    "具体情况，让我更明白刚才的想法是怎样形成的吗？"
 )
 
 _PUBLIC_DIMENSION_SUGGESTIONS = {
@@ -104,6 +115,24 @@ _RISK_MARKERS = (
     "吞药",
     "杀了他",
     "杀了她",
+    "伤害他人",
+    "伤害别人",
+    "伤害其他人",
+    "伤害自己",
+    "伤害我自己",
+    "我要伤害他",
+    "我想伤害他",
+    "我要伤害她",
+    "我想伤害她",
+    "我要伤害你",
+    "我想伤害你",
+    "我要伤害人",
+    "我想伤害人",
+    "杀害他人",
+    "杀害别人",
+    "杀害其他人",
+    "我要杀人",
+    "我想杀人",
     "杀人",
     "捅人",
     "砍人",
@@ -180,6 +209,44 @@ class InterviewResult:
     latency_ms: int
     quality_flags: list[str]
     input_fingerprint: str
+    requested_model: str | None = None
+    actual_model: str | None = None
+    response_id: str | None = None
+    request_id: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    transport_retry_count: int = 0
+
+
+def _assign_model_provenance(target: object, source: object) -> None:
+    """Copy only non-content model-call audit fields onto an ORM row."""
+
+    requested_model = getattr(source, "requested_model", None)
+    actual_model = getattr(source, "actual_model", None) or getattr(
+        source, "model", None
+    )
+    provider = getattr(source, "provider", None)
+    if isinstance(provider, str) and provider:
+        setattr(target, "model_provider", provider)
+    if isinstance(actual_model, str) and actual_model:
+        setattr(target, "model_name", actual_model)
+    if requested_model is not None:
+        setattr(target, "requested_model", requested_model)
+    if actual_model is not None:
+        setattr(target, "actual_model", actual_model)
+    for field in (
+        "response_id",
+        "request_id",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "transport_retry_count",
+    ):
+        value = getattr(source, field, None)
+        if field == "transport_retry_count":
+            value = int(value or 0)
+        setattr(target, field, value)
 
 
 def normalized_text(value: str) -> str:
@@ -235,6 +302,79 @@ def _transcript_rows(session: AssessmentSession) -> list[dict[str, Any]]:
         }
         for turn in sorted(session.turns, key=lambda item: item.turn_index)
     ]
+
+
+def _minimum_model_finish_evidence_met(session: AssessmentSession) -> bool:
+    """Return whether a model-led close has reached the V6.1 minimum.
+
+    ``user_answer_count`` is the persisted count of valid answers. Explicit
+    clarification turns do not increment it. Topic and dimension selection
+    remain entirely outside this deterministic gate.
+    """
+
+    return session.user_answer_count >= MIN_VALID_ANSWERS
+
+
+def _protocol_gate_result(
+    *,
+    content: str,
+    session_action: str,
+    finish_reason: str | None,
+    quality_flags: list[str],
+    input_text: str,
+) -> InterviewResult:
+    """Build an auditable result without spending another model call."""
+
+    return InterviewResult(
+        content=content,
+        session_action=session_action,
+        finish_reason=finish_reason,
+        provider="protocol_gate",
+        model="none",
+        prompt_template_id="natural_interviewer_v6.1_release_gate",
+        prompt_version="v6.1.0",
+        repair_used=False,
+        latency_ms=0,
+        quality_flags=quality_flags,
+        input_fingerprint=hashlib.sha256(input_text.encode("utf-8")).hexdigest(),
+    )
+
+
+def _user_explicitly_requests_interview_end(value: str) -> bool:
+    """Recognize a direct request to stop this conversation, not a topic word.
+
+    The model is not trusted to grant itself the ``user_requested`` bypass.
+    Typed requests remain available alongside the explicit finalize endpoint,
+    while phrases such as ``结束这个项目`` do not accidentally end the
+    interview merely because they contain the word ``结束``.
+    """
+
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized:
+        return False
+    direct_requests = (
+        r"^(?:我)?(?:现在)?(?:想|要|希望|决定)?(?:就|先)?(?:结束|停止|退出)(?:这次|本次)?(?:访谈|对话|聊天|交流)?(?:了|吧)?$",
+        r"^(?:我)?不想(?:再)?(?:继续|聊|回答|说)(?:了|下去)?$",
+        r"^(?:就)?到这里(?:就好|可以)?(?:了|吧)?$",
+        r"^(?:先)?这样(?:就好|可以)?(?:了|吧)?$",
+        r"^(?:不用|不要|别)(?:再)?(?:问|继续)(?:了|吧)?$",
+        r"^(?:现在)?(?:请)?(?:结束访谈|结束对话|停止访谈|停止对话|生成报告)(?:了|吧)?$",
+    )
+    # A participant may first finish a substantive answer and then append a
+    # direct request to stop.  Evaluate the whole response and its final
+    # punctuation-delimited clause, while retaining full-match semantics so
+    # topic phrases such as "结束这个项目" cannot trigger the bypass.
+    clauses = [normalized]
+    clauses.extend(
+        part
+        for part in re.split(r"[，,。.!！?？；;:：\n]+", normalized)
+        if part.strip()
+    )
+    for clause in clauses[-2:]:
+        compact = re.sub(r"\s+", "", clause)
+        if any(re.fullmatch(pattern, compact) for pattern in direct_requests):
+            return True
+    return False
 
 
 def transcript_fingerprint(session: AssessmentSession) -> str:
@@ -392,6 +532,43 @@ class InterviewOrchestrator:
                 quality_flags=["safety_stopped"],
                 input_fingerprint=hashlib.sha256(user_turn.content.encode("utf-8")).hexdigest(),
             )
+        if _user_explicitly_requests_interview_end(user_turn.content):
+            if session.user_answer_count < MIN_VALID_ANSWERS:
+                session.phase = "exited"
+                session.finalization_state = "withdrawn_incomplete"
+                session.ended_early = True
+                return _protocol_gate_result(
+                    content=(
+                        "好的，这次访谈已经停止。本次记录会保留为未完成访谈，"
+                        "不会生成正式报告。"
+                    ),
+                    session_action="finish",
+                    finish_reason="user_requested",
+                    quality_flags=["user_withdrew_before_minimum"],
+                    input_text=user_turn.content,
+                )
+            session.phase = "finalizing"
+            session.finalization_state = "awaiting_scoring"
+            return _protocol_gate_result(
+                content="好的，谢谢你完成这次访谈。接下来将只依据你的原话整理报告。",
+                session_action="finish",
+                finish_reason="user_requested",
+                quality_flags=["user_requested_finish_after_minimum"],
+                input_text=user_turn.content,
+            )
+        if session.user_answer_count >= MAX_USER_ANSWERS:
+            session.phase = "finalizing"
+            session.finalization_state = "awaiting_scoring"
+            return _protocol_gate_result(
+                content="谢谢你完成这次访谈。接下来将只依据你的原话整理报告。",
+                session_action="finish",
+                # This is a deterministic protocol close, never a natural or
+                # model-led closure. Keep the origin explicit in the public
+                # event as well as the provider and quality flag.
+                finish_reason="technical_limit",
+                quality_flags=["technical_maximum_reached"],
+                input_text=user_turn.content,
+            )
         payload = {
             "participant": {
                 "display_name": session.display_name or "",
@@ -401,6 +578,12 @@ class InterviewOrchestrator:
                 "collaboration_role": session.collaboration_role or "",
             },
             "transcript": _transcript_rows(session),
+            "completion_gate": {
+                "valid_answer_count": session.user_answer_count,
+                "minimum_valid_answers": MIN_VALID_ANSWERS,
+                "maximum_user_answers": MAX_USER_ANSWERS,
+                "can_model_finish": session.user_answer_count >= MIN_VALID_ANSWERS,
+            },
         }
         call = self.gateway.generate_interviewer(payload)
         result = self._result_from_call(
@@ -408,6 +591,33 @@ class InterviewOrchestrator:
             input_fingerprint=payload_fingerprint(payload),
             latest_user_text=user_turn.content,
         )
+        # Direct user exit requests have already been handled above. A model
+        # cannot manufacture the user-requested bypass from unrelated text.
+        trusted_user_requested = False
+        if result.finish_reason == "user_requested" and not trusted_user_requested:
+            result = replace(
+                result,
+                finish_reason="natural_closure",
+                quality_flags=[
+                    *result.quality_flags,
+                    "unverified_user_requested_finish_reason",
+                ],
+            )
+        if (
+            result.session_action == "finish"
+            and not _minimum_model_finish_evidence_met(session)
+        ):
+            result = replace(
+                result,
+                content=MINIMUM_EVIDENCE_CONTINUATION,
+                session_action="continue",
+                finish_reason=None,
+                quality_flags=[
+                    *result.quality_flags,
+                    "finish_deferred_minimum_valid_answers",
+                    "deterministic_release_guard",
+                ],
+            )
         if result.session_action == "finish":
             session.phase = "finalizing"
             session.finalization_state = "awaiting_scoring"
@@ -446,19 +656,27 @@ class InterviewOrchestrator:
             attempt_number=attempt,
             status="processing",
             transcript_fingerprint=frozen_fingerprint,
-            model_provider="pending",
+            model_provider=(
+                "deepseek" if settings.model_gateway_mode == "real" else "mock"
+            ),
             model_name="pending",
+            requested_model=(
+                settings.deepseek_model
+                if settings.model_gateway_mode == "real"
+                else None
+            ),
             prompt_template_id=NATURAL_FINAL_SCORER_PROMPT_ID,
             prompt_version=NATURAL_FINAL_SCORER_PROMPT_VERSION,
+            final_scorer_contract_sha256=FINAL_SCORER_BARS_CONTRACT_SHA256,
         )
         db.add(run)
         db.commit()
+        call: StructuredCallResult[FinalScorerOutput] | None = None
         try:
             transcript = _transcript_rows(session)
             call = self.gateway.generate_final_scorer({"transcript": transcript})
+            _assign_model_provenance(run, call)
             validated = self._validate_final_output(call.output, transcript)
-            run.model_provider = call.provider
-            run.model_name = call.model
             run.repair_used = call.repair_used
             run.result_data = validated.model_dump(mode="json")
             run.status = "completed"
@@ -488,6 +706,10 @@ class InterviewOrchestrator:
             db.rollback()
             failed = db.get(ScoringRun, run.id)
             if failed:
+                _assign_model_provenance(failed, call or exc)
+                failed.repair_used = bool(
+                    getattr(call or exc, "repair_used", failed.repair_used)
+                )
                 failed.status = "failed"
                 failed.error = f"{type(exc).__name__}: {str(exc)}"[:1000]
                 failed.completed_at = utcnow()
@@ -507,7 +729,26 @@ class InterviewOrchestrator:
         input_fingerprint: str,
         latest_user_text: str | None = None,
     ) -> InterviewResult:
-        quality_flags = _validate_interviewer_output(call.output, latest_user_text)
+        try:
+            quality_flags = _validate_interviewer_output(call.output, latest_user_text)
+        except InterviewContractError as exc:
+            # A response rejected by the visibility/safety contract still has
+            # useful non-content provenance for the failed AgentTrace.
+            for field in (
+                "provider",
+                "model",
+                "requested_model",
+                "actual_model",
+                "response_id",
+                "request_id",
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "transport_retry_count",
+                "repair_used",
+            ):
+                setattr(exc, field, getattr(call, field, None))
+            raise
         return InterviewResult(
             content=call.output.interviewer_message.strip(),
             session_action=call.output.session_action,
@@ -520,6 +761,14 @@ class InterviewOrchestrator:
             latency_ms=call.latency_ms,
             quality_flags=quality_flags,
             input_fingerprint=input_fingerprint,
+            requested_model=call.requested_model,
+            actual_model=call.actual_model or call.model,
+            response_id=call.response_id,
+            request_id=call.request_id,
+            prompt_tokens=call.prompt_tokens,
+            completion_tokens=call.completion_tokens,
+            total_tokens=call.total_tokens,
+            transport_retry_count=call.transport_retry_count,
         )
 
     @staticmethod
@@ -653,7 +902,6 @@ class InterviewOrchestrator:
 
         entries: list[dict[str, Any]] = []
         by_key = {item.dimension_key: item for item in output.dimensions}
-        user_has_content = session.user_answer_count > 0
         for dimension in DIMENSIONS:
             result = by_key[dimension.key]
             score = result.score
@@ -663,25 +911,35 @@ class InterviewOrchestrator:
                     "dimension_name": dimension.name,
                     "score": score,
                     "status": "sufficient" if score is not None else (
-                        "limited" if user_has_content else "unmeasured"
+                        "limited" if result.opportunity_observed else "unmeasured"
                     ),
                     "reason": result.reason,
+                    "observation": result.reason,
                     "strength": (
                         result.reason
-                        if score is not None
-                        else "本次证据有限，暂不形成该维度的优势判断。"
+                        if score is not None and score >= 4
+                        else None
                     ),
                     "suggestion": _PUBLIC_DIMENSION_SUGGESTIONS[dimension.key],
                     "evidences": evidence_by_dimension[dimension.key],
                     "observable_behaviors": list(dimension.observable_behaviors),
                 }
             )
+        high_score_reasons = [
+            item.reason
+            for item in output.dimensions
+            if item.score is not None and item.score >= 4
+        ]
+        # The scorer contract restricts public strengths to level 4--5
+        # dimensions. Preserve its already-sanitized wording when present;
+        # otherwise derive the same concept from high-level dimension reasons.
+        public_strengths = output.strengths or high_score_reasons
         return {
             "session_uuid": session.uuid,
             "experimental_notice": "思衡 V6 是探索性、非标准化的自然访谈演示，不支持跨用户比较或正式效度结论。",
             "summary": "报告只整理本次访谈中可核对的用户原话；缺少证据的视角不会被补问或强行评分。",
             "dimensions": entries,
-            "strengths": output.strengths,
+            "strengths": public_strengths[:2],
             "priorities": output.priorities,
             "manual_review_recommended": any(item.score is None for item in output.dimensions),
             "disclaimer": "数字结果不是人格判断、职业建议或综合排名；请结合具体情境谨慎理解。",
