@@ -21,7 +21,10 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_timeout_seconds: float = 30.0
+    # Final scoring includes the full six-dimension rubric and can take
+    # longer than an interviewer turn. Keep this below the 120s /finalize
+    # reverse-proxy timeout so the server can return a retryable result.
+    deepseek_timeout_seconds: float = 90.0
     deepseek_max_tokens: int = 3000
     tts_mode: Literal["fake", "doubao", "disabled"] = "fake"
     doubao_tts_api_key: str = ""
