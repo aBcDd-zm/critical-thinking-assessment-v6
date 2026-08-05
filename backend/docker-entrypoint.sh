@@ -23,10 +23,24 @@ if [ -z "${DEEPSEEK_API_KEY:-}" ] || [ -z "${ADMIN_USERNAME:-}" ] \
   exit 1
 fi
 
-if [ "${TTS_MODE:-disabled}" = "fake" ]; then
-  echo "Refusing production start: TTS_MODE must not be fake" >&2
-  exit 1
-fi
+case "${TTS_MODE:-disabled}" in
+  disabled) ;;
+  doubao)
+    if [ -z "${DOUBAO_TTS_API_KEY:-}" ] || [ -z "${DOUBAO_TTS_RESOURCE_ID:-}" ] \
+      || [ -z "${DOUBAO_TTS_SPEAKER:-}" ]; then
+      echo "Refusing production start: Doubao TTS configuration is incomplete" >&2
+      exit 1
+    fi
+    ;;
+  fake)
+    echo "Refusing production start: TTS_MODE must not be fake" >&2
+    exit 1
+    ;;
+  *)
+    echo "Refusing production start: TTS_MODE must be doubao or disabled" >&2
+    exit 1
+    ;;
+esac
 
 mkdir -p /app/data
 alembic upgrade head

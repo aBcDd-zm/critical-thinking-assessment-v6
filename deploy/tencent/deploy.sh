@@ -38,9 +38,20 @@ prepare_compose() {
     *) die ".env.production must be owned privately (run chmod 600 .env.production)" ;;
   esac
 
-  for required_key in DEEPSEEK_API_KEY ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET; do
+  for required_key in DEEPSEEK_API_KEY ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET TTS_MODE; do
     require_value "$required_key"
   done
+
+  tts_mode=$(sed -n 's/^TTS_MODE=//p' "$ENV_FILE" | tail -n 1)
+  case "$tts_mode" in
+    disabled) ;;
+    doubao)
+      for required_key in DOUBAO_TTS_API_KEY DOUBAO_TTS_RESOURCE_ID DOUBAO_TTS_SPEAKER; do
+        require_value "$required_key"
+      done
+      ;;
+    *) die "TTS_MODE must be doubao or disabled" ;;
+  esac
 
   # Keep the backend's env file explicit when this script is run from another
   # directory. The file is consumed by Docker only; nothing below prints it.

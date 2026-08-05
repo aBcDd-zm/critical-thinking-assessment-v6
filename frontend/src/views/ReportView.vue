@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 import DimensionCard from "@/components/DimensionCard.vue";
 import RadarChart from "@/components/RadarChart.vue";
@@ -23,6 +23,21 @@ const report = ref<AssessmentReport | null>(null);
 const loading = ref(true);
 const downloading = ref(false);
 const error = ref("");
+let reportRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function retryableReportError(cause: unknown): boolean {
+  if (!(cause instanceof ApiError)) return false;
+  return [409, 502, 503, 504].includes(cause.status);
+}
+
+function waitForReport(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    reportRetryTimer = setTimeout(() => {
+      reportRetryTimer = null;
+      resolve();
+    }, delayMs);
+  });
+}
 
 const dimensions = computed<ReportDimension[]>(() => {
   const byKey = new Map((report.value?.dimensions ?? []).map((item) => [item.dimension_key, item]));
@@ -47,10 +62,24 @@ const overallScore = computed(() => averageEvidenceScore(dimensions.value.map((i
 async function loadReport() {
   loading.value = true;
   error.value = "";
+  report.value = null;
+  const retryDelays = [0, 1000, 2000, 3000, 5000, 5000];
   try {
-    report.value = await getReport(uuid);
-  } catch (cause) {
-    error.value = cause instanceof ApiError ? cause.message : "报告暂时无法读取。";
+    for (const [attempt, delayMs] of retryDelays.entries()) {
+      if (delayMs) {
+        error.value = "报告正在整理，页面会自动重新读取…";
+        await waitForReport(delayMs);
+      }
+      try {
+        report.value = await getReport(uuid);
+        return;
+      } catch (cause) {
+        if (!retryableReportError(cause) || attempt === retryDelays.length - 1) {
+          error.value = cause instanceof ApiError ? cause.message : "报告暂时无法读取。";
+          return;
+        }
+      }
+    }
   } finally {
     loading.value = false;
   }
@@ -72,6 +101,10 @@ async function downloadPdf() {
 onMounted(() => {
   if (localStorage.getItem("v6:last-session") === uuid) localStorage.removeItem("v6:last-session");
   void loadReport();
+});
+
+onBeforeUnmount(() => {
+  if (reportRetryTimer) clearTimeout(reportRetryTimer);
 });
 </script>
 

@@ -70,6 +70,13 @@ class Settings(BaseSettings):
             violations.append("ADMIN_JWT_SECRET must be at least 32 characters")
         if self.tts_mode.strip().lower() == "fake":
             violations.append("TTS_MODE must not be fake")
+        if self.tts_mode == "doubao":
+            if not self.doubao_tts_api_key.strip():
+                violations.append("DOUBAO_TTS_API_KEY must be non-empty when TTS_MODE is doubao")
+            if not self.doubao_tts_resource_id.strip():
+                violations.append("DOUBAO_TTS_RESOURCE_ID must be non-empty when TTS_MODE is doubao")
+            if not self.doubao_tts_speaker.strip():
+                violations.append("DOUBAO_TTS_SPEAKER must be non-empty when TTS_MODE is doubao")
         if violations:
             raise ValueError("invalid production configuration: " + "; ".join(violations))
         return self

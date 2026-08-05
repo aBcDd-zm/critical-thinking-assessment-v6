@@ -354,6 +354,20 @@ def finalize_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
         return _service_error(exc)
 
 
+@router.post(
+    "/admin/sessions/{session_uuid}/finalize",
+    dependencies=[Depends(_require_admin), Depends(_require_csrf)],
+)
+def admin_finalize_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+    """Retry only the frozen, idempotent report finalization path."""
+
+    try:
+        session = sessions.finalize(db, session_uuid)
+        return {"session": session_snapshot(session), "report": serialize_report(session)}
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
 @router.post("/sessions/{session_uuid}/exit")
 def exit_session(
     session_uuid: str,

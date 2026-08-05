@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ReportView from "./ReportView.vue";
+import { ApiError } from "@/api/http";
 
 const mocks = vi.hoisted(() => ({
   getReport: vi.fn(),
@@ -60,5 +61,35 @@ describe("ReportView", () => {
     expect(wrapper.text()).toContain("第 2 次回答 · 用户原话");
     expect(wrapper.text()).toContain("优势");
     expect(wrapper.text()).toContain("建议");
+  });
+
+  it("retries while the final report is still being persisted", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.getReport.mockReset();
+      mocks.getReport
+        .mockRejectedValueOnce(new ApiError("报告仍在生成", 409, { code: "report_not_ready" }))
+        .mockResolvedValueOnce({
+          session_uuid: "session-v6",
+          summary: "报告已生成。",
+          dimensions: [],
+          strengths: [],
+          priorities: [],
+          disclaimer: "仅供本次访谈参考。",
+        });
+
+      const wrapper = mount(ReportView, {
+        global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+      });
+      await flushPromises();
+      expect(mocks.getReport).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushPromises();
+      expect(mocks.getReport).toHaveBeenCalledTimes(2);
+      expect(wrapper.get("h1").text()).toBe("访谈结果");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

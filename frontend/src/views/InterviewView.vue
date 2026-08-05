@@ -230,7 +230,21 @@ async function generateReport(automatic = false) {
     notice.value = "访谈已冻结，报告仍在整理中。你可以稍后安全重试。";
   } catch (cause) {
     error.value = cause instanceof ApiError ? cause.message : "报告生成失败。已保存的访谈不会丢失，可以安全重试。";
-    notice.value = "";
+    try {
+      const snapshot = await synchronizeSession();
+      if (snapshot.phase === "completed" || snapshot.report_available) {
+        localStorage.removeItem("v6:last-session");
+        await router.replace(`/assessment/report/${uuid.value}`);
+        return;
+      }
+      notice.value = snapshot.phase === "finalizing"
+        ? snapshot.finalization_state === "failed"
+          ? "报告生成失败，已保存的访谈不会丢失，可以重试。"
+          : "报告仍在生成中；稍后可以安全重试。"
+        : "会话状态已同步，请根据当前状态继续操作。";
+    } catch {
+      notice.value = "暂时无法同步报告状态；已保存的访谈不会丢失，请稍后重试。";
+    }
   } finally {
     finalizing.value = false;
   }

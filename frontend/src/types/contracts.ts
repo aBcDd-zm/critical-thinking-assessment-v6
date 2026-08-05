@@ -40,6 +40,7 @@ export interface SessionSnapshot {
   turns: DialogueTurn[];
   user_answer_count?: number;
   transcript_fingerprint?: string | null;
+  finalization_state?: string | null;
   report_available?: boolean;
   ended_early?: boolean;
   exit_reason?: string | null;

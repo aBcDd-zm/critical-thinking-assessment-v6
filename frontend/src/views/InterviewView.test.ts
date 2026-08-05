@@ -108,6 +108,29 @@ describe("InterviewView", () => {
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
   });
 
+  it("rechecks the session when finalization times out before routing to the report", async () => {
+    const completedSession = {
+      uuid: "session-v6",
+      phase: "completed" as const,
+      turns: [openingTurn],
+      report_available: true,
+    };
+    mocks.getSession
+      .mockResolvedValueOnce({ uuid: "session-v6", phase: "interviewing", turns: [openingTurn] })
+      .mockResolvedValueOnce(completedSession);
+    mocks.finalizeSession.mockRejectedValue(new Error("请求超时"));
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("button.compact-action").trigger("click");
+    await flushPromises();
+
+    expect(mocks.getSession).toHaveBeenCalledTimes(2);
+    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
   it("does not describe a safety stop as a natural close or generate a report", async () => {
     const safetySession = {
       uuid: "session-v6",
