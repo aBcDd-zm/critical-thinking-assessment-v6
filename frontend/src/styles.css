@@ -83,6 +83,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 
 .interview-page { min-height: 100vh; background: #f4f2ec; }
 .interview-header { width: calc(100% - 64px); max-width: 1500px; border-bottom: 1px solid var(--line); padding: 19px 0; }
+.round-count { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .interview-layout { display: grid; grid-template-columns: 330px minmax(0, 760px); justify-content: center; gap: 56px; width: calc(100% - 48px); max-width: 1250px; margin: 0 auto; padding: 44px 0 60px; }
 .interviewer-panel { position: sticky; top: 28px; align-self: start; display: grid; justify-items: center; gap: 22px; padding: 28px 24px; }
 .interviewer { display: grid; justify-items: center; gap: 15px; }
@@ -139,6 +140,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 .mic-button.recording .mic-icon { animation: pulse .9s ease infinite; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 7px rgb(164 65 53 / 12%); } }
 .char-count { color: #5f6a65; font-size: 11px; }
+.char-count.insufficient { color: var(--warm); }
 .send-button { min-height: 40px; padding: 0 16px; gap: 12px; font-size: 13px; }
 .compact-action { min-height: 40px; padding: 0 14px; font-size: 13px; white-space: nowrap; }
 .finalizing-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin: 24px; border: 1px solid var(--line); background: #f7f5ef; padding: 20px; color: var(--muted); }
@@ -376,6 +378,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 
 @media (max-width: 650px) {
   .brand-bar, .interview-header, .admin-header { width: calc(100% - 28px); padding: 16px 0; }
+  .round-count { font-size: 11px; }
   .consent-page { padding: 24px 18px; place-items: start center; }
   .consent-card, .report-shell, .admin-shell { width: 100%; }
   .field-grid { grid-template-columns: 1fr; }

@@ -28,6 +28,7 @@ vi.mock("vue-router", () => ({
 }));
 
 const openingTurn = { id: 1, turn_index: 0, role: "assistant" as const, phase: "interviewing", content: "你想从哪里开始聊？" };
+const validAnswer = "我正在认真比较这个选择，也想把影响决定的现实条件想清楚。";
 
 describe("InterviewView", () => {
   beforeEach(() => {
@@ -46,13 +47,14 @@ describe("InterviewView", () => {
     });
   });
 
-  it("shows a single natural interviewer with no public stages, coverage, or answer quota", async () => {
+  it("shows a single natural interviewer with a factual answer count but no stage or answer quota", async () => {
     const wrapper = mount(InterviewView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
     });
     await flushPromises();
 
     expect(wrapper.text()).toContain("访谈官 · 澄澄");
+    expect(wrapper.get(".round-count").text()).toBe("已进行 0 轮问答");
     expect(wrapper.text()).toContain("结束并生成报告");
     expect(wrapper.text()).toContain("语音输入");
     expect(wrapper.find(".natural-interview-note").exists()).toBe(false);
@@ -77,7 +79,7 @@ describe("InterviewView", () => {
       user_answer_count: 1,
       turns: [
         openingTurn,
-        { id: 2, turn_index: 1, role: "user" as const, content: "我还在想下一步。", client_turn_id: "client-natural-finish", input_mode: "text", answer_duration_ms: 100 },
+        { id: 2, turn_index: 1, role: "user" as const, content: validAnswer, client_turn_id: "client-natural-finish", input_mode: "text", answer_duration_ms: 100 },
         { id: 3, turn_index: 2, role: "assistant" as const, content: "谢谢你愿意说这些，我们先在这里收束。" },
       ],
     };
@@ -98,7 +100,7 @@ describe("InterviewView", () => {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
     });
     await flushPromises();
-    await wrapper.get("textarea").setValue("我还在想下一步。");
+    await wrapper.get("textarea").setValue(validAnswer);
     await wrapper.get("form").trigger("submit");
     await flushPromises();
 
@@ -113,7 +115,7 @@ describe("InterviewView", () => {
       user_answer_count: 1,
       turns: [
         openingTurn,
-        { id: 2, turn_index: 1, role: "user" as const, content: "我现在有立即危险。", client_turn_id: "client-safety-stop", input_mode: "text", answer_duration_ms: 100 },
+        { id: 2, turn_index: 1, role: "user" as const, content: "我现在有立即危险，已经准备做伤害自己的事，而且身边暂时没有人。", client_turn_id: "client-safety-stop", input_mode: "text", answer_duration_ms: 100 },
         { id: 3, turn_index: 2, role: "assistant" as const, content: "我们先在这里停下，并优先获得现实支持。" },
       ],
     };
@@ -135,7 +137,7 @@ describe("InterviewView", () => {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
     });
     await flushPromises();
-    await wrapper.get("textarea").setValue("我现在有立即危险。");
+    await wrapper.get("textarea").setValue("我现在有立即危险，已经准备做伤害自己的事，而且身边暂时没有人。");
     await wrapper.get("form").trigger("submit");
     await flushPromises();
 
@@ -157,13 +159,60 @@ describe("InterviewView", () => {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
     });
     await flushPromises();
-    await wrapper.get("textarea").setValue("我正在等一个回复。 ");
+    await wrapper.get("textarea").setValue("我正在等一个重要回复，也想把接下来需要确认的事情理清楚。 ");
     await wrapper.get("form").trigger("submit");
     await flushPromises();
 
     expect(wrapper.text()).toContain("与访谈模型的连接暂时中断，已保存你的回答。请重试。");
     expect(wrapper.text()).toContain("用原提交编号重试");
     expect(localStorage.getItem("v6:pending-turn:session-v6")).not.toBeNull();
+  });
+
+  it("requires 20 visible characters and submits once with an unmodified Enter", async () => {
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    const textarea = wrapper.get("textarea");
+    await textarea.setValue("我还在想。");
+    expect(wrapper.get("button.send-button").attributes("disabled")).toBeDefined();
+    expect(wrapper.get(".char-count").text()).toContain("还差");
+    await textarea.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(mocks.submitTurnStream).not.toHaveBeenCalled();
+
+    await textarea.setValue(validAnswer);
+    await textarea.trigger("keydown", { key: "Enter", shiftKey: true });
+    await textarea.trigger("keydown", { key: "Enter", isComposing: true });
+    await flushPromises();
+    expect(mocks.submitTurnStream).not.toHaveBeenCalled();
+
+    await textarea.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(mocks.submitTurnStream).toHaveBeenCalledTimes(1);
+    expect(mocks.submitTurnStream.mock.calls[0][1]).toMatchObject({ content: validAnswer });
+  });
+
+  it("renders the current number of saved user answers without implying a target", async () => {
+    mocks.getSession.mockResolvedValue({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 2,
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user", content: validAnswer },
+        { id: 3, turn_index: 2, role: "assistant", content: "你最想先厘清的是什么？" },
+        { id: 4, turn_index: 3, role: "user", content: "我也会继续核实不同选择可能带来的影响和限制。" },
+      ],
+    });
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.get(".round-count").text()).toBe("已进行 2 轮问答");
+    expect(wrapper.text()).not.toContain("最多 2");
   });
 
   it("drops an expired local recovery answer instead of submitting it", async () => {

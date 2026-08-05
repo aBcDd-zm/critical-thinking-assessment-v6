@@ -306,18 +306,45 @@ def _source_turn_is_only_self_label(source: str) -> bool:
     return not any(marker in compact for marker in behavioural_context)
 
 
-def _quality_flags(message: str) -> list[str]:
+def _repeats_latest_user_wording(message: str, latest_user_text: str | None) -> bool:
+    """Detect substantial verbatim echoing without changing the model's wording.
+
+    V6 deliberately records ordinary style issues rather than replacing a
+    natural question after the fact.  A continuous 12-character overlap is a
+    useful review signal while avoiding flags for short, unavoidable words.
+    """
+
+    if not latest_user_text:
+        return False
+    response = normalized_text(message)
+    source = normalized_text(latest_user_text)
+    minimum_span = 12
+    if len(response) < minimum_span or len(source) < minimum_span:
+        return False
+    return any(
+        source[index:index + minimum_span] in response
+        for index in range(len(source) - minimum_span + 1)
+    )
+
+
+def _quality_flags(message: str, latest_user_text: str | None = None) -> list[str]:
     flags: list[str] = []
     if message.count("？") + message.count("?") > 1:
         flags.append("multiple_primary_questions")
     if re.search(r"(?:A[、.]|B[、.]|二选一|选择[AB])", message, flags=re.IGNORECASE):
         flags.append("option_format")
+    if re.search(r"(?:是|会|想|要|更(?:像|倾向于)?).{1,24}(?:还是|或者).{1,24}[？?]", message):
+        flags.append("binary_choice_question")
     if re.search(r"(?:你应该|建议你|第一步|第二步|正确答案)", message):
         flags.append("instructional_tone")
+    if _repeats_latest_user_wording(message, latest_user_text):
+        flags.append("repeated_user_wording")
     return flags
 
 
-def _validate_interviewer_output(output: NaturalInterviewerOutput) -> list[str]:
+def _validate_interviewer_output(
+    output: NaturalInterviewerOutput, latest_user_text: str | None = None
+) -> list[str]:
     message = output.interviewer_message.strip()
     if not message:
         raise InterviewContractError("empty_interviewer_message")
@@ -335,7 +362,7 @@ def _validate_interviewer_output(output: NaturalInterviewerOutput) -> list[str]:
     )
     if any(term.casefold() in message.casefold() for term in leaked_terms):
         raise InterviewContractError("internal_or_scoring_leak")
-    return _quality_flags(message)
+    return _quality_flags(message, latest_user_text)
 
 
 class InterviewOrchestrator:
@@ -376,7 +403,11 @@ class InterviewOrchestrator:
             "transcript": _transcript_rows(session),
         }
         call = self.gateway.generate_interviewer(payload)
-        result = self._result_from_call(call, input_fingerprint=payload_fingerprint(payload))
+        result = self._result_from_call(
+            call,
+            input_fingerprint=payload_fingerprint(payload),
+            latest_user_text=user_turn.content,
+        )
         if result.session_action == "finish":
             session.phase = "finalizing"
             session.finalization_state = "awaiting_scoring"
@@ -474,8 +505,9 @@ class InterviewOrchestrator:
         call: StructuredCallResult[NaturalInterviewerOutput],
         *,
         input_fingerprint: str,
+        latest_user_text: str | None = None,
     ) -> InterviewResult:
-        quality_flags = _validate_interviewer_output(call.output)
+        quality_flags = _validate_interviewer_output(call.output, latest_user_text)
         return InterviewResult(
             content=call.output.interviewer_message.strip(),
             session_action=call.output.session_action,

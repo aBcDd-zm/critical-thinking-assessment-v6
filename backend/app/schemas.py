@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 DimensionKey = Literal[
@@ -20,6 +20,15 @@ DimensionKey = Literal[
     "integrative_decision",
     "dynamic_adjustment",
 ]
+
+
+MIN_ANSWER_VISIBLE_CHARACTERS = 20
+
+
+def visible_character_count(value: str) -> int:
+    """Count user-visible characters while ignoring spaces and line breaks."""
+
+    return sum(1 for character in value if not character.isspace())
 
 
 class StrictModelOutput(BaseModel):
@@ -124,6 +133,18 @@ class SubmitTurnRequest(BaseModel):
     # Accept the previous client shape during the isolated migration.
     # Internally it is diagnostic data and never affects interview routing.
     technical_anomalies: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("content")
+    @classmethod
+    def normalize_and_require_minimum_answer_length(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("content must not be blank")
+        if visible_character_count(cleaned) < MIN_ANSWER_VISIBLE_CHARACTERS:
+            raise ValueError(
+                f"每次回答至少需要 {MIN_ANSWER_VISIBLE_CHARACTERS} 个字。"
+            )
+        return cleaned
 
     @model_validator(mode="after")
     def reject_blank(self) -> "SubmitTurnRequest":

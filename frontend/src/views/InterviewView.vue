@@ -42,6 +42,13 @@ const leaving = ref(false);
 const playback = useSpeechPlayback();
 let activeController: AbortController | null = null;
 
+const MIN_ANSWER_VISIBLE_CHARACTERS = 20;
+const MIN_ANSWER_MESSAGE = `每次回答至少需要 ${MIN_ANSWER_VISIBLE_CHARACTERS} 个字。`;
+
+function visibleCharacterCount(value: string): number {
+  return Array.from(value).filter((character) => !/\s/u.test(character)).length;
+}
+
 const interviewerState = computed<InterviewerState>(() => {
   if (voice.listening.value) return "listening";
   if (playback.speaking.value) return "speaking";
@@ -59,7 +66,15 @@ const voice = useVoiceInput(
 );
 
 const isInterviewing = computed(() => session.value?.phase === "interviewing");
-const canSubmit = computed(() => draft.value.trim().length > 0 && isInterviewing.value && !sending.value && !loading.value);
+const visibleDraftLength = computed(() => visibleCharacterCount(draft.value));
+const remainingAnswerCharacters = computed(() => Math.max(0, MIN_ANSWER_VISIBLE_CHARACTERS - visibleDraftLength.value));
+const roundCount = computed(() => turns.value.filter((turn) => turn.role === "user").length);
+const canSubmit = computed(() => (
+  visibleDraftLength.value >= MIN_ANSWER_VISIBLE_CHARACTERS
+  && isInterviewing.value
+  && !sending.value
+  && !loading.value
+));
 const canFinish = computed(() => isInterviewing.value && !sending.value && !finalizing.value && !loading.value);
 const pendingKey = computed(() => `v6:pending-turn:${uuid.value}`);
 const PENDING_TURN_TTL_MS = 24 * 60 * 60 * 1000;
@@ -69,7 +84,7 @@ function isTurnRequest(value: unknown): value is TurnRequest {
   const candidate = value as Partial<TurnRequest>;
   return (
     typeof candidate.content === "string"
-    && candidate.content.trim().length > 0
+    && visibleCharacterCount(candidate.content) >= MIN_ANSWER_VISIBLE_CHARACTERS
     && typeof candidate.client_turn_id === "string"
     && ["text", "voice", "voice_edited"].includes(String(candidate.input_mode))
     && typeof candidate.answer_duration_ms === "number"
@@ -113,6 +128,22 @@ function updateTurns(nextTurns: DialogueTurn[]) {
 
 function onDraftInput() {
   inputMode.value = voiceWasUsed.value ? "voice_edited" : "text";
+  if (error.value === MIN_ANSWER_MESSAGE) error.value = "";
+}
+
+function onAnswerKeydown(event: KeyboardEvent) {
+  if (
+    event.key !== "Enter"
+    || event.shiftKey
+    || event.isComposing
+    || event.repeat
+  ) return;
+  event.preventDefault();
+  if (canSubmit.value) {
+    void submitAnswer();
+  } else if (draft.value.trim() && visibleDraftLength.value < MIN_ANSWER_VISIBLE_CHARACTERS) {
+    error.value = MIN_ANSWER_MESSAGE;
+  }
 }
 
 function toggleVoice() {
@@ -265,6 +296,10 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
 async function submitAnswer() {
   const content = draft.value.trim();
   if (!content || sending.value) return;
+  if (visibleCharacterCount(content) < MIN_ANSWER_VISIBLE_CHARACTERS) {
+    error.value = MIN_ANSWER_MESSAGE;
+    return;
+  }
   if (voice.listening.value) voice.stop();
   playback.stop();
   const payload: TurnRequest = {
@@ -376,6 +411,7 @@ onBeforeUnmount(() => {
   <main class="interview-page">
     <header class="interview-header">
       <button type="button" class="brand compact brand-button" @click="leaveEarly"><span>思衡</span><small>V6</small></button>
+      <span v-if="session" class="round-count" aria-live="polite">已进行 {{ roundCount }} 轮问答</span>
       <button type="button" class="quiet-button" @click="leaveEarly">退出不生成报告</button>
     </header>
 
@@ -438,9 +474,10 @@ onBeforeUnmount(() => {
             v-model="draft"
             rows="4"
             maxlength="4000"
-            placeholder="按你此刻真实的想法说就好；也可以说“跳过”…"
+            placeholder="按你此刻真实的想法说就好（至少 20 字）…"
             :disabled="sending || finalizing"
             @input="onDraftInput"
+            @keydown="onAnswerKeydown"
           />
           <div class="composer-actions">
             <div>
@@ -457,7 +494,9 @@ onBeforeUnmount(() => {
               <small v-if="voice.error.value">{{ voice.error.value }}</small>
               <small v-else-if="voiceWasUsed">转写已放入文本框，请确认或修改后手动提交</small>
             </div>
-            <span class="char-count">{{ draft.length }}/4000</span>
+            <span class="char-count" :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }">
+              {{ visibleDraftLength }}/4000 · 至少 {{ MIN_ANSWER_VISIBLE_CHARACTERS }} 字<span v-if="draft.trim() && remainingAnswerCharacters > 0">，还差 {{ remainingAnswerCharacters }} 字</span>
+            </span>
             <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">结束并生成报告</button>
             <button class="send-button" type="submit" :disabled="!canSubmit">
               {{ sending ? "正在回应…" : "提交回答" }}<span aria-hidden="true">↑</span>

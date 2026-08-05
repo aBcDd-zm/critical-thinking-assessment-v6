@@ -143,12 +143,17 @@ test("consent → natural conversation → model closing → evidence report", a
 
   await expect(page.getByText("第 1 / 最多 12 次回答")).toHaveCount(0);
   await expect(page.getByText("问题界定", { exact: true })).toHaveCount(0);
-  await page.getByLabel("你的回答").fill("我想先确认自己真正重视什么");
-  await page.getByRole("button", { name: /提交回答/ }).click();
+  await expect(page.getByText("已进行 0 轮问答", { exact: true })).toBeVisible();
+  await page.getByLabel("你的回答").fill("我还在想。");
+  await expect(page.getByRole("button", { name: /提交回答/ })).toBeDisabled();
+  await expect(page.getByText(/还差 \d+ 字/)).toBeVisible();
+  await page.getByLabel("你的回答").fill("我想先确认自己真正重视什么，也想弄清楚这个选择会带来的变化。");
+  await page.getByLabel("你的回答").press("Enter");
   await expect(page.getByText("听起来这对你很重要；你现在最在意的是什么？")).toBeVisible();
+  await expect(page.getByText("已进行 1 轮问答", { exact: true })).toBeVisible();
 
-  await page.getByLabel("你的回答").fill("我也担心自己会后悔。");
-  await page.getByRole("button", { name: /提交回答/ }).click();
+  await page.getByLabel("你的回答").fill("我也担心自己会后悔，所以想继续听听不同人的看法并再确认条件。");
+  await page.getByLabel("你的回答").press("Enter");
   await expect(page).toHaveURL(new RegExp(`/assessment/report/${UUID}$`));
   await expect(page.getByRole("heading", { name: "访谈结果" })).toBeVisible();
   await expect(page.locator(".radar-chart")).toBeVisible();
