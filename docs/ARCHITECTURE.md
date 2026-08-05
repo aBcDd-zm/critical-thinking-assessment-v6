@@ -10,7 +10,7 @@ flowchart LR
     I --> S
     S --> D[("Session / Turns / Traces\nPrompt and model versions")]
     S --> F["冻结 transcript + SHA-256"]
-    F --> R["natural_final_scorer_v6.0.0\n一次性六维取证"]
+    F --> R["natural_final_scorer_v6.1.0\n五级锚点 + 一次性六维取证"]
     R --> D
     D --> A["管理员登录 / 复核看板 / 匿名导出 / PDF"]
 ```
