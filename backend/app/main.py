@@ -40,7 +40,9 @@ def create_app(config: Settings = settings) -> FastAPI:
 
     @application.exception_handler(ServiceError)
     async def service_error_handler(_request: Request, exc: ServiceError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"code": exc.code, "message": exc.message})
+        content = {"code": exc.code, "message": exc.message}
+        content.update(exc.details)
+        return JSONResponse(status_code=exc.status_code, content=content)
 
     return application
 

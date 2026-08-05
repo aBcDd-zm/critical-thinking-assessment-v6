@@ -1,15 +1,6 @@
-/**
- * The assessment contract remains a five-level evidence score internally.
- * Participant-facing reports present that fixed scale as a score out of 100.
- */
-export function scoreOutOfHundred(score: number | null | undefined): number | null {
-  if (typeof score !== "number" || !Number.isFinite(score)) return null;
-  return Math.round(score * 20);
-}
-
 export function publicScoreLabel(score: number | null | undefined): string {
-  const value = scoreOutOfHundred(score);
-  return value === null ? "—" : `${value} 分`;
+  if (typeof score !== "number" || !Number.isFinite(score)) return "—";
+  return `证据等级 ${Number.isInteger(score) ? score : score.toFixed(1)}/5（序数）`;
 }
 
 export function averageEvidenceScore(scores: Array<number | null | undefined>): number | null {

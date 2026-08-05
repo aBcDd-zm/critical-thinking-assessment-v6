@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,21 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_timeout_seconds: float = 30.0
     deepseek_max_tokens: int = 3000
+    # The frozen six-dimension scorer returns a substantially larger JSON
+    # document than one interview turn. Its independent budget prevents a
+    # scoring fix from silently increasing interview latency or verbosity.
+    deepseek_final_scorer_max_tokens: int = Field(default=8000, ge=1, le=8000)
+    # Final scoring returns the full six-dimension BARS document and can take
+    # longer than one interview turn. Keep its transport deadline independent
+    # so a reliability fix cannot slow the live conversation path.
+    deepseek_final_scorer_timeout_seconds: float = Field(
+        default=90.0, gt=0, le=180
+    )
+    # PDF generation must use an embedded TrueType CJK font.  Production
+    # images install WenQuanYi Zen Hei, while this optional override keeps
+    # local and test environments deterministic without relying on a PDF
+    # viewer's non-portable CID-font substitution.
+    report_pdf_font_path: str = ""
     tts_mode: Literal["fake", "doubao", "disabled"] = "fake"
     doubao_tts_api_key: str = ""
     doubao_tts_resource_id: str = "seed-tts-2.0"

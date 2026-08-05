@@ -12,9 +12,11 @@ import {
   submitTurnStream,
 } from "@/api/session";
 import { useSpeechPlayback, useVoiceInput } from "@/composables/useVoice";
+import { answerCount } from "@/types/contracts";
 import type {
   DialogueTurn,
   InputMode,
+  InteractionKind,
   InterviewerState,
   SessionSnapshot,
   TurnRequest,
@@ -42,11 +44,92 @@ const leaving = ref(false);
 const playback = useSpeechPlayback();
 let activeController: AbortController | null = null;
 
-const MIN_ANSWER_VISIBLE_CHARACTERS = 20;
-const MIN_ANSWER_MESSAGE = `每次回答至少需要 ${MIN_ANSWER_VISIBLE_CHARACTERS} 个字。`;
+const MINIMUM_VALID_ANSWERS = 40;
+const SUBSEQUENT_ANSWER_MIN_VISIBLE_CHARACTERS = 20;
+const CLARIFICATION_REQUEST = "我没理解，请换一种问法。";
+const IMMEDIATE_RISK_MARKERS = [
+  "自杀", "自残", "自伤", "轻生", "寻死", "不想活", "活不下去", "我想死", "我要死",
+  "结束生命", "割腕", "跳楼", "吞药", "杀了他", "杀了她", "杀人", "杀害他人", "伤害他人",
+  "杀害别人", "伤害别人", "杀害其他人", "伤害其他人", "伤害自己", "我要杀人", "我想杀人",
+  "伤害我自己", "我要伤害他", "我想伤害他", "我要伤害她", "我想伤害她", "我要伤害你", "我想伤害你", "我要伤害人", "我想伤害人",
+  "捅人", "砍人", "开枪", "正在打我", "家暴", "被绑架",
+  "suicide", "selfharm", "harmmyself", "hurtmyself", "killmyself", "iwanttodie", "endmylife",
+  "overdose", "killsomeone", "harmsomeone", "hurtsomeone", "stabsomeone", "immediatedanger",
+] as const;
+const SAFETY_CONTEXT_EXEMPTIONS = [
+  "自杀预防", "自伤预防", "suicideprevention", "selfharmprevention", "过去", "曾经", "历史上", "朋友说", "新闻里",
+] as const;
+const PRESENT_RISK_MARKERS = ["现在", "今晚", "马上", "准备", "计划", "rightnow", "tonight", "imgoingto"] as const;
 
 function visibleCharacterCount(value: string): number {
-  return Array.from(value).filter((character) => !/\s/u.test(character)).length;
+  return Array.from(value.normalize("NFKC")).filter(
+    (character) => /[\p{L}\p{N}]/u.test(character),
+  ).length;
+}
+
+function normalizedIntentText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/殺/gu, "杀")
+    .replace(/殘/gu, "残")
+    .replace(/傷/gu, "伤")
+    .replace(/輕/gu, "轻")
+    .replace(/尋/gu, "寻")
+    .replace(/藥/gu, "药")
+    .replace(/綁/gu, "绑")
+    .replace(/樓/gu, "楼")
+    .replace(/開/gu, "开")
+    .replace(/[і]/gu, "i")
+    .replace(/[ѕ]/gu, "s")
+    .replace(/[с]/gu, "c")
+    .replace(/[е]/gu, "e")
+    .replace(/[а]/gu, "a")
+    .replace(/[о]/gu, "o")
+    .replace(/[\s\p{P}]/gu, "");
+}
+
+function isClarificationText(value: string): boolean {
+  const compact = Array.from(value.normalize("NFKC"))
+    .filter((character) => /[\p{L}\p{N}]/u.test(character))
+    .join("");
+  if (!compact || visibleCharacterCount(compact) > 24) return false;
+  return (
+    /^(?:我)?(?:没|不)(?:听懂|理解|明白)(?:你?刚才(?:的)?(?:问题|意思|说法)?)?$/u.test(compact)
+    || /^(?:这|刚才|你刚才说的)?什么意思$/u.test(compact)
+    || /^(?:请|可以|能不能|麻烦)?(?:换(?:一个|一种|个|种)?(?:问法|说法)|再(?:说|解释)(?:一遍|一下)?)$/u.test(compact)
+    || compact === "我没理解请换一种问法"
+  );
+}
+
+function isSafetyText(value: string): boolean {
+  const normalized = normalizedIntentText(value);
+  if (!IMMEDIATE_RISK_MARKERS.some((marker) => normalized.includes(marker))) return false;
+  if (SAFETY_CONTEXT_EXEMPTIONS.some((marker) => normalized.includes(marker))) {
+    return PRESENT_RISK_MARKERS.some((marker) => normalized.includes(marker));
+  }
+  return true;
+}
+
+function isExitText(value: string): boolean {
+  const normalized = value.normalize("NFKC").trim();
+  if (!normalized) return false;
+  const directRequests = [
+    /^(?:我)?(?:现在)?(?:想|要|希望|决定)?(?:就|先)?(?:结束|停止|退出)(?:这次|本次)?(?:访谈|对话|聊天|交流)?(?:了|吧)?$/u,
+    /^(?:我)?不想(?:再)?(?:继续|聊|回答|说)(?:了|下去)?$/u,
+    /^(?:就)?到这里(?:就好|可以)?(?:了|吧)?$/u,
+    /^(?:先)?这样(?:就好|可以)?(?:了|吧)?$/u,
+    /^(?:不用|不要|别)(?:再)?(?:问|继续)(?:了|吧)?$/u,
+    /^(?:现在)?(?:请)?(?:结束访谈|结束对话|停止访谈|停止对话|生成报告)(?:了|吧)?$/u,
+  ];
+  const clauses = [
+    normalized,
+    ...normalized.split(/[，,。.!！?？；;:：\n]+/u).filter((part) => part.trim()),
+  ];
+  return clauses
+    .slice(-2)
+    .map((clause) => clause.replace(/\s+/gu, ""))
+    .some((clause) => directRequests.some((pattern) => pattern.test(clause)));
 }
 
 const interviewerState = computed<InterviewerState>(() => {
@@ -66,16 +149,77 @@ const voice = useVoiceInput(
 );
 
 const isInterviewing = computed(() => session.value?.phase === "interviewing");
+const validAnswerCount = computed(() => (
+  session.value
+    ? answerCount({ ...session.value, turns: turns.value })
+    : 0
+));
+const minimumValidAnswers = computed(() => {
+  const serverMinimum = session.value?.minimum_valid_answers;
+  return typeof serverMinimum === "number" && Number.isFinite(serverMinimum) && serverMinimum > 0
+    ? Math.floor(serverMinimum)
+    : MINIMUM_VALID_ANSWERS;
+});
+const remainingRequiredAnswers = computed(() => {
+  const serverRemaining = session.value?.remaining_required_answers;
+  return typeof serverRemaining === "number" && Number.isFinite(serverRemaining)
+    ? Math.max(0, Math.floor(serverRemaining))
+    : Math.max(0, minimumValidAnswers.value - validAnswerCount.value);
+});
 const visibleDraftLength = computed(() => visibleCharacterCount(draft.value));
-const remainingAnswerCharacters = computed(() => Math.max(0, MIN_ANSWER_VISIBLE_CHARACTERS - visibleDraftLength.value));
-const roundCount = computed(() => turns.value.filter((turn) => turn.role === "user").length);
+const isFirstValidAnswer = computed(() => validAnswerCount.value === 0);
+const requiredVisibleCharacters = computed(() => (
+  isFirstValidAnswer.value ? 1 : SUBSEQUENT_ANSWER_MIN_VISIBLE_CHARACTERS
+));
+const isShortAnswerExempt = computed(() => (
+  isClarificationText(draft.value)
+  || isSafetyText(draft.value)
+  || isExitText(draft.value)
+));
+const meetsAnswerLength = computed(() => (
+  visibleDraftLength.value >= requiredVisibleCharacters.value || isShortAnswerExempt.value
+));
+const remainingAnswerCharacters = computed(() => Math.max(
+  0,
+  requiredVisibleCharacters.value - visibleDraftLength.value,
+));
+const completionEligible = computed(() => (
+  typeof session.value?.can_finalize === "boolean"
+    ? session.value.can_finalize
+    : validAnswerCount.value >= minimumValidAnswers.value
+));
+const progressLabel = computed(() => (
+  completionEligible.value
+    ? `有效回答 ${validAnswerCount.value}/${minimumValidAnswers.value} · 已达到完成条件`
+    : `有效回答 ${validAnswerCount.value}/${minimumValidAnswers.value}`
+));
+const answerLengthHint = computed(() => {
+  if (isClarificationText(draft.value)) return "澄清请求可直接提交，不计入有效回答。";
+  if (isShortAnswerExempt.value) return "这类重要输入可直接提交。";
+  if (isFirstValidAnswer.value) {
+    return visibleDraftLength.value > 0
+      ? "首次回答简短也可以，接下来会根据你的话继续聊。"
+      : "首次回答简短也可以。";
+  }
+  if (remainingAnswerCharacters.value > 0) {
+    return `可以再补充你这样想的原因、依据或一个具体例子（还差 ${remainingAnswerCharacters.value} 个有效字符）。`;
+  }
+  return "已达到本次回答的最低长度。";
+});
 const canSubmit = computed(() => (
-  visibleDraftLength.value >= MIN_ANSWER_VISIBLE_CHARACTERS
+  draft.value.trim().length > 0
+  && meetsAnswerLength.value
   && isInterviewing.value
   && !sending.value
   && !loading.value
 ));
-const canFinish = computed(() => isInterviewing.value && !sending.value && !finalizing.value && !loading.value);
+const canFinish = computed(() => (
+  completionEligible.value
+  && isInterviewing.value
+  && !sending.value
+  && !finalizing.value
+  && !loading.value
+));
 const pendingKey = computed(() => `v6:pending-turn:${uuid.value}`);
 const PENDING_TURN_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -84,9 +228,10 @@ function isTurnRequest(value: unknown): value is TurnRequest {
   const candidate = value as Partial<TurnRequest>;
   return (
     typeof candidate.content === "string"
-    && visibleCharacterCount(candidate.content) >= MIN_ANSWER_VISIBLE_CHARACTERS
+    && candidate.content.trim().length > 0
     && typeof candidate.client_turn_id === "string"
     && ["text", "voice", "voice_edited"].includes(String(candidate.input_mode))
+    && (candidate.interaction_kind === undefined || ["answer", "clarification"].includes(String(candidate.interaction_kind)))
     && typeof candidate.answer_duration_ms === "number"
   );
 }
@@ -128,7 +273,7 @@ function updateTurns(nextTurns: DialogueTurn[]) {
 
 function onDraftInput() {
   inputMode.value = voiceWasUsed.value ? "voice_edited" : "text";
-  if (error.value === MIN_ANSWER_MESSAGE) error.value = "";
+  if (error.value.startsWith("这次回答还可以再补充")) error.value = "";
 }
 
 function onAnswerKeydown(event: KeyboardEvent) {
@@ -141,8 +286,8 @@ function onAnswerKeydown(event: KeyboardEvent) {
   event.preventDefault();
   if (canSubmit.value) {
     void submitAnswer();
-  } else if (draft.value.trim() && visibleDraftLength.value < MIN_ANSWER_VISIBLE_CHARACTERS) {
-    error.value = MIN_ANSWER_MESSAGE;
+  } else if (draft.value.trim() && !meetsAnswerLength.value) {
+    error.value = `这次回答还可以再补充 ${remainingAnswerCharacters.value} 个有效字符。也可说说你的原因、依据或一个具体例子。`;
   }
 }
 
@@ -229,7 +374,24 @@ async function generateReport(automatic = false) {
     }
     notice.value = "访谈已冻结，报告仍在整理中。你可以稍后安全重试。";
   } catch (cause) {
-    error.value = cause instanceof ApiError ? cause.message : "报告生成失败。已保存的访谈不会丢失，可以安全重试。";
+    const body = cause instanceof ApiError && cause.body && typeof cause.body === "object"
+      ? cause.body as Record<string, unknown>
+      : null;
+    const detail = body?.detail && typeof body.detail === "object"
+      ? body.detail as Record<string, unknown>
+      : null;
+    const code = body?.code ?? detail?.code;
+    const remainingFromServer = body?.remaining_answers ?? detail?.remaining_answers;
+    const remaining = typeof remainingFromServer === "number"
+      ? Math.max(0, Math.floor(remainingFromServer))
+      : remainingRequiredAnswers.value;
+    error.value = code === "minimum_valid_answers_not_reached"
+      ? remaining > 0
+        ? `这次访谈还需要完成 ${remaining} 次有效回答，再生成完整报告。`
+        : "服务端尚未确认完成条件，请刷新后重试。已保存的回答不会丢失。"
+      : cause instanceof ApiError
+        ? cause.message
+        : "报告生成失败。已保存的访谈不会丢失，可以安全重试。";
     notice.value = "";
   } finally {
     finalizing.value = false;
@@ -243,6 +405,31 @@ async function finishAndGenerate() {
   voice.stop();
   playback.stop();
   await generateReport();
+}
+
+async function submitContent(
+  content: string,
+  interactionKind: InteractionKind,
+  clearDraft: boolean,
+) {
+  if (!content.trim() || sending.value) return;
+  if (voice.listening.value) voice.stop();
+  playback.stop();
+  const payload: TurnRequest = {
+    content: content.trim(),
+    client_turn_id: crypto.randomUUID(),
+    input_mode: interactionKind === "clarification" ? "text" : inputMode.value,
+    interaction_kind: interactionKind,
+    answer_duration_ms: Math.max(0, Date.now() - answerStartedAt.value),
+  };
+  localStorage.setItem(pendingKey.value, JSON.stringify({ saved_at: Date.now(), payload }));
+  hasPending.value = true;
+  if (clearDraft) {
+    draft.value = "";
+    inputMode.value = "text";
+    voiceWasUsed.value = false;
+  }
+  await sendPayload(payload);
 }
 
 async function sendPayload(payload: TurnRequest, restoring = false) {
@@ -296,24 +483,17 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
 async function submitAnswer() {
   const content = draft.value.trim();
   if (!content || sending.value) return;
-  if (visibleCharacterCount(content) < MIN_ANSWER_VISIBLE_CHARACTERS) {
-    error.value = MIN_ANSWER_MESSAGE;
+  if (!meetsAnswerLength.value) {
+    error.value = `这次回答还可以再补充 ${remainingAnswerCharacters.value} 个有效字符。也可说说你的原因、依据或一个具体例子。`;
     return;
   }
-  if (voice.listening.value) voice.stop();
-  playback.stop();
-  const payload: TurnRequest = {
-    content,
-    client_turn_id: crypto.randomUUID(),
-    input_mode: inputMode.value,
-    answer_duration_ms: Math.max(0, Date.now() - answerStartedAt.value),
-  };
-  localStorage.setItem(pendingKey.value, JSON.stringify({ saved_at: Date.now(), payload }));
-  hasPending.value = true;
-  draft.value = "";
-  inputMode.value = "text";
-  voiceWasUsed.value = false;
-  await sendPayload(payload);
+  const interactionKind: InteractionKind = isClarificationText(content) ? "clarification" : "answer";
+  await submitContent(content, interactionKind, true);
+}
+
+async function requestClarification() {
+  if (!isInterviewing.value || sending.value || finalizing.value || loading.value) return;
+  await submitContent(CLARIFICATION_REQUEST, "clarification", false);
 }
 
 async function recoverPending() {
@@ -411,8 +591,8 @@ onBeforeUnmount(() => {
   <main class="interview-page">
     <header class="interview-header">
       <button type="button" class="brand compact brand-button" @click="leaveEarly"><span>思衡</span><small>V6</small></button>
-      <span v-if="session" class="round-count" aria-live="polite">已进行 {{ roundCount }} 轮问答</span>
-      <button type="button" class="quiet-button" @click="leaveEarly">退出不生成报告</button>
+      <span v-if="session" class="round-count" aria-live="polite">{{ progressLabel }}</span>
+      <button type="button" class="quiet-button" @click="leaveEarly">退出访谈</button>
     </header>
 
     <section v-if="loading" class="center-state"><span class="loading-ring" />正在恢复访谈…</section>
@@ -474,7 +654,7 @@ onBeforeUnmount(() => {
             v-model="draft"
             rows="4"
             maxlength="4000"
-            placeholder="按你此刻真实的想法说就好（至少 20 字）…"
+            placeholder="按你此刻真实的想法说就好；没听明白可点“换个问法”，不确定时也可以说说不确定在哪里…"
             :disabled="sending || finalizing"
             @input="onDraftInput"
             @keydown="onAnswerKeydown"
@@ -494,13 +674,21 @@ onBeforeUnmount(() => {
               <small v-if="voice.error.value">{{ voice.error.value }}</small>
               <small v-else-if="voiceWasUsed">转写已放入文本框，请确认或修改后手动提交</small>
             </div>
-            <span class="char-count" :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }">
-              {{ visibleDraftLength }}/4000 · 至少 {{ MIN_ANSWER_VISIBLE_CHARACTERS }} 字<span v-if="draft.trim() && remainingAnswerCharacters > 0">，还差 {{ remainingAnswerCharacters }} 字</span>
+            <span class="char-count" :class="{ insufficient: draft.trim() && !meetsAnswerLength }" aria-live="polite">
+              {{ visibleDraftLength }}/{{ requiredVisibleCharacters }}
+              <small>{{ answerLengthHint }}</small>
             </span>
-            <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">结束并生成报告</button>
+            <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">
+              {{ completionEligible ? "结束并生成报告" : `完成 ${minimumValidAnswers} 次后可生成报告` }}
+            </button>
             <button class="send-button" type="submit" :disabled="!canSubmit">
               {{ sending ? "正在回应…" : "提交回答" }}<span aria-hidden="true">↑</span>
             </button>
+          </div>
+          <div class="conversation-shortcuts" aria-label="访谈辅助操作">
+            <span>没听明白或不想继续时，可以直接选择：</span>
+            <button type="button" :disabled="sending || finalizing" @click="requestClarification">没理解，请换个问法</button>
+            <button type="button" :disabled="sending || finalizing" @click="leaveEarly">退出访谈（不生成完整报告）</button>
           </div>
         </form>
       </section>

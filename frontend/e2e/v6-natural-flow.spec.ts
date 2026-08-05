@@ -82,10 +82,12 @@ async function installMockBackend(page: Page) {
       const clientId = String(payload.client_turn_id);
       if (!state.persistedClientIds.has(clientId)) {
         state.persistedClientIds.add(clientId);
-        state.answers += 1;
+        const boundedClarification = payload.interaction_kind === "clarification"
+          && payload.content.replace(/[\s\p{P}\p{C}\p{S}]/gu, "") === "我没理解请换一种问法";
+        if (!boundedClarification) state.answers += 1;
         state.turns.push({ id: state.turns.length + 1, turn_index: state.turns.length, role: "user", phase: "interviewing", ...payload });
       }
-      const close = state.answers >= 2;
+      const close = state.answers >= 40;
       const assistant = {
         id: state.turns.length + 1,
         turn_index: state.turns.length,
@@ -143,23 +145,32 @@ test("consent → natural conversation → model closing → evidence report", a
 
   await expect(page.getByText("第 1 / 最多 12 次回答")).toHaveCount(0);
   await expect(page.getByText("问题界定", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("已进行 0 轮问答", { exact: true })).toBeVisible();
+  await expect(page.getByText("有效回答 0/40", { exact: true })).toBeVisible();
   await page.getByLabel("你的回答").fill("我还在想。");
-  await expect(page.getByRole("button", { name: /提交回答/ })).toBeDisabled();
-  await expect(page.getByText(/还差 \d+ 字/)).toBeVisible();
-  await page.getByLabel("你的回答").fill("我想先确认自己真正重视什么，也想弄清楚这个选择会带来的变化。");
+  await expect(page.getByRole("button", { name: /提交回答/ })).toBeEnabled();
+  await expect(page.getByText("首次回答简短也可以，接下来会根据你的话继续聊。", { exact: true })).toBeVisible();
   await page.getByLabel("你的回答").press("Enter");
   await expect(page.getByText("听起来这对你很重要；你现在最在意的是什么？")).toBeVisible();
-  await expect(page.getByText("已进行 1 轮问答", { exact: true })).toBeVisible();
+  await expect(page.getByText("有效回答 1/40", { exact: true })).toBeVisible();
 
+  await page.getByLabel("你的回答").fill("还没想好。");
+  await expect(page.getByRole("button", { name: /提交回答/ })).toBeDisabled();
+  await expect(page.getByText(/可以再补充你这样想的原因/)).toBeVisible();
+
+  await page.getByRole("button", { name: "没理解，请换个问法" }).click();
+  await expect(page.getByText("我没理解，请换一种问法。", { exact: true })).toBeVisible();
+  await expect(page.getByText("有效回答 1/40", { exact: true })).toBeVisible();
+
+  state.answers = 39;
   await page.getByLabel("你的回答").fill("我也担心自己会后悔，所以想继续听听不同人的看法并再确认条件。");
   await page.getByLabel("你的回答").press("Enter");
   await expect(page).toHaveURL(new RegExp(`/assessment/report/${UUID}$`));
   await expect(page.getByRole("heading", { name: "访谈结果" })).toBeVisible();
   await expect(page.locator(".radar-chart")).toBeVisible();
-  await expect(page.getByText("综合总分", { exact: true })).toBeVisible();
-  expect(state.answers).toBe(2);
-  expect(state.payloads).toHaveLength(2);
+  await expect(page.getByText("综合总分", { exact: true })).toHaveCount(0);
+  expect(state.answers).toBe(40);
+  expect(state.payloads).toHaveLength(3);
+  expect(state.payloads[1]).toMatchObject({ interaction_kind: "clarification" });
   expect(state.payloads.every((payload) => !JSON.stringify(payload).includes("coverage"))).toBe(true);
 });
 
@@ -167,6 +178,6 @@ test("participant can exit without generating a report", async ({ page }) => {
   await installMockBackend(page);
   await startInterview(page);
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "退出不生成报告" }).click();
+  await page.getByRole("button", { name: "退出访谈", exact: true }).click();
   await expect(page).toHaveURL(/\/assessment$/);
 });

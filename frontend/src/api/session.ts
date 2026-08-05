@@ -65,6 +65,8 @@ export function completedData(event: TurnStreamEvent): AgentCompletedData | null
     finish_reason: data.finish_reason === "enough_understanding"
       || data.finish_reason === "natural_closure"
       || data.finish_reason === "user_requested"
+      || data.finish_reason === "safety_stopped"
+      || data.finish_reason === "technical_limit"
       ? data.finish_reason
       : null,
     speech_url: typeof data.speech_url === "string" ? data.speech_url : null,

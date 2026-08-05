@@ -12,6 +12,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.domain.interview_protocol import (
+    INTERVIEW_PROTOCOL_VERSION,
+    MAX_USER_ANSWERS,
+    MIN_VALID_ANSWERS,
+    is_bounded_clarification_request,
+    minimum_visible_characters_for_next_answer,
+    normalized_visible_character_count,
+)
 from app.models import (
     AgentTrace,
     AssessmentSession,
@@ -31,19 +39,47 @@ from app.services.orchestrator import (
     FinalizationError,
     InterviewContractError,
     InterviewOrchestrator,
+    _user_explicitly_requests_interview_end,
+    is_immediate_high_risk,
 )
 
 
 class ServiceError(Exception):
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.details = details or {}
 
 
 _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
-TECHNICAL_USER_TURN_CAP = 40
+
+
+def _turn_input_flags(request: SubmitTurnRequest) -> list[str]:
+    if is_immediate_high_risk(request.content):
+        return ["safety_stop_request"]
+    if _user_explicitly_requests_interview_end(request.content):
+        return ["user_exit_request"]
+    if (
+        request.interaction_kind == "clarification"
+        and is_bounded_clarification_request(request.content)
+    ):
+        return ["clarification_request"]
+    if request.interaction_kind == "clarification":
+        return ["valid_answer", "clarification_kind_rejected"]
+    return ["valid_answer"]
+
+
+def _counts_as_valid_answer(flags: list[str]) -> bool:
+    return "valid_answer" in flags
 
 
 def serialize_turn(turn: DialogueTurn) -> dict[str, Any]:
@@ -73,6 +109,7 @@ def serialize_report(session: AssessmentSession) -> dict[str, Any] | None:
 
 def session_snapshot(session: AssessmentSession) -> dict[str, Any]:
     turns = sorted(session.turns, key=lambda item: item.turn_index)
+    valid_answer_count = int(session.user_answer_count or 0)
     return {
         "uuid": session.uuid,
         "phase": session.phase,
@@ -89,7 +126,20 @@ def session_snapshot(session: AssessmentSession) -> dict[str, Any]:
             "experience_level": session.experience_level or "",
             "collaboration_role": session.collaboration_role or "",
         },
-        "user_answer_count": session.user_answer_count,
+        # ``user_answer_count`` remains as a compatibility alias. From V6.1 it
+        # means valid answers; explicit clarification/safety/exit turns remain
+        # in the transcript but do not increase it.
+        "user_answer_count": valid_answer_count,
+        "valid_answer_count": valid_answer_count,
+        "interview_protocol_version": (session.profile_data or {}).get(
+            "interview_protocol_version", INTERVIEW_PROTOCOL_VERSION
+        ),
+        "minimum_valid_answers": MIN_VALID_ANSWERS,
+        "maximum_user_answers": MAX_USER_ANSWERS,
+        "remaining_required_answers": max(
+            0, MIN_VALID_ANSWERS - valid_answer_count
+        ),
+        "can_finalize": valid_answer_count >= MIN_VALID_ANSWERS,
         "transcript_fingerprint": session.transcript_fingerprint,
         "transcript_frozen_at": (
             session.transcript_frozen_at.isoformat()
@@ -130,7 +180,10 @@ class SessionService:
             occupation=participant.occupation.strip() or None,
             experience_level=participant.experience_level.strip() or None,
             collaboration_role=participant.collaboration_role.strip() or None,
-            profile_data={"identity_type": participant.identity_type},
+            profile_data={
+                "identity_type": participant.identity_type,
+                "interview_protocol_version": INTERVIEW_PROTOCOL_VERSION,
+            },
         )
         db.add(session)
         db.flush()
@@ -167,6 +220,14 @@ class SessionService:
                 action="natural_opening",
                 model_provider=opening.provider,
                 model_name=opening.model,
+                requested_model=opening.requested_model,
+                actual_model=opening.actual_model or opening.model,
+                response_id=opening.response_id,
+                request_id=opening.request_id,
+                prompt_tokens=opening.prompt_tokens,
+                completion_tokens=opening.completion_tokens,
+                total_tokens=opening.total_tokens,
+                transport_retry_count=opening.transport_retry_count,
                 prompt_template_id=opening.prompt_template_id,
                 prompt_version=opening.prompt_version,
                 input_fingerprint=opening.input_fingerprint,
@@ -295,15 +356,45 @@ class SessionService:
                 raise ServiceError(
                     409, "session_not_accepting_turns", "当前会话不再接收作答。"
                 )
-            # The cap only blocks a new answer.  A saved failed submission must
+            # The cap only blocks a new answer. A saved failed submission must
             # remain recoverable with the same idempotency key, including when
-            # that saved answer happened to be the fortieth one.
-            if not existing and session.user_answer_count >= TECHNICAL_USER_TURN_CAP:
+            # that saved answer happened to be the forty-fifth one.
+            input_flags = _turn_input_flags(request)
+            counts_as_valid = _counts_as_valid_answer(input_flags)
+            if (
+                not existing
+                and session.user_answer_count >= MAX_USER_ANSWERS
+                and "safety_stop_request" not in input_flags
+                and "user_exit_request" not in input_flags
+            ):
                 raise ServiceError(
                     409,
                     "technical_turn_cap_reached",
-                    "本次访谈已达到技术保护上限，请结束并生成报告。",
+                    "本次访谈已达到45个有效回答的技术保护上限。",
                 )
+            if not existing:
+                visible_characters = normalized_visible_character_count(
+                    request.content
+                )
+                if visible_characters < 1:
+                    raise ServiceError(
+                        422,
+                        "answer_has_no_visible_characters",
+                        "请输入至少一个可见文字后再提交。",
+                    )
+                if counts_as_valid:
+                    minimum_characters = minimum_visible_characters_for_next_answer(
+                        session.user_answer_count
+                    )
+                    if visible_characters < minimum_characters:
+                        raise ServiceError(
+                            422,
+                            "answer_too_short",
+                            (
+                                "从第二个有效回答起，请至少输入20个有效字符；"
+                                "可以补充你的理由、依据或一个具体例子。"
+                            ),
+                        )
 
             if existing:
                 submission = existing
@@ -334,12 +425,13 @@ class SessionService:
                         client_turn_id=request.client_turn_id,
                         input_mode=request.input_mode,
                         answer_duration_ms=request.answer_duration_ms,
-                        quality_flags=[],
+                        quality_flags=input_flags,
                     )
                     db.add(user_turn)
                     db.flush()
                     submission.user_turn_id = user_turn.id
-                    session.user_answer_count += 1
+                    if counts_as_valid:
+                        session.user_answer_count += 1
                     for detail in request.anomaly_details:
                         db.add(
                             TechnicalAnomaly(
@@ -383,6 +475,14 @@ class SessionService:
                         action="natural_interview_turn",
                         model_provider=result.provider,
                         model_name=result.model,
+                        requested_model=result.requested_model,
+                        actual_model=result.actual_model or result.model,
+                        response_id=result.response_id,
+                        request_id=result.request_id,
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                        total_tokens=result.total_tokens,
+                        transport_retry_count=result.transport_retry_count,
                         prompt_template_id=result.prompt_template_id,
                         prompt_version=result.prompt_version,
                         input_fingerprint=result.input_fingerprint,
@@ -400,14 +500,10 @@ class SessionService:
                     self.orchestrator.freeze_transcript(session)
                 db.commit()
 
-                # A model-led natural close should attempt independent scoring
-                # immediately. If scoring is unavailable, the frozen session
-                # remains in finalizing and POST /finalize is the idempotent retry.
-                if session.phase == "finalizing":
-                    try:
-                        self.orchestrator.finalize(db, session)
-                    except FinalizationError:
-                        pass
+                # Interview delivery and report scoring are separate durable
+                # steps.  A natural close freezes the transcript and returns
+                # immediately; POST /finalize is the only idempotent scoring
+                # entry point and can be retried without regenerating a turn.
                 session = self.get(db, session_uuid)
                 user_turn = db.get(DialogueTurn, user_turn.id)
                 assistant_turn = db.get(DialogueTurn, assistant_turn.id)
@@ -473,14 +569,40 @@ class SessionService:
                                 assistant_turn_id=None,
                                 action="natural_interview_turn_failed",
                                 model_provider=(
-                                    "deepseek"
-                                    if settings.model_gateway_mode == "real"
-                                    else "mock"
+                                    getattr(exc, "provider", None)
+                                    or (
+                                        "deepseek"
+                                        if settings.model_gateway_mode == "real"
+                                        else "mock"
+                                    )
                                 ),
                                 model_name=(
-                                    settings.deepseek_model
-                                    if settings.model_gateway_mode == "real"
-                                    else "natural-interviewer-mock-v6"
+                                    getattr(exc, "actual_model", None)
+                                    or getattr(exc, "model", None)
+                                    or (
+                                        settings.deepseek_model
+                                        if settings.model_gateway_mode == "real"
+                                        else "natural-interviewer-mock-v6"
+                                    )
+                                ),
+                                requested_model=(
+                                    getattr(exc, "requested_model", None)
+                                    or (
+                                        settings.deepseek_model
+                                        if settings.model_gateway_mode == "real"
+                                        else None
+                                    )
+                                ),
+                                actual_model=getattr(exc, "actual_model", None),
+                                response_id=getattr(exc, "response_id", None),
+                                request_id=getattr(exc, "request_id", None),
+                                prompt_tokens=getattr(exc, "prompt_tokens", None),
+                                completion_tokens=getattr(
+                                    exc, "completion_tokens", None
+                                ),
+                                total_tokens=getattr(exc, "total_tokens", None),
+                                transport_retry_count=int(
+                                    getattr(exc, "transport_retry_count", 0) or 0
                                 ),
                                 prompt_template_id=NATURAL_INTERVIEWER_PROMPT_ID,
                                 prompt_version=NATURAL_INTERVIEWER_PROMPT_VERSION,
@@ -508,6 +630,23 @@ class SessionService:
             if session.report and session.phase == "completed":
                 return session
             if session.phase == "interviewing":
+                if session.user_answer_count < MIN_VALID_ANSWERS:
+                    remaining_answers = (
+                        MIN_VALID_ANSWERS - session.user_answer_count
+                    )
+                    raise ServiceError(
+                        409,
+                        "minimum_valid_answers_not_reached",
+                        (
+                            "本次正式访谈尚未完成：至少需要40个有效回答。"
+                            "如需提前退出，请使用退出访谈。"
+                        ),
+                        details={
+                            "valid_answer_count": session.user_answer_count,
+                            "minimum_valid_answers": MIN_VALID_ANSWERS,
+                            "remaining_answers": remaining_answers,
+                        },
+                    )
                 # This is the explicit user-controlled end, not an interviewer
                 # fallback. No synthetic question or scripted closing is added.
                 session.phase = "finalizing"
@@ -520,8 +659,8 @@ class SessionService:
                         action="user_requested_finalize",
                         model_provider="none",
                         model_name="none",
-                        prompt_template_id="v6_user_finalize",
-                        prompt_version="v6.0.0",
+                        prompt_template_id="v6_1_user_finalize",
+                        prompt_version="v6.1.0",
                         input_fingerprint=self.orchestrator.trace_input_fingerprint(session),
                         output_contract={"session_action": "finish", "finish_reason": "user_requested"},
                         renderer_status="accepted",
@@ -550,6 +689,11 @@ class SessionService:
                 return session
             session.phase = "exited"
             session.ended_early = True
+            session.finalization_state = (
+                "withdrawn_incomplete"
+                if session.user_answer_count < MIN_VALID_ANSWERS
+                else "withdrawn"
+            )
             profile = dict(session.profile_data or {})
             if reason:
                 profile["exit_reason"] = reason

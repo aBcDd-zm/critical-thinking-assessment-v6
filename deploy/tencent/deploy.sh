@@ -38,7 +38,7 @@ prepare_compose() {
     *) die ".env.production must be owned privately (run chmod 600 .env.production)" ;;
   esac
 
-  for required_key in DEEPSEEK_API_KEY ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET; do
+  for required_key in DEEPSEEK_API_KEY ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET VITE_RESEARCH_CONTACT VITE_DATA_RETENTION_NOTICE; do
     require_value "$required_key"
   done
 

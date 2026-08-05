@@ -10,9 +10,10 @@ export type SessionPhase =
   | "safety_stopped";
 
 export type InputMode = "text" | "voice" | "voice_edited";
+export type InteractionKind = "answer" | "clarification";
 export type EvidenceStatus = "sufficient" | "limited" | "unmeasured";
 export type InterviewerState = "listening" | "thinking" | "speaking";
-export type FinishReason = "enough_understanding" | "natural_closure" | "user_requested" | "safety_stopped" | null;
+export type FinishReason = "enough_understanding" | "natural_closure" | "user_requested" | "safety_stopped" | "technical_limit" | null;
 export type NaturalSessionAction = "continue" | "finish";
 
 export interface ParticipantProfile {
@@ -28,6 +29,7 @@ export interface DialogueTurn {
   input_mode?: InputMode | null;
   answer_duration_ms?: number | null;
   phase?: SessionPhase | string;
+  quality_flags?: string[];
   created_at?: string;
 }
 
@@ -38,8 +40,18 @@ export interface SessionSnapshot {
   consent_accepted_at?: string | null;
   participant?: ParticipantProfile;
   turns: DialogueTurn[];
+  /** Compatibility alias; V6.1 responses also expose valid_answer_count. */
   user_answer_count?: number;
+  /** Server-authoritative count; clarification, safety and exit turns are excluded. */
+  valid_answer_count?: number;
+  interview_protocol_version?: string;
+  minimum_valid_answers?: number;
+  maximum_user_answers?: number;
+  remaining_required_answers?: number;
+  can_finalize?: boolean;
   transcript_fingerprint?: string | null;
+  transcript_frozen_at?: string | null;
+  finalization_state?: string | null;
   report_available?: boolean;
   ended_early?: boolean;
   exit_reason?: string | null;
@@ -64,6 +76,7 @@ export interface TurnRequest {
   content: string;
   client_turn_id: string;
   input_mode: InputMode;
+  interaction_kind?: InteractionKind;
   answer_duration_ms: number;
   /** Client-only diagnostics; no participant content is added here. */
   technical_anomaly?: string | null;
@@ -105,6 +118,7 @@ export interface ReportDimension {
   status: EvidenceStatus;
   score: number | null;
   reason: string;
+  observation?: string;
   strength?: string;
   suggestion: string;
   evidences: ReportEvidence[];
@@ -168,6 +182,14 @@ export interface AgentTrace {
   module?: string;
   action?: string;
   model?: string;
+  requested_model?: string | null;
+  actual_model?: string | null;
+  response_id?: string | null;
+  request_id?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  transport_retry_count?: number | null;
   prompt_version?: string;
   prompt_template_id?: string | null;
   renderer_status?: "accepted" | "repaired" | "failed" | string;
@@ -189,6 +211,14 @@ export interface ScoringRun {
   status: "processing" | "failed" | "completed";
   transcript_fingerprint: string;
   model?: string;
+  requested_model?: string | null;
+  actual_model?: string | null;
+  response_id?: string | null;
+  request_id?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  transport_retry_count?: number | null;
   prompt_template_id?: string | null;
   prompt_version?: string | null;
   repair_used?: boolean;
@@ -263,5 +293,16 @@ export const DIMENSIONS = [
 ] as const;
 
 export function answerCount(session: SessionSnapshot): number {
-  return session.user_answer_count ?? session.turns.filter((turn) => turn.role === "user").length;
+  const authoritative = session.valid_answer_count ?? session.user_answer_count;
+  if (typeof authoritative === "number" && Number.isFinite(authoritative)) {
+    return Math.max(0, Math.floor(authoritative));
+  }
+
+  // A count inferred from an incomplete/legacy response must never unlock report
+  // generation by treating every user turn as evidence.  Only turns explicitly
+  // classified by the server as valid answers are safe to count; clarification,
+  // safety and exit turns therefore remain visible without advancing progress.
+  return session.turns.filter((turn) => (
+    turn.role === "user" && turn.quality_flags?.includes("valid_answer")
+  )).length;
 }

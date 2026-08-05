@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from collections.abc import Generator
+from pathlib import Path
 
 from argon2 import PasswordHasher
+import reportlab
 
 # Tests must never inherit a real database, model mode, or billable TTS key
 # from the developer shell/backend/.env.
@@ -11,6 +13,9 @@ os.environ["DATABASE_URL"] = "sqlite:////tmp/critical-thinking-v6-pytest.db"
 os.environ["AUTO_CREATE_DB"] = "false"
 os.environ["MODEL_GATEWAY_MODE"] = "mock"
 os.environ["DEEPSEEK_API_KEY"] = ""
+os.environ["REPORT_PDF_FONT_PATH"] = str(
+    Path(reportlab.__file__).resolve().parent / "fonts" / "Vera.ttf"
+)
 os.environ["TTS_MODE"] = "fake"
 os.environ["DOUBAO_TTS_API_KEY"] = ""
 os.environ["DOUBAO_TTS_RESOURCE_ID"] = "seed-tts-2.0"

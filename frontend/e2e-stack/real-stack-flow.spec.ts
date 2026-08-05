@@ -25,12 +25,12 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
   expect(sessionUuid).toBeTruthy();
   await expect(page.getByText("访谈官 · 澄澄")).toBeVisible();
   await expect(page.getByText(/最多 12 次回答/)).toHaveCount(0);
-  await expect(page.getByText("已进行 0 轮问答", { exact: true })).toBeVisible();
+  await expect(page.getByText("有效回答 0/40", { exact: true })).toBeVisible();
   await expect(page.getByText("问题界定", { exact: true })).toHaveCount(0);
 
   await submitThroughUi(page, "我需要决定是否申请研究项目，想先核实导师和资金条件。");
   await expect(page.getByText("听起来这件事对你确实很重要。此刻你最想先厘清的是什么？")).toBeVisible();
-  await expect(page.getByText("已进行 1 轮问答", { exact: true })).toBeVisible();
+  await expect(page.getByText("有效回答 1/40", { exact: true })).toBeVisible();
 
   const replayPayload = {
     content: "我还需要再看看项目的实际安排，也想确认它是否符合我目前的长期计划。",
@@ -81,17 +81,37 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
   await page.reload();
   await expect(page.getByText(replayPayload.content, { exact: true })).toBeVisible();
 
-  await submitThroughUi(page, "我已经想清楚，决定先申请，并愿意继续说明自己的准备计划和判断依据。");
-  await expect(page.getByText(/最可能让你改变现在的决定/)).toBeVisible();
+  await expect(page.getByText("有效回答 2/40", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "完成 40 次后可生成报告" })).toBeDisabled();
 
-  await submitThroughUi(
-    page,
-    "如果导师确认无法提供稳定指导，或两周试用没有得到有效反馈，我会暂停申请，重新比较其他项目。",
-  );
+  for (let answerIndex = 3; answerIndex <= 40; answerIndex += 1) {
+    await submitThroughUi(
+      page,
+      `这是第${answerIndex}次有效回答，我会结合当前条件、已有证据和可能风险说明自己的具体判断依据。`,
+    );
+    if (answerIndex < 40) {
+      await expect(page.getByText(`有效回答 ${answerIndex}/40`, { exact: true })).toBeVisible();
+    }
+  }
+
+  const automaticallyFinalized = await Promise.race([
+    page.waitForURL(new RegExp(`/assessment/report/${sessionUuid}$`), { timeout: 8_000 })
+      .then(() => true)
+      .catch(() => false),
+    page.getByRole("button", { name: "结束并生成报告" })
+      .waitFor({ state: "visible", timeout: 8_000 })
+      .then(() => false)
+      .catch(() => false),
+  ]);
+  if (!automaticallyFinalized && !page.url().includes(`/assessment/report/${sessionUuid}`)) {
+    await expect(page.getByText("有效回答 40/40 · 已达到完成条件", { exact: true })).toBeVisible();
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "结束并生成报告" }).click();
+  }
   await expect(page).toHaveURL(new RegExp(`/assessment/report/${sessionUuid}$`));
   await expect(page.getByRole("heading", { name: "访谈结果" })).toBeVisible();
   await expect(page.locator(".radar-chart")).toBeVisible();
-  await expect(page.getByText("综合总分", { exact: true })).toBeVisible();
+  await expect(page.getByText("综合总分", { exact: true })).toHaveCount(0);
   expect(await page.locator(".dimension-card.status-sufficient").count()).toBeGreaterThan(0);
 
   const finalized = await page.evaluate(
@@ -111,16 +131,17 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
   expect(pdf.suggestedFilename()).toContain(sessionUuid!.slice(0, 8));
 });
 
-test("真实栈中可以在任意时刻主动结束并生成报告", async ({ page }) => {
+test("真实栈在 40 次前禁止完整报告，但保留独立退出路径", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("v6:tts-enabled", "false"));
   await page.goto("/assessment");
   await page.getByLabel("用户名").fill("结束流程验收");
   await page.getByLabel(/我已阅读并同意/).check();
   await page.getByRole("button", { name: /开始访谈/ }).click();
   await expect(page).toHaveURL(/\/assessment\/session\/[0-9a-f-]+$/);
+  await expect(page.getByRole("button", { name: "完成 40 次后可生成报告" })).toBeDisabled();
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "结束并生成报告" }).click();
-  await expect(page).toHaveURL(/\/assessment\/report\/[0-9a-f-]+$/);
+  await page.getByRole("button", { name: "退出访谈", exact: true }).click();
+  await expect(page).toHaveURL(/\/assessment$/);
 });
 
 test("真实栈管理员登录后可进入复核概览并安全退出", async ({ page }) => {
@@ -148,15 +169,26 @@ test("管理员可从优先复核进入详情、保存复核并导出匿名数�
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        consent_version: "v6.0.0",
+        consent_version: "v6-research-pilot-2026-08",
         consent_given: true,
         participant: { display_name: "优先复核验收", identity_type: "student" },
       }),
     });
     if (!created.ok) throw new Error(`create failed: ${created.status}`);
     const uuid = (await created.json()).session.uuid as string;
-    const finalized = await fetch(`${apiBaseUrl}/sessions/${uuid}/finalize`, { method: "POST" });
-    if (!finalized.ok) throw new Error(`finalize failed: ${finalized.status}`);
+    const stopped = await fetch(`${apiBaseUrl}/sessions/${uuid}/turns:stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+      body: JSON.stringify({
+        content: "我现在有立即伤害自己的打算，需要停止访谈。",
+        client_turn_id: "playwright-priority-review-safety-stop",
+        input_mode: "text",
+        interaction_kind: "answer",
+        answer_duration_ms: 100,
+      }),
+    });
+    if (!stopped.ok) throw new Error(`safety stop failed: ${stopped.status}`);
+    await stopped.text();
     return uuid;
   }, API_BASE_URL);
 

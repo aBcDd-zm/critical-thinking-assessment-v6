@@ -7,7 +7,7 @@ bank candidate, coverage value, or turn budget into runtime orchestration.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -21,14 +21,7 @@ DimensionKey = Literal[
     "dynamic_adjustment",
 ]
 
-
-MIN_ANSWER_VISIBLE_CHARACTERS = 20
-
-
-def visible_character_count(value: str) -> int:
-    """Count user-visible characters while ignoring spaces and line breaks."""
-
-    return sum(1 for character in value if not character.isspace())
+RESEARCH_CONSENT_VERSION = "v6-research-pilot-2026-08"
 
 
 class StrictModelOutput(BaseModel):
@@ -53,16 +46,17 @@ class NaturalInterviewerOutput(StrictModelOutput):
 
 class ScoringQuoteOutput(StrictModelOutput):
     turn_index: int = Field(ge=0)
-    quote: str = Field(min_length=1, max_length=12000)
+    quote: str = Field(min_length=1, max_length=160)
 
 
 class ScoringDimensionOutput(StrictModelOutput):
     dimension_key: DimensionKey
     score: Optional[int] = Field(default=None, ge=1, le=5)
-    quotes: list[ScoringQuoteOutput] = Field(default_factory=list, max_length=5)
-    reason: str = Field(min_length=1, max_length=2000)
+    quotes: list[ScoringQuoteOutput] = Field(default_factory=list, max_length=2)
+    reason: str = Field(min_length=1, max_length=180)
     confidence: float = Field(ge=0, le=1)
     sufficient: bool
+    opportunity_observed: bool
 
     @model_validator(mode="after")
     def score_requires_sufficient_user_evidence(self) -> "ScoringDimensionOutput":
@@ -70,13 +64,21 @@ class ScoringDimensionOutput(StrictModelOutput):
             raise ValueError("a numeric score requires sufficient evidence and at least one quote")
         if self.score is None and self.sufficient:
             raise ValueError("sufficient evidence must produce a numeric score")
+        if self.score is not None and not self.opportunity_observed:
+            raise ValueError("a numeric score requires a dimension-specific observation opportunity")
+        if not self.opportunity_observed and (self.score is not None or self.quotes):
+            raise ValueError("an unobserved dimension cannot contain a score or evidence")
         return self
 
 
 class FinalScorerOutput(StrictModelOutput):
     dimensions: list[ScoringDimensionOutput] = Field(min_length=6, max_length=6)
-    strengths: list[str] = Field(default_factory=list, max_length=2)
-    priorities: list[str] = Field(default_factory=list, max_length=2)
+    strengths: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=2
+    )
+    priorities: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=2
+    )
 
     @model_validator(mode="after")
     def dimensions_are_exactly_the_contract(self) -> "FinalScorerOutput":
@@ -103,7 +105,7 @@ class ParticipantInput(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    consent_version: str = Field(min_length=1, max_length=40)
+    consent_version: Literal["v6-research-pilot-2026-08"]
     consent_given: bool = False
     participant: ParticipantInput = Field(default_factory=ParticipantInput)
 
@@ -127,6 +129,7 @@ class CreateSessionRequest(BaseModel):
 class SubmitTurnRequest(BaseModel):
     content: str = Field(min_length=1, max_length=12000)
     client_turn_id: str = Field(min_length=8, max_length=80)
+    interaction_kind: Literal["answer", "clarification"] = "answer"
     input_mode: Literal["text", "voice", "voice_edited"] = "text"
     answer_duration_ms: int = Field(ge=0, le=86_400_000)
     technical_anomaly: Optional[str] = Field(default=None, max_length=1000)
@@ -136,21 +139,11 @@ class SubmitTurnRequest(BaseModel):
 
     @field_validator("content")
     @classmethod
-    def normalize_and_require_minimum_answer_length(cls, value: str) -> str:
+    def normalize_and_reject_blank(cls, value: str) -> str:
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("content must not be blank")
-        if visible_character_count(cleaned) < MIN_ANSWER_VISIBLE_CHARACTERS:
-            raise ValueError(
-                f"每次回答至少需要 {MIN_ANSWER_VISIBLE_CHARACTERS} 个字。"
-            )
         return cleaned
-
-    @model_validator(mode="after")
-    def reject_blank(self) -> "SubmitTurnRequest":
-        if not self.content.strip():
-            raise ValueError("content must not be blank")
-        return self
 
     @property
     def anomaly_details(self) -> list[str]:

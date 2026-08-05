@@ -14,8 +14,8 @@ describe("RadarChart", () => {
     });
     expect(wrapper.findAll(".radar-score-dot")).toHaveLength(1);
     expect(wrapper.findAll(".radar-status-dot")).toHaveLength(5);
-    expect(wrapper.get("svg").attributes("aria-label")).toContain("百分制");
-    expect(wrapper.html()).toContain("80 分");
+    expect(wrapper.get("svg").attributes("aria-label")).toContain("序数证据等级");
+    expect(wrapper.html()).toContain("证据等级 4/5（序数）");
     expect(wrapper.find(".radar-area").exists()).toBe(false);
   });
 

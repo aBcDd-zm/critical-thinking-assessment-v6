@@ -129,7 +129,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 .answer-composer > label { font-size: 12px; color: var(--muted); }
 .answer-composer textarea { min-height: 104px; border: 0; background: transparent; padding: 8px 0; font-size: 16px; }
 .answer-composer textarea:focus { box-shadow: none; }
-.composer-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 15px; }
+.composer-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, .8fr) auto auto; align-items: center; gap: 15px; }
 .composer-actions > div { display: grid; justify-items: start; gap: 4px; }
 .composer-actions small { color: var(--muted); font-size: 11px; }
 .mic-button { display: inline-flex; align-items: center; gap: 8px; border: 0; background: none; padding: 5px 0; color: var(--forest); cursor: pointer; font-size: 13px; font-weight: 700; }
@@ -139,8 +139,12 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 .mic-button.recording { color: var(--danger); }
 .mic-button.recording .mic-icon { animation: pulse .9s ease infinite; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 7px rgb(164 65 53 / 12%); } }
-.char-count { color: #5f6a65; font-size: 11px; }
+.char-count { display: grid; gap: 2px; color: #5f6a65; font-size: 11px; line-height: 1.45; }
+.char-count small { max-width: 330px; color: inherit; }
 .char-count.insufficient { color: var(--warm); }
+.conversation-shortcuts { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; border-top: 1px dashed var(--line); padding-top: 10px; color: var(--muted); font-size: 11px; }
+.conversation-shortcuts button { border: 0; border-bottom: 1px solid currentColor; background: transparent; padding: 3px 0; color: var(--forest); cursor: pointer; font-size: 12px; }
+.conversation-shortcuts button:disabled { color: #a3a8a5; cursor: not-allowed; }
 .send-button { min-height: 40px; padding: 0 16px; gap: 12px; font-size: 13px; }
 .compact-action { min-height: 40px; padding: 0 14px; font-size: 13px; white-space: nowrap; }
 .finalizing-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin: 24px; border: 1px solid var(--line); background: #f7f5ef; padding: 20px; color: var(--muted); }
@@ -154,11 +158,6 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 .report-summary { display: grid; grid-template-columns: minmax(0, 1fr) 270px; align-items: center; gap: 34px; border: 1px solid var(--line); background: var(--paper); padding: 30px 32px; }
 .report-summary h1 { margin-bottom: 12px; font-family: "Songti SC", "STSong", serif; font-size: clamp(32px, 5vw, 44px); font-weight: 500; letter-spacing: -.03em; }
 .report-summary p { margin-bottom: 10px; color: var(--muted); font-size: 14px; }
-.overall-score { display: grid; grid-template-columns: auto 1fr; align-items: baseline; column-gap: 12px; width: fit-content; margin: 18px 0 10px; color: var(--forest); }
-.overall-score > span { font-size: 13px; font-weight: 700; }
-.overall-score strong { font-family: "Songti SC", "STSong", serif; font-size: 34px; font-weight: 500; line-height: 1; }
-.overall-score small { grid-column: 1 / -1; margin-top: 5px; color: var(--muted); font-size: 11px; }
-.report-score-note { color: var(--forest) !important; font-size: 13px !important; }
 .report-caution { margin: 0 !important; color: #7a4937 !important; }
 .report-radar { width: 100%; max-width: 250px; margin: 0; justify-self: center; text-align: center; }
 .report-radar .radar-chart { display: block; width: 100%; max-width: 250px; margin: 0 auto; }
@@ -391,7 +390,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
   .message { max-width: 93%; }
   .answer-composer { padding: 16px; }
   .composer-actions { grid-template-columns: 1fr auto; }
-  .char-count { display: none; }
+  .char-count { display: grid; text-align: right; }
+  .char-count small { grid-column: 1 / -1; max-width: 100%; text-align: left; }
+  .conversation-shortcuts { align-items: flex-start; flex-direction: column; }
   .report-header, .report-section-heading, .admin-title, .detail-title { align-items: start; flex-direction: column; }
   .report-shell { width: calc(100% - 28px); padding-top: 18px; }
   .report-summary { padding: 24px 18px; }
