@@ -25,6 +25,7 @@ from app.services.model_gateway import (
     NATURAL_INTERVIEWER_SYSTEM_PROMPT,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_3,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_4,
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5,
     StructuredCallResult,
     resolve_natural_interviewer_prompt,
 )
@@ -62,6 +63,8 @@ def create_session(client, *, name: str = "测试用户") -> str:
     assert payload["initial_turn"]["session_action"] == "continue"
     assert "coverage" not in payload["session"]
     assert "stage" not in payload["session"]
+    assert payload["session"]["technical_turn_cap"] == 40
+    assert payload["session"]["technical_turn_cap_reached"] is False
     return payload["session"]["uuid"]
 
 
@@ -104,26 +107,26 @@ def test_consent_and_model_generated_opening_are_natural_only(client) -> None:
     detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     opening = detail["traces"][0]
     assert opening["action"] == "natural_opening"
-    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.4"
+    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.5"
 
 
-def test_interviewer_prompt_v6_0_4_avoids_formulaic_acknowledgement() -> None:
+def test_default_interviewer_prompt_v6_0_5_preserves_empathy_without_formulaic_acknowledgement() -> None:
     prompt = "".join(NATURAL_INTERVIEWER_SYSTEM_PROMPT.split())
 
-    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.4"
-    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.4"
-    assert "复述—表示理解—再提问" in prompt
-    assert "不得为了显得在听而重复" in prompt
+    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.5"
+    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.5"
+    assert "有来源支持" in prompt
+    assert "不需要通过复述、改写或总结" in prompt
     assert "有原话依据" in prompt
-    assert "应使用试探性语气而不是下结论" in prompt
-    assert "反复用作每轮的固定开头" in prompt
-    assert "不得把提高直接提问的比例当作目标" in prompt
-    assert "非模板化的简短情绪或意义承接" in prompt
-    assert "它不是每轮必须的开场" in prompt
-    assert "必须先直接回应这个意图" in prompt
-    assert "答案是否已经出现在逐字稿中" in prompt
-    assert "实质性地改变或澄清当前理解" in prompt
-    assert "不得问逐字稿已经明确回答的内容" in prompt
+    assert "应使用试探性语气，不得替对方确定情绪或动机" in prompt
+    assert "不要再次用同义复述重新建立承接" in prompt
+    assert "把提高直接提问比例当作目标" in prompt
+    assert "共情也不是必须放在每轮开头的一句话" in prompt
+    assert "接受纠正并修复误解" in prompt
+    assert "不代表本轮必须提问" in prompt
+    assert "从逐字稿中已经明确的内容自然向前" in prompt
+    assert "实质性澄清或改变你对处境" in prompt
+    assert "从逐字稿中已经明确的内容自然向前" in prompt
     assert "可以多用微观表达" not in prompt
     assert "可轻声重复对方最后一句话的关键词" not in prompt
     assert "开放式问题" in prompt
@@ -152,14 +155,36 @@ def test_interviewer_prompt_v6_0_3_is_preserved_for_rollback() -> None:
     assert "可轻声重复对方最后一句话的关键词" in prompt
 
 
-def test_interviewer_prompt_resolver_selects_v6_0_4_and_rejects_unknown() -> None:
+def test_interviewer_prompt_resolver_preserves_v6_0_4_and_selects_v6_0_5() -> None:
     prompt_id, version, prompt = resolve_natural_interviewer_prompt("v6.0.4")
 
     assert prompt_id == "natural_interviewer_v6.0.4"
     assert version == "v6.0.4"
     assert prompt == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_4
+    assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
+        "fefb1937c757c8dfaaeb0f693cc9e0018352b1212fa1ecd526c44ebf44bf649f"
+    )
+
+    prompt_id, version, prompt = resolve_natural_interviewer_prompt("v6.0.5")
+
+    assert prompt_id == "natural_interviewer_v6.0.5"
+    assert version == "v6.0.5"
+    assert prompt == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5
+    assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
+        "5e8cf29e5c73eee759dfcb54d322d567669600d8107b8b460418152c3bfc93ba"
+    )
+    assert "共情也不是必须放在每轮开头的一句话" in prompt
+    assert "不代表本轮必须提问" in prompt
+    assert "接受纠正并修复误解" in prompt
+    assert "不得替对方确定情绪或动机" in prompt
+    assert "不要再次用同义复述重新建立承接" in prompt
+    assert "如果删除后不会损失必要的" in prompt
+    assert "把提高直接提问比例当作目标" in prompt
+
+
+def test_interviewer_prompt_resolver_rejects_unknown() -> None:
     with pytest.raises(ValueError, match="unsupported natural interviewer prompt version"):
-        resolve_natural_interviewer_prompt("v6.0.5")
+        resolve_natural_interviewer_prompt("v6.0.6")
 
 
 def test_interviewer_style_flags_record_binary_questions_and_verbatim_echoes() -> None:
@@ -905,6 +930,10 @@ def test_technical_cap_and_admin_review_expert_and_anonymous_export(client) -> N
         db.commit()
     finally:
         db.close()
+    snapshot = client.get(f"/api/v1/sessions/{session_uuid}")
+    assert snapshot.status_code == 200
+    assert snapshot.json()["technical_turn_cap"] == 40
+    assert snapshot.json()["technical_turn_cap_reached"] is True
     capped = send(client, session_uuid, "我还想继续把这件事情说清楚，也愿意补充更多当前的想法。", "client-turn-over-cap")
     assert capped.status_code == 409
     assert capped.json()["code"] == "technical_turn_cap_reached"

@@ -322,6 +322,33 @@ describe("InterviewView", () => {
     expect(wrapper.text()).not.toContain("最多 2");
   });
 
+  it("replaces the composer with a clear technical-limit handoff after 40 saved answers", async () => {
+    mocks.getSession.mockResolvedValue({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 40,
+      technical_turn_cap: 40,
+      technical_turn_cap_reached: true,
+      turns: [openingTurn],
+    });
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.get(".technical-limit-card").text()).toContain("技术保护上限");
+    expect(wrapper.get(".technical-limit-card").text()).toContain("回答均已保存");
+    expect(wrapper.get(".technical-limit-card").text()).toContain("不代表系统在判定证据已充分");
+    expect(wrapper.find("textarea").exists()).toBe(false);
+    expect(wrapper.find("button.send-button").exists()).toBe(false);
+
+    await wrapper.get(".technical-limit-card button").trigger("click");
+    await flushPromises();
+
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
   it("drops an expired local recovery answer instead of submitting it", async () => {
     localStorage.setItem("v6:pending-turn:session-v6", JSON.stringify({
       saved_at: Date.now() - (25 * 60 * 60 * 1000),

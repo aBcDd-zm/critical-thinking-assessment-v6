@@ -81,6 +81,13 @@ const isInterviewing = computed(() => session.value?.phase === "interviewing");
 const visibleDraftLength = computed(() => visibleCharacterCount(draft.value));
 const roundCount = computed(() => turns.value.filter((turn) => turn.role === "user").length);
 const savedAnswerCount = computed(() => session.value?.user_answer_count ?? roundCount.value);
+const technicalTurnCapReached = computed(() => (
+  session.value?.technical_turn_cap_reached === true
+  || (
+    typeof session.value?.technical_turn_cap === "number"
+    && savedAnswerCount.value >= session.value.technical_turn_cap
+  )
+));
 const isFirstAnswer = computed(() => savedAnswerCount.value === 0);
 const isUncertaintyAnswer = computed(() => isExplicitUncertaintyAnswer(draft.value));
 const meetsAnswerRequirement = computed(() => (
@@ -107,6 +114,7 @@ const canSubmit = computed(() => (
   draft.value.trim().length > 0
   && meetsAnswerRequirement.value
   && isInterviewing.value
+  && !technicalTurnCapReached.value
   && !sending.value
   && !loading.value
 ));
@@ -518,6 +526,16 @@ onBeforeUnmount(() => {
         <div v-else-if="session.phase === 'safety_stopped'" class="finalizing-card safety-card">
           <div><strong>本次对话已停止</strong><span>为避免继续处理可能需要即时线下支持的内容，系统不会继续提问或自动生成报告。</span></div>
           <RouterLink class="quiet-link" to="/assessment">开始新访谈</RouterLink>
+        </div>
+
+        <div v-else-if="technicalTurnCapReached" class="finalizing-card technical-limit-card" role="status">
+          <div>
+            <strong>本次访谈已达到系统的技术保护上限</strong>
+            <span>你此前的回答均已保存。为避免对话过长影响稳定性，本次不再接收新回答；这不代表系统在判定证据已充分。你可以现在结束访谈，并根据已有内容生成报告。</span>
+          </div>
+          <button type="button" class="primary-button small" :disabled="!canFinish" @click="finishAndGenerate">
+            结束并生成报告
+          </button>
         </div>
 
         <form v-else class="answer-composer" @submit.prevent="submitAnswer">

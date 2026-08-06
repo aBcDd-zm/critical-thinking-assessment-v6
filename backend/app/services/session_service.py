@@ -96,6 +96,10 @@ def session_snapshot(session: AssessmentSession) -> dict[str, Any]:
             "collaboration_role": session.collaboration_role or "",
         },
         "user_answer_count": session.user_answer_count,
+        "technical_turn_cap": TECHNICAL_USER_TURN_CAP,
+        "technical_turn_cap_reached": (
+            (session.user_answer_count or 0) >= TECHNICAL_USER_TURN_CAP
+        ),
         "transcript_fingerprint": session.transcript_fingerprint,
         "transcript_frozen_at": (
             session.transcript_frozen_at.isoformat()

@@ -39,6 +39,8 @@ export interface SessionSnapshot {
   participant?: ParticipantProfile;
   turns: DialogueTurn[];
   user_answer_count?: number;
+  technical_turn_cap?: number;
+  technical_turn_cap_reached?: boolean;
   transcript_fingerprint?: string | null;
   finalization_state?: string | null;
   report_available?: boolean;

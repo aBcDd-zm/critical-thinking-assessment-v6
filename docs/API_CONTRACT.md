@@ -82,7 +82,8 @@
 
 - `409 session_not_accepting_turns`：状态不是 `interviewing`。
 - `409 idempotency_payload_mismatch`：同一键采用不同提交内容。
-- `409 technical_turn_cap_reached`：已达 40 次不可见技术上限。
+- 会话快照通过 `technical_turn_cap` 与 `technical_turn_cap_reached` 显式告知前端技术保护上限状态；当前上限为 40 次已保存回答。达到上限不代表证据已充分。
+- `409 technical_turn_cap_reached`：已达 40 次技术保护上限，不再接收新回答；同一 `client_turn_id` 的已保存失败提交仍可恢复。
 - `422 answer_too_short`：从第二个回答起，普通回答少于 20 个可见字符。首个非空回答及完整匹配“不知道／不清楚／不确定／没想好”等明确不确定表达的后续短答例外；请求、同意或模型结构合同无效仍使用其各自的 `422` 语义。
 - `500 turn_processing_failed`：一次修复后访谈官仍失败；用户 turn 已保留。
 - `503 scoring_failed`：评分失败，会话保持 `finalizing`，可幂等重试。
