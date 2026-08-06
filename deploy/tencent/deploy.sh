@@ -10,6 +10,7 @@ CADDY_CONTAINER=${CTA_V6_CADDY_CONTAINER:-tencent-caddy-1}
 CADDYFILE_PATH=${CTA_V6_CADDYFILE_PATH:-/etc/caddy/Caddyfile}
 SHARED_NETWORK=tencent_default
 V6_HOSTNAME=thinkagent.asia
+V6_ALIAS_HOSTNAME=v6.thinkagent.fun
 
 die() {
   echo "V6 deployment preflight failed: $1" >&2
@@ -103,6 +104,10 @@ reload_shared_caddy() {
     'grep -Fq "$2" "$1"' \
     sh "$CADDYFILE_PATH" "$V6_HOSTNAME" \
     || die "the current Caddy source has no ${V6_HOSTNAME} host block"
+  docker exec "$CADDY_CONTAINER" sh -ceu \
+    'grep -Fq "$2" "$1"' \
+    sh "$CADDYFILE_PATH" "$V6_ALIAS_HOSTNAME" \
+    || die "the current Caddy source has no ${V6_ALIAS_HOSTNAME} host alias"
 
   docker exec "$CADDY_CONTAINER" caddy validate --config "$CADDYFILE_PATH" --adapter caddyfile
   docker exec "$CADDY_CONTAINER" caddy reload --config "$CADDYFILE_PATH" --adapter caddyfile

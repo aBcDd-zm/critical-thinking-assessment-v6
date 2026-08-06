@@ -4,10 +4,11 @@
 # Merge this one additional host block into the shared gateway's existing source
 # of truth, validate it in the running Caddy container, then perform a reload.
 # `cta-v6-web` is a V6-only Docker network alias on external `tencent_default`.
-# This block is the `thinkagent.asia` site route; it replaces the retired V5
-# route for that domain only, while other shared-gateway routes stay intact.
+# This block serves the canonical `thinkagent.asia` route and the filed-domain
+# alias `v6.thinkagent.fun`; the `thinkagent.fun` root stays on its old server.
+# Other shared-gateway routes stay intact.
 
-thinkagent.asia {
+thinkagent.asia, v6.thinkagent.fun {
     encode zstd gzip
 
     # Keep the Docker-only probe private even after this public host exists.

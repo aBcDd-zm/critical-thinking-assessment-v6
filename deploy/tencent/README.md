@@ -19,7 +19,7 @@ shared Caddy `tencent-caddy-1` (80/443, HTTPS)
 ## 服务器前提
 
 - 一台已确认可用于新增 V6 容器的 Tencent Lighthouse Linux 主机，Docker Engine 与 Docker Compose v2 已可用。
-- `thinkagent.asia` 的 A 记录已指向这台服务器；此域名原有的 V5 路由已退役，可替换为 V6。不要改动其他已有站点域名。
+- `thinkagent.asia` 与 `v6.thinkagent.fun` 的 A 记录已指向这台服务器；`thinkagent.fun` 根域名仍指向原服务器，不得改动。不要改动其他已有站点域名。
 - 现有共享 Caddy 容器为 `tencent-caddy-1`，并已加入 `tencent_default`。发布者只能安全地添加一个**新** host block，不能替换全局配置、容器或网络。
 - 服务器有外网访问 `https://api.deepseek.com` 的能力；公网只开放 Caddy 所需的 `80/443`，不要开放 `18060`。
 
@@ -63,7 +63,7 @@ docker compose --env-file .env.production -f docker-compose.production.yml down
 
 ## 接入共享 Caddy（单独变更）
 
-先备份共享 Caddy 的既有配置源，再用 [Caddyfile.thinkagent.asia](Caddyfile.thinkagent.asia) 的**完整单个 host block**替换其中仅有的 `thinkagent.asia` 旧站点块；不要覆盖整个 Caddyfile、容器、网络或其他站点路由。该片段将 `thinkagent.asia` 反代到 `cta-v6-web:8080`，并在公网隐藏 `/healthz`。
+先备份共享 Caddy 的既有配置源，再用 [Caddyfile.thinkagent.asia](Caddyfile.thinkagent.asia) 的**完整单个 site block**替换其中仅有的 `thinkagent.asia` 旧站点块；不要覆盖整个 Caddyfile、容器、网络或其他站点路由。该片段将 `thinkagent.asia` 与 `v6.thinkagent.fun` 共同反代到 `cta-v6-web:8080`，并在公网隐藏 `/healthz`。这里只增加 `v6` 子域名别名，不接管或重定向 `thinkagent.fun` 根域名。
 
 合并但尚未 reload 后，运行：
 
@@ -73,7 +73,7 @@ docker compose --env-file .env.production -f docker-compose.production.yml down
 
 它会在 `tencent-caddy-1` 内先确认当前配置确实含 V6 hostname 与 `cta-v6-web:8080` 路由，再执行 `caddy validate` 和平滑 `caddy reload`。脚本不复制、重写或替换任何共享 Caddy 文件。若该容器或 Caddyfile 路径在服务器上不同，只能显式覆盖 `CTA_V6_CADDY_CONTAINER` 或 `CTA_V6_CADDYFILE_PATH` 后再执行。
 
-在 Caddy 与 DNS 都生效后，使用 HTTPS 验证：`/assessment`、模型生成开场、一次追问、用户主动完成、报告和 PDF。访问 `https://thinkagent.asia/admin/login` 应显示思衡 V6 登录页；凭管理员账号进入复核台后，退出登录并再次访问 `/admin/dashboard` 应被送回登录页。`https://thinkagent.asia/healthz` 与 API health 应为 `404`；服务器本机 `http://127.0.0.1:18060/healthz` 应为 `200`。
+在 Caddy 与 DNS 都生效后，分别确认 `https://thinkagent.asia/assessment` 和 `https://v6.thinkagent.fun/assessment` 可访问同一个 V6，再验证模型生成开场、一次追问、用户主动完成、报告和 PDF。访问 `https://v6.thinkagent.fun/admin/login` 应显示思衡 V6 登录页；凭管理员账号进入复核台后，退出登录并再次访问 `/admin/dashboard` 应被送回登录页。两个 V6 域名的 `/healthz` 与 API health 应为 `404`；服务器本机 `http://127.0.0.1:18060/healthz` 应为 `200`。同时复核 `thinkagent.fun` 根域名的 DNS 与旧站点均未变化。
 
 ## 发布边界
 

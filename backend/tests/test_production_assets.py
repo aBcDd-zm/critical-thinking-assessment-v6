@@ -64,6 +64,7 @@ def test_tencent_caddy_fragment_is_additive_and_targets_only_v6() -> None:
     caddy = _text("deploy/tencent/Caddyfile.thinkagent.asia")
 
     assert "thinkagent.asia" in caddy
+    assert "thinkagent.asia, v6.thinkagent.fun {" in caddy
     assert "sslip.io" not in caddy
     assert "reverse_proxy cta-v6-web:8080" in caddy
     assert "turns:stream$" in caddy
@@ -104,6 +105,7 @@ def test_deployment_scripts_are_valid_shell_without_triggering_server_actions() 
     assert "reload-caddy" in deploy_script
     assert "caddy validate" in deploy_script
     assert "caddy reload" in deploy_script
+    assert "V6_ALIAS_HOSTNAME=v6.thinkagent.fun" in deploy_script
     assert "docker cp" in backup_script
     assert "source.backup" in backup_script
     assert "ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET" in deploy_script
