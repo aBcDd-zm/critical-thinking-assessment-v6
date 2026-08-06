@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -62,6 +66,60 @@ def test_development_configuration_keeps_mock_and_fake_compatibility() -> None:
 
     assert config.model_gateway_mode == "mock"
     assert config.tts_mode == "fake"
+
+
+def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> None:
+    default_config = Settings(_env_file=None)
+    rollback_config = Settings(
+        _env_file=None,
+        natural_interviewer_prompt_version="v6.0.3",
+    )
+
+    assert default_config.natural_interviewer_prompt_version == "v6.0.4"
+    assert rollback_config.natural_interviewer_prompt_version == "v6.0.3"
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            natural_interviewer_prompt_version="v6.0.2",
+        )
+
+
+def test_v6_0_3_rollback_selects_the_preserved_prompt_in_a_fresh_process() -> None:
+    env = os.environ.copy()
+    env.update(
+        {
+            "MODEL_GATEWAY_MODE": "real",
+            "NATURAL_INTERVIEWER_PROMPT_VERSION": "v6.0.3",
+            "DEEPSEEK_API_KEY": "not-used-by-this-test",
+        }
+    )
+    script = """
+from app.services.model_gateway import (
+    ModelGatewayService,
+    NATURAL_INTERVIEWER_PROMPT_ID,
+    NATURAL_INTERVIEWER_PROMPT_VERSION,
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_3,
+)
+
+captured = {}
+service = ModelGatewayService()
+service._typed_call = lambda **kwargs: captured.update(kwargs)
+service.generate_interviewer({"participant": {}, "transcript": []})
+assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.3"
+assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.3"
+assert captured["system_prompt"] == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_3
+print("rollback-ok")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "rollback-ok"
 
 
 def test_production_doubao_configuration_is_accepted_without_exposing_the_key() -> None:

@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import InterviewView from "./InterviewView.vue";
 
 const mocks = vi.hoisted(() => ({
@@ -31,6 +31,10 @@ const openingTurn = { id: 1, turn_index: 0, role: "assistant" as const, phase: "
 const validAnswer = "我正在认真比较这个选择，也想把影响决定的现实条件想清楚。";
 
 describe("InterviewView", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
@@ -56,7 +60,10 @@ describe("InterviewView", () => {
     expect(wrapper.text()).toContain("访谈官 · 澄澄");
     expect(wrapper.get(".round-count").text()).toBe("已进行 0 轮问答");
     expect(wrapper.text()).toContain("结束并生成报告");
-    expect(wrapper.text()).toContain("语音输入");
+    expect(wrapper.text()).not.toContain("语音输入");
+    expect(wrapper.text()).not.toContain("停止转写");
+    expect(wrapper.text()).not.toContain("转写已放入文本框");
+    expect(wrapper.text()).toContain("语音播报");
     expect(wrapper.find(".natural-interview-note").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("最多 12");
     expect(wrapper.text()).not.toContain("问题界定");
@@ -70,6 +77,49 @@ describe("InterviewView", () => {
 
     expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
+  it("shows the editable voice-input controls only when the build flag is explicitly enabled", async () => {
+    vi.stubEnv("VITE_VOICE_INPUT_ENABLED", "true");
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 1,
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user", content: validAnswer, input_mode: "voice" },
+      ],
+    });
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("语音输入");
+    expect(wrapper.text()).toContain("语音转写");
+    expect(wrapper.get("button.mic-button").attributes("aria-pressed")).toBe("false");
+    expect(wrapper.text()).toContain("语音播报");
+  });
+
+  it("hides voice-origin labels from restored history when voice input is disabled", async () => {
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 1,
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user", content: validAnswer, input_mode: "voice_edited" },
+      ],
+    });
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("语音转写");
+    expect(wrapper.text()).not.toContain("语音转写后编辑");
+    expect(wrapper.text()).not.toContain("语音输入");
+    expect(wrapper.text()).toContain("语音播报");
   });
 
   it("automatically requests a report after the interviewer naturally closes", async () => {

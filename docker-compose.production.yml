@@ -92,6 +92,7 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_BASE_URL: /api/v1
+        VITE_VOICE_INPUT_ENABLED: ${VITE_VOICE_INPUT_ENABLED:-false}
     image: cta-v6-frontend:local
     restart: unless-stopped
     depends_on:
