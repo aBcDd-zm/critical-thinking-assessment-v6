@@ -43,10 +43,21 @@ const playback = useSpeechPlayback();
 let activeController: AbortController | null = null;
 
 const MIN_ANSWER_VISIBLE_CHARACTERS = 20;
-const MIN_ANSWER_MESSAGE = `每次回答至少需要 ${MIN_ANSWER_VISIBLE_CHARACTERS} 个字。`;
+const MIN_ANSWER_MESSAGE = `从第二个回答起，每次回答至少需要 ${MIN_ANSWER_VISIBLE_CHARACTERS} 个字。`;
+const EXPLICIT_UNCERTAINTY_PATTERN = /^(?:我)?(?:现在|暂时|目前|还|也|确实|真的){0,2}(?:不知道(?:(?:该|要)?怎么(?:说|回答))?|不清楚|不太清楚|不确定|不太确定|没想好|没有想好|没想法|没有想法|没什么想法|没有什么想法|想不到|说不上来|不会回答)(?:了|呢|啊|吧)?$/u;
 
 function visibleCharacterCount(value: string): number {
   return Array.from(value).filter((character) => !/\s/u.test(character)).length;
+}
+
+function normalizedShortAnswerText(value: string): string {
+  return Array.from(value.normalize("NFKC").toLocaleLowerCase())
+    .filter((character) => !/[\s\p{P}]/u.test(character))
+    .join("");
+}
+
+function isExplicitUncertaintyAnswer(value: string): boolean {
+  return EXPLICIT_UNCERTAINTY_PATTERN.test(normalizedShortAnswerText(value));
 }
 
 const interviewerState = computed<InterviewerState>(() => {
@@ -67,10 +78,33 @@ const voice = useVoiceInput(
 
 const isInterviewing = computed(() => session.value?.phase === "interviewing");
 const visibleDraftLength = computed(() => visibleCharacterCount(draft.value));
-const remainingAnswerCharacters = computed(() => Math.max(0, MIN_ANSWER_VISIBLE_CHARACTERS - visibleDraftLength.value));
 const roundCount = computed(() => turns.value.filter((turn) => turn.role === "user").length);
+const savedAnswerCount = computed(() => session.value?.user_answer_count ?? roundCount.value);
+const isFirstAnswer = computed(() => savedAnswerCount.value === 0);
+const isUncertaintyAnswer = computed(() => isExplicitUncertaintyAnswer(draft.value));
+const meetsAnswerRequirement = computed(() => (
+  isFirstAnswer.value
+  || visibleDraftLength.value >= MIN_ANSWER_VISIBLE_CHARACTERS
+  || isUncertaintyAnswer.value
+));
+const remainingAnswerCharacters = computed(() => (
+  isFirstAnswer.value || isUncertaintyAnswer.value
+    ? 0
+    : Math.max(0, MIN_ANSWER_VISIBLE_CHARACTERS - visibleDraftLength.value)
+));
+const answerRequirementHint = computed(() => {
+  if (isFirstAnswer.value) return "首次回答可以简短";
+  if (isUncertaintyAnswer.value) return "可以直接提交";
+  return `至少 ${MIN_ANSWER_VISIBLE_CHARACTERS} 字${remainingAnswerCharacters.value > 0 ? `，还差 ${remainingAnswerCharacters.value} 字` : ""}`;
+});
+const answerPlaceholder = computed(() => (
+  isFirstAnswer.value
+    ? "按你此刻真实的想法说就好…"
+    : "按你此刻真实的想法说就好（至少 20 字）…"
+));
 const canSubmit = computed(() => (
-  visibleDraftLength.value >= MIN_ANSWER_VISIBLE_CHARACTERS
+  draft.value.trim().length > 0
+  && meetsAnswerRequirement.value
   && isInterviewing.value
   && !sending.value
   && !loading.value
@@ -84,7 +118,7 @@ function isTurnRequest(value: unknown): value is TurnRequest {
   const candidate = value as Partial<TurnRequest>;
   return (
     typeof candidate.content === "string"
-    && visibleCharacterCount(candidate.content) >= MIN_ANSWER_VISIBLE_CHARACTERS
+    && candidate.content.trim().length > 0
     && typeof candidate.client_turn_id === "string"
     && ["text", "voice", "voice_edited"].includes(String(candidate.input_mode))
     && typeof candidate.answer_duration_ms === "number"
@@ -141,7 +175,7 @@ function onAnswerKeydown(event: KeyboardEvent) {
   event.preventDefault();
   if (canSubmit.value) {
     void submitAnswer();
-  } else if (draft.value.trim() && visibleDraftLength.value < MIN_ANSWER_VISIBLE_CHARACTERS) {
+  } else if (draft.value.trim() && !meetsAnswerRequirement.value) {
     error.value = MIN_ANSWER_MESSAGE;
   }
 }
@@ -310,7 +344,7 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
 async function submitAnswer() {
   const content = draft.value.trim();
   if (!content || sending.value) return;
-  if (visibleCharacterCount(content) < MIN_ANSWER_VISIBLE_CHARACTERS) {
+  if (!meetsAnswerRequirement.value) {
     error.value = MIN_ANSWER_MESSAGE;
     return;
   }
@@ -488,7 +522,7 @@ onBeforeUnmount(() => {
             v-model="draft"
             rows="4"
             maxlength="4000"
-            placeholder="按你此刻真实的想法说就好（至少 20 字）…"
+            :placeholder="answerPlaceholder"
             :disabled="sending || finalizing"
             @input="onDraftInput"
             @keydown="onAnswerKeydown"
@@ -509,7 +543,7 @@ onBeforeUnmount(() => {
               <small v-else-if="voiceWasUsed">转写已放入文本框，请确认或修改后手动提交</small>
             </div>
             <span class="char-count" :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }">
-              {{ visibleDraftLength }}/4000 · 至少 {{ MIN_ANSWER_VISIBLE_CHARACTERS }} 字<span v-if="draft.trim() && remainingAnswerCharacters > 0">，还差 {{ remainingAnswerCharacters }} 字</span>
+              {{ visibleDraftLength }}/4000 · {{ answerRequirementHint }}
             </span>
             <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">结束并生成报告</button>
             <button class="send-button" type="submit" :disabled="!canSubmit">

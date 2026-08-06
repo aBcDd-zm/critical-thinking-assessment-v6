@@ -21,7 +21,13 @@ from app.models import (
     TurnSubmission,
     utcnow,
 )
-from app.schemas import CreateSessionRequest, SubmitTurnRequest
+from app.schemas import (
+    MIN_ANSWER_VISIBLE_CHARACTERS,
+    CreateSessionRequest,
+    SubmitTurnRequest,
+    is_explicit_uncertainty_answer,
+    visible_character_count,
+)
 from app.services.model_gateway import (
     NATURAL_INTERVIEWER_PROMPT_ID,
     NATURAL_INTERVIEWER_PROMPT_VERSION,
@@ -303,6 +309,22 @@ class SessionService:
                     409,
                     "technical_turn_cap_reached",
                     "本次访谈已达到技术保护上限，请结束并生成报告。",
+                )
+            if (
+                not existing
+                and (session.user_answer_count or 0) > 0
+                and visible_character_count(request.content)
+                < MIN_ANSWER_VISIBLE_CHARACTERS
+                and not is_explicit_uncertainty_answer(request.content)
+            ):
+                raise ServiceError(
+                    422,
+                    "answer_too_short",
+                    (
+                        f"从第二个回答起，每次回答至少需要 "
+                        f"{MIN_ANSWER_VISIBLE_CHARACTERS} 个字；"
+                        "如果确实还不知道，也可以直接这样告诉我。"
+                    ),
                 )
 
             if existing:

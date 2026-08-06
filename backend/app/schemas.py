@@ -7,6 +7,8 @@ bank candidate, coverage value, or turn budget into runtime orchestration.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -24,11 +26,43 @@ DimensionKey = Literal[
 
 MIN_ANSWER_VISIBLE_CHARACTERS = 20
 
+_EXPLICIT_UNCERTAINTY_PATTERN = re.compile(
+    r"^(?:我)?(?:现在|暂时|目前|还|也|确实|真的){0,2}"
+    r"(?:不知道(?:(?:该|要)?怎么(?:说|回答))?|"
+    r"不清楚|不太清楚|不确定|不太确定|"
+    r"没想好|没有想好|没想法|没有想法|"
+    r"没什么想法|没有什么想法|想不到|说不上来|不会回答)"
+    r"(?:了|呢|啊|吧)?$"
+)
+
 
 def visible_character_count(value: str) -> int:
     """Count user-visible characters while ignoring spaces and line breaks."""
 
     return sum(1 for character in value if not character.isspace())
+
+
+def normalized_short_answer_text(value: str) -> str:
+    """Normalize a short intent without treating punctuation as content."""
+
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKC", value).casefold()
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
+    )
+
+
+def is_explicit_uncertainty_answer(value: str) -> bool:
+    """Allow only a complete, conservative expression of uncertainty.
+
+    Full-match semantics prevent a short substantive answer containing words
+    such as ``不知道`` from bypassing the normal answer-length check.
+    """
+
+    return bool(
+        _EXPLICIT_UNCERTAINTY_PATTERN.fullmatch(normalized_short_answer_text(value))
+    )
 
 
 class StrictModelOutput(BaseModel):
@@ -150,21 +184,11 @@ class SubmitTurnRequest(BaseModel):
 
     @field_validator("content")
     @classmethod
-    def normalize_and_require_minimum_answer_length(cls, value: str) -> str:
+    def normalize_and_reject_blank(cls, value: str) -> str:
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("content must not be blank")
-        if visible_character_count(cleaned) < MIN_ANSWER_VISIBLE_CHARACTERS:
-            raise ValueError(
-                f"每次回答至少需要 {MIN_ANSWER_VISIBLE_CHARACTERS} 个字。"
-            )
         return cleaned
-
-    @model_validator(mode="after")
-    def reject_blank(self) -> "SubmitTurnRequest":
-        if not self.content.strip():
-            raise ValueError("content must not be blank")
-        return self
 
     @property
     def anomaly_details(self) -> list[str]:

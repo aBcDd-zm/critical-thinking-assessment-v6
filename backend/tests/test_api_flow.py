@@ -12,7 +12,11 @@ from sqlalchemy import func, select
 from app.api import router as api_router
 from app.core.config import settings
 from app.models import AssessmentSession, DialogueTurn, TurnSubmission
-from app.schemas import FinalScorerOutput, NaturalInterviewerOutput
+from app.schemas import (
+    FinalScorerOutput,
+    NaturalInterviewerOutput,
+    is_explicit_uncertainty_answer,
+)
 from app.services.model_gateway import (
     ModelGatewayError,
     ModelGatewayService,
@@ -97,17 +101,20 @@ def test_consent_and_model_generated_opening_are_natural_only(client) -> None:
     detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     opening = detail["traces"][0]
     assert opening["action"] == "natural_opening"
-    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.2"
+    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.3"
 
 
-def test_interviewer_prompt_v6_0_2_uses_empathy_open_questions_and_natural_closure() -> None:
+def test_interviewer_prompt_v6_0_3_guides_uncertainty_without_forcing_length() -> None:
     prompt = "".join(NATURAL_INTERVIEWER_SYSTEM_PROMPT.split())
 
-    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.2"
-    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.2"
+    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.3"
+    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.3"
     assert "共情不是机械复述" in prompt
     assert "开放式问题" in prompt
     assert "两个选项" in prompt
+    assert "不得要求对方凑字数" in prompt
+    assert "更低压力的开放式问法" in prompt
+    assert "不得仅因这句不确定就选择finish" in prompt
     assert "心理咨询专家" not in prompt
     assert "除非对方明确提出要结束" in prompt
     assert "即使已经听到看似完整的方案、决定或解释，也不要立刻收束" in prompt
@@ -183,22 +190,87 @@ def test_mock_interviewer_probes_a_complete_plan_before_natural_closure() -> Non
     assert "你刚才提到" not in generic.interviewer_message
 
 
-def test_turn_requires_at_least_twenty_visible_characters(client) -> None:
+def test_first_turn_accepts_any_nonblank_short_answer_and_replays_idempotently(client) -> None:
     session_uuid = create_session(client)
+
+    first = send(client, session_uuid, "先等等。", "client-turn-first-short")
+    assert first.status_code == 200, first.text
+    replay = send(client, session_uuid, "先等等。", "client-turn-first-short")
+    assert replay.status_code == 200, replay.text
+    assert replay.text == first.text
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 1
+
+
+def test_subsequent_short_answer_requires_twenty_characters(client) -> None:
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, "先等等。", "client-turn-first-short").status_code == 200
 
     too_short = send(client, session_uuid, "我还在想。", "client-turn-too-short")
     assert too_short.status_code == 422
-    assert "至少需要 20 个字" in too_short.json()["detail"][0]["msg"]
-    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 0
+    assert too_short.json()["code"] == "answer_too_short"
+    assert "从第二个回答起" in too_short.json()["message"]
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 1
 
     accepted = send(
         client,
         session_uuid,
         "我正在认真比较不同方向，也会补充更具体的判断依据和现实条件。",
-        "client-turn-twenty-or-more",
+        "client-turn-second-long",
     )
-    assert accepted.status_code == 200
-    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 1
+    assert accepted.status_code == 200, accepted.text
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "不知道",
+        "我暂时不清楚。",
+        "我暂时还不知道。",
+        "还没想好呢",
+        "ｉｄｋ",
+        "我不知道该怎么回答。",
+        "说不上来。",
+    ],
+)
+def test_explicit_uncertainty_matcher_accepts_only_supported_complete_intents(answer) -> None:
+    # The ASCII abbreviation is intentionally not part of the Chinese intent
+    # allowlist; it documents that normalization does not broaden semantics.
+    assert is_explicit_uncertainty_answer(answer) is (answer != "ｉｄｋ")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "我不知道，但我会先去核实。",
+        "因为不清楚所以我会询问老师。",
+        "我没想好具体方案，但决定先试两天。",
+    ],
+)
+def test_uncertainty_words_inside_substantive_answers_are_not_exempt(answer) -> None:
+    assert is_explicit_uncertainty_answer(answer) is False
+
+
+def test_subsequent_explicit_uncertainty_is_accepted_and_gently_guided(client) -> None:
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, "先等等。", "client-turn-first-short").status_code == 200
+
+    accepted = send(client, session_uuid, "我暂时不知道。", "client-turn-uncertain")
+    assert accepted.status_code == 200, accepted.text
+    events = parse_events(accepted)
+    completed = events[-1]["data"]
+    assert completed["session_action"] == "continue"
+    assert "没关系" in completed["turn"]["content"]
+    assert "不知道" not in completed["turn"]["content"]
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 2
+
+
+def test_blank_answer_remains_invalid(client) -> None:
+    session_uuid = create_session(client)
+
+    blank = send(client, session_uuid, "  \n  ", "client-turn-blank")
+    assert blank.status_code == 422
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 0
 
 
 def test_interview_payload_has_no_controller_fields_and_idempotently_replays(client, monkeypatch) -> None:

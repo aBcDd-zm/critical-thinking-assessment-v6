@@ -83,7 +83,7 @@
 - `409 session_not_accepting_turns`：状态不是 `interviewing`。
 - `409 idempotency_payload_mismatch`：同一键采用不同提交内容。
 - `409 technical_turn_cap_reached`：已达 40 次不可见技术上限。
-- `422`：请求、同意、回答少于 20 个可见字符或模型结构合同无效。
+- `422 answer_too_short`：从第二个回答起，普通回答少于 20 个可见字符。首个非空回答及完整匹配“不知道／不清楚／不确定／没想好”等明确不确定表达的后续短答例外；请求、同意或模型结构合同无效仍使用其各自的 `422` 语义。
 - `500 turn_processing_failed`：一次修复后访谈官仍失败；用户 turn 已保留。
 - `503 scoring_failed`：评分失败，会话保持 `finalizing`，可幂等重试。
 - `503 tts_fallback_required`：语音供应商不可用；文本会话不受影响。
