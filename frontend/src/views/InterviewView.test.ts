@@ -108,6 +108,29 @@ describe("InterviewView", () => {
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
   });
 
+  it("rechecks the session when finalization times out before routing to the report", async () => {
+    const completedSession = {
+      uuid: "session-v6",
+      phase: "completed" as const,
+      turns: [openingTurn],
+      report_available: true,
+    };
+    mocks.getSession
+      .mockResolvedValueOnce({ uuid: "session-v6", phase: "interviewing", turns: [openingTurn] })
+      .mockResolvedValueOnce(completedSession);
+    mocks.finalizeSession.mockRejectedValue(new Error("请求超时"));
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("button.compact-action").trigger("click");
+    await flushPromises();
+
+    expect(mocks.getSession).toHaveBeenCalledTimes(2);
+    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
   it("does not describe a safety stop as a natural close or generate a report", async () => {
     const safetySession = {
       uuid: "session-v6",
@@ -168,7 +191,7 @@ describe("InterviewView", () => {
     expect(localStorage.getItem("v6:pending-turn:session-v6")).not.toBeNull();
   });
 
-  it("requires 20 visible characters and submits once with an unmodified Enter", async () => {
+  it("allows a nonblank short first answer and submits once with an unmodified Enter", async () => {
     const wrapper = mount(InterviewView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
     });
@@ -176,13 +199,10 @@ describe("InterviewView", () => {
 
     const textarea = wrapper.get("textarea");
     await textarea.setValue("我还在想。");
-    expect(wrapper.get("button.send-button").attributes("disabled")).toBeDefined();
-    expect(wrapper.get(".char-count").text()).toContain("还差");
-    await textarea.trigger("keydown", { key: "Enter" });
-    await flushPromises();
-    expect(mocks.submitTurnStream).not.toHaveBeenCalled();
+    expect(wrapper.get("button.send-button").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get(".char-count").text()).toContain("首次回答可以简短");
+    expect(textarea.attributes("placeholder")).not.toContain("至少 20 字");
 
-    await textarea.setValue(validAnswer);
     await textarea.trigger("keydown", { key: "Enter", shiftKey: true });
     await textarea.trigger("keydown", { key: "Enter", isComposing: true });
     await flushPromises();
@@ -191,7 +211,44 @@ describe("InterviewView", () => {
     await textarea.trigger("keydown", { key: "Enter" });
     await flushPromises();
     expect(mocks.submitTurnStream).toHaveBeenCalledTimes(1);
-    expect(mocks.submitTurnStream.mock.calls[0][1]).toMatchObject({ content: validAnswer });
+    expect(mocks.submitTurnStream.mock.calls[0][1]).toMatchObject({ content: "我还在想。" });
+  });
+
+  it("keeps the later 20-character gate but exempts a complete uncertainty answer", async () => {
+    mocks.getSession.mockResolvedValue({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 1,
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user", content: "先等等。" },
+        { id: 3, turn_index: 2, role: "assistant", content: "你愿意从哪里继续说？" },
+      ],
+    });
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    const textarea = wrapper.get("textarea");
+    expect(textarea.attributes("placeholder")).toContain("至少 20 字");
+    await textarea.setValue("我还在想。");
+    expect(wrapper.get("button.send-button").attributes("disabled")).toBeDefined();
+    expect(wrapper.get(".char-count").text()).toContain("还差");
+    await textarea.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(mocks.submitTurnStream).not.toHaveBeenCalled();
+
+    await textarea.setValue("我不知道，但我会先核实。");
+    expect(wrapper.get("button.send-button").attributes("disabled")).toBeDefined();
+
+    await textarea.setValue("我暂时不知道。");
+    expect(wrapper.get("button.send-button").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get(".char-count").text()).toContain("可以直接提交");
+    await textarea.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(mocks.submitTurnStream).toHaveBeenCalledTimes(1);
+    expect(mocks.submitTurnStream.mock.calls[0][1]).toMatchObject({ content: "我暂时不知道。" });
   });
 
   it("renders the current number of saved user answers without implying a target", async () => {
@@ -228,5 +285,23 @@ describe("InterviewView", () => {
 
     expect(mocks.submitTurnStream).not.toHaveBeenCalled();
     expect(localStorage.getItem("v6:pending-turn:session-v6")).toBeNull();
+  });
+
+  it("keeps a nonblank short pending answer recoverable", async () => {
+    localStorage.setItem("v6:pending-turn:session-v6", JSON.stringify({
+      saved_at: Date.now(),
+      payload: { content: "不知道", client_turn_id: "pending-short-id", input_mode: "text", answer_duration_ms: 1000 },
+    }));
+
+    mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(mocks.submitTurnStream).toHaveBeenCalledTimes(1);
+    expect(mocks.submitTurnStream.mock.calls[0][1]).toMatchObject({
+      content: "不知道",
+      client_turn_id: "pending-short-id",
+    });
   });
 });

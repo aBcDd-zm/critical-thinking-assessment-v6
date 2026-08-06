@@ -10,6 +10,7 @@ CADDY_CONTAINER=${CTA_V6_CADDY_CONTAINER:-tencent-caddy-1}
 CADDYFILE_PATH=${CTA_V6_CADDYFILE_PATH:-/etc/caddy/Caddyfile}
 SHARED_NETWORK=tencent_default
 V6_HOSTNAME=thinkagent.asia
+V6_ALIAS_HOSTNAME=v6.thinkagent.fun
 
 die() {
   echo "V6 deployment preflight failed: $1" >&2
@@ -38,9 +39,20 @@ prepare_compose() {
     *) die ".env.production must be owned privately (run chmod 600 .env.production)" ;;
   esac
 
-  for required_key in DEEPSEEK_API_KEY ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET; do
+  for required_key in DEEPSEEK_API_KEY ADMIN_USERNAME ADMIN_PASSWORD_HASH ADMIN_JWT_SECRET TTS_MODE; do
     require_value "$required_key"
   done
+
+  tts_mode=$(sed -n 's/^TTS_MODE=//p' "$ENV_FILE" | tail -n 1)
+  case "$tts_mode" in
+    disabled) ;;
+    doubao)
+      for required_key in DOUBAO_TTS_API_KEY DOUBAO_TTS_RESOURCE_ID DOUBAO_TTS_SPEAKER; do
+        require_value "$required_key"
+      done
+      ;;
+    *) die "TTS_MODE must be doubao or disabled" ;;
+  esac
 
   # Keep the backend's env file explicit when this script is run from another
   # directory. The file is consumed by Docker only; nothing below prints it.
@@ -92,6 +104,10 @@ reload_shared_caddy() {
     'grep -Fq "$2" "$1"' \
     sh "$CADDYFILE_PATH" "$V6_HOSTNAME" \
     || die "the current Caddy source has no ${V6_HOSTNAME} host block"
+  docker exec "$CADDY_CONTAINER" sh -ceu \
+    'grep -Fq "$2" "$1"' \
+    sh "$CADDYFILE_PATH" "$V6_ALIAS_HOSTNAME" \
+    || die "the current Caddy source has no ${V6_ALIAS_HOSTNAME} host alias"
 
   docker exec "$CADDY_CONTAINER" caddy validate --config "$CADDYFILE_PATH" --adapter caddyfile
   docker exec "$CADDY_CONTAINER" caddy reload --config "$CADDYFILE_PATH" --adapter caddyfile

@@ -22,16 +22,16 @@
 | 后端回归 | `cd backend && .venv/bin/python -m pytest -q` | V6 状态、自然访谈、评分、幂等与安全测试通过 | VERIFIED — 2026-08-04：81 passed；含 Argon2id 登录、Cookie 篡改/过期、CSRF、后台接口拦截、看板脱敏，以及本轮最少 20 字与访谈风格标记断言 |
 | 新库迁移 | `make migrate`（在空 V6 SQLite） | 只生成 V6 初始结构，不导入旧会话 | VERIFIED — 2026-08-04：初始 revision `20260804_0001` 升级通过，`alembic check` clean |
 | 前端单测/类型 | `cd frontend && npm run test && npm run typecheck` | V6 路由、恢复、语音输入与报告合同通过 | VERIFIED — 2026-08-04：9 files / 26 tests；typecheck 通过，涵盖最少 20 字、Enter 提交、Shift+Enter 换行、中文输入法保护和轮次显示 |
-| 生产构建 | `cd frontend && npm run build` | 无 TypeScript/Vite 错误 | VERIFIED — 2026-08-04：通过 |
-| 页面 API Mock | `cd frontend && npm run test:e2e` | 同意、自然流、结束、报告、语音不自动提交 | VERIFIED — 2026-08-04：2 / 2 通过 |
-| 真栈 Mock | `cd frontend && npm run test:e2e:stack` | 使用 `8061/5177` 与临时库；不访问真实供应商 | VERIFIED — 2026-08-04：5 / 5 通过；Vite 5177 与 Uvicorn 8061 均已干净退出 |
+| 生产构建 | `cd frontend && npm run build` | 无 TypeScript/Vite 错误 | VERIFIED — 2026-08-06：通过 |
+| 页面 API Mock | `cd frontend && npm run test:e2e` | 同意、自然流、结束、报告、语音不自动提交 | VERIFIED — 2026-08-06：2 / 2 通过 |
+| 真栈 Mock | `cd frontend && npm run test:e2e:stack` | 使用 `8061/5177` 与临时库；不访问真实供应商 | VERIFIED — 2026-08-06：5 / 5 通过；Vite 5177 与 Uvicorn 8061 均已干净退出 |
 | 管理员后台 | `cd frontend && npm run test:e2e:stack` | 未登录拦截、登录进入看板、刷新恢复、优先复核、保存复核、匿名导出、退出后重新拦截及窄屏入口；不调用真实供应商 | VERIFIED — 2026-08-04：真栈 E2E 覆盖通过 |
-| 完整本地套件 | `make test` | 上述检查全部通过 | VERIFIED — 2026-08-04：后端 81 passed、前端 26 tests、构建通过、页面 Mock E2E 2 / 2、真栈 E2E 5 / 5；8061/5177 已关闭 |
+| 完整本地套件 | `make test` | 上述检查全部通过 | VERIFIED — 2026-08-06：后端 104 passed、前端 30 tests、类型检查与构建通过、页面 Mock E2E 2 / 2、真栈 E2E 5 / 5；8061/5177 已关闭 |
 | 生产配置静态安全检查 | 后端生产资产测试（包含在 `make test`） | 不再注入 Basic Auth、`ADMIN_TOKEN` 或前端认证秘密；生产入口仍有后台/登录限流 | VERIFIED — 2026-08-04：生产资产与 shell 语法断言随 81 项后端测试通过 |
 | 生产 Compose/镜像构建 | `docker compose -f docker-compose.production.yml config --quiet` 与镜像构建 | Compose 配置及两张生产镜像可在无真实密钥前构建 | NOT VERIFIED — 当前本机未安装 `docker`，未执行构建或容器启动 |
 | 启停与健康 | `make start && make health && make stop && make check-stopped` | `8060/5176` 可用后均无监听 | NOT REVALIDATED — 8060/5176 已有本次改动前启动的本地进程；为避免影响现有本地 Demo，本次未停止或覆盖它 |
 
-重点断言：访谈请求中没有题库、目标维度、coverage、阶段命令或固定轮次；普通 `Enter` 只在回答达到 20 个可见字符时提交、`Shift+Enter` 换行、中文输入法选词不误提交；页面只显示“已进行 N 轮问答”而不显示配额；格式失败只修复一次并保留用户 turn；同键重放不重复写入；第 40 次后不再无限访谈；评分缺证据时为 `null`；匿名 ZIP 不含真实议题与自由文本。
+重点断言：访谈请求中没有题库、目标维度、coverage、阶段命令或固定轮次；首个非空回答可简短提交，后续普通回答需 20 个可见字符，完整的“不知道”类不确定短答例外；`Shift+Enter` 换行、中文输入法选词不误提交；页面只显示“已进行 N 轮问答”而不显示配额；格式失败只修复一次并保留用户 turn；同键重放不重复写入；第 40 次后不再无限访谈；评分缺证据时为 `null`；匿名 ZIP 不含真实议题与自由文本。
 
 ## 真实模型人工验收（单独记录）
 

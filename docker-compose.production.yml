@@ -53,7 +53,7 @@ services:
       AUTO_CREATE_DB: "false"
       DATABASE_URL: sqlite:////app/data/v6.db
       MODEL_GATEWAY_MODE: real
-      TTS_MODE: disabled
+      TTS_MODE: ${TTS_MODE:?set TTS_MODE=doubao or disabled in .env.production}
       CORS_ORIGINS: "[]"
     depends_on:
       db-init:

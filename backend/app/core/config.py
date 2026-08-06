@@ -21,8 +21,14 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_timeout_seconds: float = 30.0
+    # Final scoring includes the full six-dimension rubric and can take
+    # longer than an interviewer turn. Keep this below the 120s /finalize
+    # reverse-proxy timeout so the server can return a retryable result.
+    deepseek_timeout_seconds: float = 90.0
     deepseek_max_tokens: int = 3000
+    # Final scoring spends tokens on six dimensions plus exact evidence quotes;
+    # keep its completion budget separate from short interviewer turns.
+    deepseek_scoring_max_tokens: int = 12000
     tts_mode: Literal["fake", "doubao", "disabled"] = "fake"
     doubao_tts_api_key: str = ""
     doubao_tts_resource_id: str = "seed-tts-2.0"
@@ -70,6 +76,13 @@ class Settings(BaseSettings):
             violations.append("ADMIN_JWT_SECRET must be at least 32 characters")
         if self.tts_mode.strip().lower() == "fake":
             violations.append("TTS_MODE must not be fake")
+        if self.tts_mode == "doubao":
+            if not self.doubao_tts_api_key.strip():
+                violations.append("DOUBAO_TTS_API_KEY must be non-empty when TTS_MODE is doubao")
+            if not self.doubao_tts_resource_id.strip():
+                violations.append("DOUBAO_TTS_RESOURCE_ID must be non-empty when TTS_MODE is doubao")
+            if not self.doubao_tts_speaker.strip():
+                violations.append("DOUBAO_TTS_SPEAKER must be non-empty when TTS_MODE is doubao")
         if violations:
             raise ValueError("invalid production configuration: " + "; ".join(violations))
         return self

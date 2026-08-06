@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute } from "vue-router";
-import { getAdminSession, saveExpertScores, updateReview } from "@/api/admin";
+import { finalizeAdminSession, getAdminSession, saveExpertScores, updateReview } from "@/api/admin";
 import { useAdminAuth } from "@/composables/useAdminAuth";
 import {
   DIMENSIONS,
@@ -21,6 +21,7 @@ const detail = ref<AdminSessionDetail | null>(null);
 const activeTab = ref<ReviewTab>("conversation");
 const loading = ref(true);
 const saving = ref(false);
+const reportRetrying = ref(false);
 const error = ref("");
 const message = ref("");
 const review = reactive<{ review_status: ReviewStatus; review_notes: string; reviewer: string }>({ review_status: "pending", review_notes: "", reviewer: "" });
@@ -34,6 +35,14 @@ const naturalTraces = computed(() =>
 );
 const scoringRuns = computed(() =>
   [...(detail.value?.scoring_runs ?? [])].sort((a, b) => a.attempt_number - b.attempt_number),
+);
+const latestScoringError = computed(() =>
+  [...(detail.value?.scoring_runs ?? [])]
+    .sort((a, b) => b.attempt_number - a.attempt_number)
+    .find((run) => run.error)?.error ?? "",
+);
+const canRetryReport = computed(() =>
+  detail.value?.phase === "finalizing" && detail.value.report_available !== true,
 );
 const evidenceItems = computed<AdminEvidenceItem[]>(() => {
   if (detail.value?.evidence_items?.length) return detail.value.evidence_items;
@@ -131,6 +140,25 @@ async function saveScores() {
   }
 }
 
+async function retryReport() {
+  if (!canRetryReport.value || reportRetrying.value) return;
+  reportRetrying.value = true;
+  error.value = "";
+  message.value = "正在使用已冻结的逐字稿重试生成报告…";
+  try {
+    const result = await finalizeAdminSession(uuid);
+    await load();
+    message.value = result.session.phase === "completed" || result.report
+      ? "报告已生成，访谈逐字稿未重复写入。"
+      : "会话仍在生成报告，可以稍后再次重试。";
+  } catch (cause) {
+    await load();
+    error.value = cause instanceof Error ? cause.message : "报告生成失败，请稍后重试。";
+  } finally {
+    reportRetrying.value = false;
+  }
+}
+
 function formatMs(value?: number | null) {
   if (value === null || value === undefined) return "未记录";
   return value >= 60_000 ? `${(value / 60_000).toFixed(1)} 分钟` : `${Math.round(value / 1000)} 秒`;
@@ -171,13 +199,13 @@ onMounted(load);
     <section v-else-if="detail" class="admin-shell">
       <div class="detail-title">
         <div><span class="eyebrow">V6 NATURAL INTERVIEW REVIEW</span><h1>{{ participant.display_name || "匿名参与者" }}的自然访谈</h1><p>{{ phaseName(detail.phase) }} · {{ answerCount(detail) }} 次已保存回答</p></div>
-        <div class="detail-stats"><span><strong>{{ inputStats.text }}</strong>文字输入</span><span><strong>{{ inputStats.voice }}</strong>语音输入</span><span><strong>{{ formatMs(inputStats.duration) }}</strong>累计作答</span></div>
+        <div class="detail-stats"><span><strong>{{ inputStats.text }}</strong>文字输入</span><span><strong>{{ inputStats.voice }}</strong>语音输入</span><span><strong>{{ formatMs(inputStats.duration) }}</strong>累计作答</span><button v-if="canRetryReport" type="button" class="primary-button small" :disabled="reportRetrying" @click="retryReport">{{ reportRetrying ? "正在生成…" : "生成/重试报告" }}</button></div>
       </div>
 
       <nav class="tab-bar" aria-label="复核内容">
         <button v-for="tab in [{key:'conversation',label:'完整对话'},{key:'interview',label:'访谈与证据'},{key:'trace',label:'模型与评分'},{key:'review',label:'人工复核'}]" :key="tab.key" :class="{ active: activeTab === tab.key }" @click="activeTab = tab.key as ReviewTab">{{ tab.label }}</button>
       </nav>
-      <p v-if="message" class="notice-banner">{{ message }}</p><p v-if="error" class="error-banner">{{ error }}</p>
+      <p v-if="message" class="notice-banner">{{ message }}</p><p v-if="error" class="error-banner">{{ error }}</p><p v-if="latestScoringError" class="error-banner">最近一次终评错误：{{ latestScoringError }}</p>
 
       <section v-if="activeTab === 'conversation'" class="review-conversation">
         <article v-for="turn in detail.turns" :key="turn.id ?? `${turn.turn_index}-${turn.role}`" :class="turn.role">

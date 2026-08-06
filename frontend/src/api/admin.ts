@@ -3,6 +3,7 @@ import type {
   AdminSessionDetail,
   DashboardOverview,
   ExpertScore,
+  FinalizeResponse,
   PagedSessions,
   ReviewStatus,
 } from "@/types/contracts";
@@ -25,6 +26,11 @@ export async function listAdminSessions(filters: SessionFilters): Promise<PagedS
 
 export const getAdminSession = (uuid: string) =>
   apiRequest<AdminSessionDetail>(`/admin/sessions/${encodeURIComponent(uuid)}`);
+
+export const finalizeAdminSession = (uuid: string) =>
+  apiRequest<FinalizeResponse>(`/admin/sessions/${encodeURIComponent(uuid)}/finalize`, {
+    method: "POST",
+  });
 
 export async function updateReview(
   uuid: string,
