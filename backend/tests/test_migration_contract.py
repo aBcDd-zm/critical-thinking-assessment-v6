@@ -41,7 +41,7 @@ def test_frozen_initial_migration_recreates_current_schema(tmp_path: Path) -> No
     database_url = f"sqlite:///{database_path}"
     _alembic(database_url, "upgrade", "head")
     current = _alembic(database_url, "current")
-    assert "20260804_0003 (head)" in current.stdout
+    assert "20260806_0001 (head)" in current.stdout
     no_drift = _alembic(database_url, "check")
     assert "No new upgrade operations detected" in no_drift.stdout
 

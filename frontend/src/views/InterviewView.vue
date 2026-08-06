@@ -4,6 +4,7 @@ import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import InterviewerAvatar from "@/components/InterviewerAvatar.vue";
 import { ApiError } from "@/api/http";
 import {
+  checkReportReadiness,
   completedData,
   exitSession,
   finalizingSession,
@@ -31,6 +32,7 @@ const streamedText = ref("");
 const loading = ref(true);
 const sending = ref(false);
 const finalizing = ref(false);
+const checkingReadiness = ref(false);
 const error = ref("");
 const notice = ref("");
 const inputMode = ref<InputMode>("text");
@@ -64,7 +66,7 @@ function isExplicitUncertaintyAnswer(value: string): boolean {
 const interviewerState = computed<InterviewerState>(() => {
   if (voice.listening.value) return "listening";
   if (playback.speaking.value) return "speaking";
-  if (sending.value || finalizing.value) return "thinking";
+  if (sending.value || finalizing.value || checkingReadiness.value) return "thinking";
   return "listening";
 });
 
@@ -116,9 +118,16 @@ const canSubmit = computed(() => (
   && isInterviewing.value
   && !technicalTurnCapReached.value
   && !sending.value
+  && !checkingReadiness.value
   && !loading.value
 ));
-const canFinish = computed(() => isInterviewing.value && !sending.value && !finalizing.value && !loading.value);
+const canFinish = computed(() => (
+  isInterviewing.value
+  && !sending.value
+  && !finalizing.value
+  && !checkingReadiness.value
+  && !loading.value
+));
 const pendingKey = computed(() => `v6:pending-turn:${uuid.value}`);
 const PENDING_TURN_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -295,7 +304,46 @@ async function generateReport(automatic = false) {
 
 async function finishAndGenerate() {
   if (!canFinish.value) return;
-  if (!window.confirm("现在结束访谈并生成报告吗？报告只会使用已经保存的内容。")) return;
+  checkingReadiness.value = true;
+  error.value = "";
+  notice.value = "正在检查现有回答能否支持完整报告…";
+  let shouldGenerate = false;
+  try {
+    const readiness = await checkReportReadiness(uuid.value);
+    if (readiness.status === "ready" && readiness.ready === true) {
+      shouldGenerate = window.confirm(
+        "按当前终评证据规则，现有回答已达到报告准备条件。现在结束访谈并生成报告吗？",
+      );
+      notice.value = shouldGenerate ? "" : "现有回答已达到报告准备条件，你可以继续说，也可以随时生成报告。";
+    } else if (readiness.status === "insufficient" && readiness.ready === false) {
+      const message = technicalTurnCapReached.value
+        ? "按当前终评证据规则，现有回答可能还不足以支持完整的六维报告。本次访谈已达到技术保护上限，你仍可根据已有回答生成报告，证据有限的部分会如实说明。是否仍然生成？"
+        : "按当前终评证据规则，现有回答可能还不足以支持完整的六维报告。建议继续访谈，补充更多可核对的具体经历、理由和判断依据；你也可以仍然按现有回答生成报告。是否仍然生成？";
+      shouldGenerate = window.confirm(message);
+      notice.value = shouldGenerate
+        ? ""
+        : technicalTurnCapReached.value
+          ? "本次访谈已达到技术保护上限；你仍可根据已有回答生成报告。"
+          : "建议继续访谈，补充更多可核对的具体经历、理由和判断依据。";
+    } else {
+      shouldGenerate = window.confirm(
+        "报告准备度仍在检查中。你可以稍后再试，或仍然按现有回答生成报告。是否仍然生成？",
+      );
+      notice.value = shouldGenerate
+        ? ""
+        : "报告准备度仍在检查中，你可以继续访谈后再试。";
+    }
+  } catch {
+    shouldGenerate = window.confirm(
+      "暂时无法完成报告准备度检查。你可以继续访谈，或仍然按现有回答生成报告。是否仍然生成？",
+    );
+    notice.value = shouldGenerate
+      ? ""
+      : "暂时无法完成报告准备度检查，你可以继续访谈后再试。";
+  } finally {
+    checkingReadiness.value = false;
+  }
+  if (!shouldGenerate) return;
   draft.value = "";
   voice.stop();
   playback.stop();
@@ -534,7 +582,7 @@ onBeforeUnmount(() => {
             <span>你此前的回答均已保存。为避免对话过长影响稳定性，本次不再接收新回答；这不代表系统在判定证据已充分。你可以现在结束访谈，并根据已有内容生成报告。</span>
           </div>
           <button type="button" class="primary-button small" :disabled="!canFinish" @click="finishAndGenerate">
-            结束并生成报告
+            {{ checkingReadiness ? "正在检查…" : "结束并生成报告" }}
           </button>
         </div>
 
@@ -546,7 +594,7 @@ onBeforeUnmount(() => {
             rows="4"
             maxlength="4000"
             :placeholder="answerPlaceholder"
-            :disabled="sending || finalizing"
+            :disabled="sending || finalizing || checkingReadiness"
             @input="onDraftInput"
             @keydown="onAnswerKeydown"
           />
@@ -556,7 +604,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="mic-button"
                 :class="{ recording: voice.listening.value }"
-                :disabled="!voice.supported.value || sending || finalizing"
+                :disabled="!voice.supported.value || sending || finalizing || checkingReadiness"
                 :aria-pressed="voice.listening.value"
                 @click="toggleVoice"
               >
@@ -568,7 +616,9 @@ onBeforeUnmount(() => {
             <span class="char-count" :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }">
               {{ visibleDraftLength }}/4000 · {{ answerRequirementHint }}
             </span>
-            <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">结束并生成报告</button>
+            <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">
+              {{ checkingReadiness ? "正在检查…" : "结束并生成报告" }}
+            </button>
             <button class="send-button" type="submit" :disabled="!canSubmit">
               {{ sending ? "正在回应…" : "提交回答" }}<span aria-hidden="true">↑</span>
             </button>

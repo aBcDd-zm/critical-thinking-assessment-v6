@@ -5,6 +5,7 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   FinalizeResponse,
+  ReportReadinessResponse,
   SessionSnapshot,
   TurnRequest,
   TurnStreamEvent,
@@ -30,6 +31,12 @@ export const getReportPdf = (uuid: string) =>
 
 export const exitSession = (uuid: string) =>
   apiRequest<SessionSnapshot>(`/sessions/${encodeURIComponent(uuid)}/exit`, { method: "POST" });
+
+export const checkReportReadiness = (uuid: string) =>
+  apiRequest<ReportReadinessResponse>(
+    `/sessions/${encodeURIComponent(uuid)}/report-readiness`,
+    { method: "POST" },
+  );
 
 export async function finalizeSession(uuid: string): Promise<FinalizeResponse> {
   const result = await apiRequest<FinalizeResponse | SessionSnapshot>(

@@ -94,6 +94,9 @@ class AssessmentSession(Base):
     evidence_items: Mapped[list[EvidenceItem]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+    readiness_checks: Mapped[list[EvidenceReadinessCheck]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class DialogueTurn(Base):
@@ -245,6 +248,51 @@ class EvidenceItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     session: Mapped[AssessmentSession] = relationship(back_populates="evidence_items")
+
+
+class EvidenceReadinessCheck(Base):
+    """Private, non-scoring cache for the report-readiness soft gate.
+
+    A check is keyed by the exact transcript and scoring assets.  It never
+    stores dimension-level output, scores, or quotes, and is deliberately
+    separate from ``ScoringRun`` so a preflight cannot be mistaken for a
+    formal assessment result.
+    """
+
+    __tablename__ = "evidence_readiness_checks"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "transcript_fingerprint",
+            "asset_fingerprint",
+            name="uq_readiness_session_transcript_asset",
+        ),
+        CheckConstraint(
+            "status IN ('processing','ready','insufficient','failed')",
+            name="ck_readiness_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("assessment_sessions.id", ondelete="CASCADE"), index=True
+    )
+    transcript_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    asset_fingerprint: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
+    ready: Mapped[Optional[bool]] = mapped_column(Boolean)
+    sufficient_dimension_count: Mapped[Optional[int]] = mapped_column(Integer)
+    model_provider: Mapped[str] = mapped_column(String(80), default="pending")
+    model_name: Mapped[str] = mapped_column(String(120), default="pending")
+    prompt_template_id: Mapped[str] = mapped_column(String(120))
+    prompt_version: Mapped[str] = mapped_column(String(40))
+    repair_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    session: Mapped[AssessmentSession] = relationship(back_populates="readiness_checks")
 
 
 class AssessmentReport(Base):

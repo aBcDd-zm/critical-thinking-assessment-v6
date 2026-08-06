@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import zipfile
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -11,7 +12,17 @@ from sqlalchemy import func, select
 
 from app.api import router as api_router
 from app.core.config import settings
-from app.models import AssessmentSession, DialogueTurn, TurnSubmission
+from app.services import session_service as session_service_module
+from app.models import (
+    AssessmentReport,
+    AssessmentSession,
+    DialogueTurn,
+    EvidenceItem,
+    EvidenceReadinessCheck,
+    ScoringRun,
+    TurnSubmission,
+    utcnow,
+)
 from app.schemas import (
     FinalScorerOutput,
     NaturalInterviewerOutput,
@@ -29,8 +40,8 @@ from app.services.model_gateway import (
     StructuredCallResult,
     resolve_natural_interviewer_prompt,
 )
-from app.services.orchestrator import _quality_flags
-from tests.conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME
+from app.services.orchestrator import _quality_flags, transcript_fingerprint
+from tests.conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, TestSession
 
 
 DENSE_ANSWER = (
@@ -428,6 +439,186 @@ def test_user_finalize_scores_only_exact_user_quotes_and_hides_confidence(client
     admin_detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     assert admin_detail["evidence_items"]
     assert "confidence" in admin_detail["evidence_items"][0]
+
+
+def test_report_readiness_is_aggregate_idempotent_and_not_formal_scoring(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
+    gateway = api_router.sessions.orchestrator.gateway
+    original = gateway.generate_final_scorer
+    calls = 0
+
+    def counted(payload):
+        nonlocal calls
+        calls += 1
+        return original(payload)
+
+    monkeypatch.setattr(gateway, "generate_final_scorer", counted)
+    first = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+    second = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+
+    assert first.status_code == 200, first.text
+    assert first.json() == {"status": "ready", "ready": True, "cached": False}
+    assert second.status_code == 200, second.text
+    assert second.json() == {"status": "ready", "ready": True, "cached": True}
+    assert calls == 1
+    assert set(first.json()) == {"status", "ready", "cached"}
+
+    with TestSession() as db:
+        session = db.scalar(
+            select(AssessmentSession).where(AssessmentSession.uuid == session_uuid)
+        )
+        assert session is not None
+        assert session.phase == "interviewing"
+        assert session.finalization_state == "not_started"
+        assert session.transcript_fingerprint is None
+        assert session.transcript_frozen_at is None
+        assert db.scalar(
+            select(func.count()).select_from(EvidenceReadinessCheck)
+        ) == 1
+        assert db.scalar(select(func.count()).select_from(ScoringRun)) == 0
+        assert db.scalar(select(func.count()).select_from(EvidenceItem)) == 0
+        assert db.scalar(select(func.count()).select_from(AssessmentReport)) == 0
+
+
+def test_insufficient_readiness_is_advisory_and_still_allows_finalization(client) -> None:
+    session_uuid = create_session(client)
+    answer = "这件事情我还没有完全想清楚，今天只想先把现在的感受说出来。"
+    assert send(client, session_uuid, answer).status_code == 200
+
+    readiness = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    assert readiness.json() == {
+        "status": "insufficient",
+        "ready": False,
+        "cached": False,
+    }
+
+    finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    assert finalized.status_code == 200, finalized.text
+    assert finalized.json()["session"]["phase"] == "completed"
+    assert all(
+        dimension["score"] is None
+        for dimension in finalized.json()["report"]["dimensions"]
+    )
+
+
+def test_readiness_failure_does_not_freeze_or_block_formal_finalization(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
+    gateway = api_router.sessions.orchestrator.gateway
+    original = gateway.generate_final_scorer
+
+    def fail_readiness(_payload):
+        raise ModelGatewayError("synthetic readiness failure", transient=True)
+
+    monkeypatch.setattr(gateway, "generate_final_scorer", fail_readiness)
+    failed = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+    assert failed.status_code == 503
+    assert failed.json()["code"] == "readiness_check_failed"
+
+    with TestSession() as db:
+        session = db.scalar(
+            select(AssessmentSession).where(AssessmentSession.uuid == session_uuid)
+        )
+        assert session is not None
+        assert session.phase == "interviewing"
+        assert session.finalization_state == "not_started"
+        check = db.scalar(select(EvidenceReadinessCheck))
+        assert check is not None
+        assert check.status == "failed"
+        assert check.error == "ModelGatewayError"
+
+    monkeypatch.setattr(gateway, "generate_final_scorer", original)
+    finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    assert finalized.status_code == 200, finalized.text
+    assert finalized.json()["session"]["phase"] == "completed"
+
+
+def test_readiness_discards_result_if_transcript_changes_during_check(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
+    fingerprints = iter(["a" * 64, "b" * 64])
+    monkeypatch.setattr(
+        session_service_module,
+        "transcript_fingerprint",
+        lambda _session: next(fingerprints),
+    )
+
+    readiness = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+
+    assert readiness.status_code == 202, readiness.text
+    assert readiness.json() == {
+        "status": "checking",
+        "ready": None,
+        "cached": False,
+    }
+    with TestSession() as db:
+        check = db.scalar(select(EvidenceReadinessCheck))
+        assert check is not None
+        assert check.status == "failed"
+        assert check.error == "TranscriptChanged"
+        assert db.scalar(select(func.count()).select_from(ScoringRun)) == 0
+        assert db.scalar(select(func.count()).select_from(EvidenceItem)) == 0
+        assert db.scalar(select(func.count()).select_from(AssessmentReport)) == 0
+
+
+def test_stale_processing_readiness_lease_can_be_reclaimed(client, monkeypatch) -> None:
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
+    gateway = api_router.sessions.orchestrator.gateway
+    original = gateway.generate_final_scorer
+    calls = 0
+
+    def counted(payload):
+        nonlocal calls
+        calls += 1
+        return original(payload)
+
+    monkeypatch.setattr(gateway, "generate_final_scorer", counted)
+    with TestSession() as db:
+        session = db.scalar(
+            select(AssessmentSession).where(AssessmentSession.uuid == session_uuid)
+        )
+        assert session is not None
+        stale = EvidenceReadinessCheck(
+            session_id=session.id,
+            transcript_fingerprint=transcript_fingerprint(session),
+            asset_fingerprint=(
+                session_service_module._report_readiness_asset_fingerprint()
+            ),
+            status="processing",
+            prompt_template_id=(
+                session_service_module.NATURAL_FINAL_SCORER_PROMPT_ID
+            ),
+            prompt_version=(
+                session_service_module.NATURAL_FINAL_SCORER_PROMPT_VERSION
+            ),
+            created_at=utcnow()
+            - timedelta(
+                seconds=session_service_module.REPORT_READINESS_LEASE_SECONDS + 1
+            ),
+        )
+        db.add(stale)
+        db.commit()
+        stale_id = stale.id
+
+    readiness = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+
+    assert readiness.status_code == 200, readiness.text
+    assert readiness.json() == {"status": "ready", "ready": True, "cached": False}
+    assert calls == 1
+    with TestSession() as db:
+        checks = db.scalars(select(EvidenceReadinessCheck)).all()
+        assert len(checks) == 1
+        assert checks[0].id == stale_id
+        assert checks[0].status == "ready"
 
 
 def test_public_pdf_score_label_uses_a_hundred_point_presentation() -> None:

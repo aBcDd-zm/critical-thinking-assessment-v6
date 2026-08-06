@@ -182,6 +182,25 @@ class InterviewResult:
     input_fingerprint: str
 
 
+@dataclass(frozen=True)
+class ReportReadinessAssessment:
+    """Ephemeral result of applying the existing final evidence rules.
+
+    This object is intentionally aggregate-only.  Dimension results remain
+    inside the scorer call and are neither returned to the participant nor
+    persisted as formal scores by the readiness path.
+    """
+
+    ready: bool
+    sufficient_dimension_count: int
+    provider: str
+    model: str
+    prompt_template_id: str
+    prompt_version: str
+    repair_used: bool
+    latency_ms: int
+
+
 def normalized_text(value: str) -> str:
     return "".join(
         char
@@ -423,6 +442,38 @@ class InterviewOrchestrator:
         session.transcript_frozen_at = session.transcript_frozen_at or utcnow()
         session.finalization_state = "frozen"
         return fingerprint
+
+    def assess_report_readiness(
+        self, session: AssessmentSession
+    ) -> ReportReadinessAssessment:
+        """Apply the formal scorer's existing evidence rules without mutation.
+
+        The transcript remains open and the validated output is not stored as
+        a score, evidence item, or report.  Formal finalization therefore
+        always performs its own independent scorer call against the frozen
+        transcript.
+        """
+
+        transcript = _transcript_rows(session)
+        call = self.gateway.generate_final_scorer({"transcript": transcript})
+        validated = self._validate_final_output(call.output, transcript)
+        sufficient_dimension_count = sum(
+            1
+            for dimension in validated.dimensions
+            if dimension.score is not None
+            and dimension.sufficient
+            and bool(dimension.quotes)
+        )
+        return ReportReadinessAssessment(
+            ready=sufficient_dimension_count == len(DIMENSIONS),
+            sufficient_dimension_count=sufficient_dimension_count,
+            provider=call.provider,
+            model=call.model,
+            prompt_template_id=NATURAL_FINAL_SCORER_PROMPT_ID,
+            prompt_version=NATURAL_FINAL_SCORER_PROMPT_VERSION,
+            repair_used=call.repair_used,
+            latency_ms=call.latency_ms,
+        )
 
     def finalize(self, db: Session, session: AssessmentSession) -> AssessmentSession:
         if session.report and session.phase == "completed":
