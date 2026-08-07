@@ -5,6 +5,7 @@ import InterviewView from "./InterviewView.vue";
 const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
   checkReportReadiness: vi.fn(),
+  acceptClosureSuggestion: vi.fn(),
   finalizeSession: vi.fn(),
   exitSession: vi.fn(),
   submitTurnStream: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("@/api/session", async (importOriginal) => {
     ...actual,
     getSession: mocks.getSession,
     checkReportReadiness: mocks.checkReportReadiness,
+    acceptClosureSuggestion: mocks.acceptClosureSuggestion,
     finalizeSession: mocks.finalizeSession,
     exitSession: mocks.exitSession,
     submitTurnStream: mocks.submitTurnStream,
@@ -55,6 +57,9 @@ describe("InterviewView", () => {
     });
     mocks.finalizeSession.mockResolvedValue({
       session: { uuid: "session-v6", phase: "completed", turns: [], report_available: true },
+    });
+    mocks.acceptClosureSuggestion.mockResolvedValue({
+      session: { uuid: "session-v6", phase: "completed", turns: [], report_available: true, closure_suggestion: null },
     });
   });
 
@@ -205,7 +210,117 @@ describe("InterviewView", () => {
     expect(wrapper.text()).toContain("语音播报");
   });
 
-  it("automatically requests a report after the interviewer naturally closes", async () => {
+  it("restores a persisted close suggestion after refresh and lets the participant continue", async () => {
+    const fingerprint = "c".repeat(64);
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 1,
+      closure_suggestion: {
+        closure_turn_id: 3,
+        transcript_fingerprint: fingerprint,
+        finish_reason: "natural_closure",
+      },
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user", content: validAnswer },
+        { id: 3, turn_index: 2, role: "assistant", content: "这里似乎是一个自然的停点。", session_action: "suggest_finish", finish_reason: "natural_closure" },
+      ],
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.get(".closure-suggestion-card").text()).toContain("继续交流");
+    expect(wrapper.get(".closure-suggestion-card").text()).toContain("结束并生成报告");
+    expect(wrapper.find("textarea").exists()).toBe(false);
+    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
+    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+
+    await wrapper.get(".closure-suggestion-card .secondary-button").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".closure-suggestion-card").exists()).toBe(false);
+    expect(wrapper.find("textarea").exists()).toBe(true);
+    expect(wrapper.text()).toContain("你可以继续补充");
+    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
+    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("replays one close suggestion idempotently and only accepts it after participant confirmation", async () => {
+    const fingerprint = "d".repeat(64);
+    const suggestedSession = {
+      uuid: "session-v6",
+      phase: "interviewing" as const,
+      user_answer_count: 1,
+      closure_suggestion: {
+        closure_turn_id: 3,
+        transcript_fingerprint: fingerprint,
+        finish_reason: "natural_closure" as const,
+      },
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user" as const, content: validAnswer, client_turn_id: "client-suggest-finish", input_mode: "text" as const, answer_duration_ms: 100 },
+        { id: 3, turn_index: 2, role: "assistant" as const, content: "如果你愿意，我们可以在这里收束。", session_action: "suggest_finish" as const, finish_reason: "natural_closure" as const },
+      ],
+    };
+    mocks.getSession
+      .mockResolvedValueOnce({ uuid: "session-v6", phase: "interviewing", user_answer_count: 0, turns: [openingTurn] })
+      .mockResolvedValueOnce(suggestedSession);
+    mocks.submitTurnStream.mockImplementation(async (_uuid, _payload, onEvent) => {
+      const suggestionEvent = {
+        event: "session_closure_suggested",
+        data: {
+          session_uuid: "session-v6",
+          closure_turn_id: 3,
+          transcript_fingerprint: fingerprint,
+          finish_reason: "natural_closure",
+        },
+      };
+      await onEvent(suggestionEvent);
+      await onEvent(suggestionEvent);
+      await onEvent({
+        event: "agent_completed",
+        data: {
+          turn: suggestedSession.turns[2],
+          session_action: "suggest_finish",
+          finish_reason: "natural_closure",
+          session: suggestedSession,
+        },
+      });
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.findAll(".closure-suggestion-card")).toHaveLength(1);
+    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
+    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+
+    await wrapper.get(".closure-suggestion-card .primary-button").trigger("click");
+    await flushPromises();
+
+    expect(mocks.checkReportReadiness).toHaveBeenCalledTimes(1);
+    expect(mocks.acceptClosureSuggestion).toHaveBeenCalledTimes(1);
+    expect(mocks.acceptClosureSuggestion).toHaveBeenCalledWith(
+      "session-v6",
+      3,
+      { expected_transcript_fingerprint: fingerprint },
+    );
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
+  it("keeps the legacy automatic report path for older prompt versions that already froze the session", async () => {
     const finishedSession = {
       uuid: "session-v6",
       phase: "finalizing",
@@ -325,6 +440,124 @@ describe("InterviewView", () => {
     expect(localStorage.getItem("v6:pending-turn:session-v6")).not.toBeNull();
   });
 
+  it("shows saved and extended wait states at 8 and 20 seconds, then clears them", async () => {
+    vi.useFakeTimers();
+    let completeStream: (() => void) | undefined;
+    mocks.submitTurnStream.mockImplementation(
+      () => new Promise<void>((resolve) => {
+        completeStream = resolve;
+      }),
+    );
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(wrapper.text()).not.toContain("本次提交已在本地保留");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(wrapper.text()).toContain("正在整理这条回答；本次提交已在本地保留。");
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(wrapper.text()).toContain("仍在处理中；如果中断，可以使用原提交编号安全重试。");
+
+    completeStream?.();
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(wrapper.text()).not.toContain("仍在处理中；如果中断");
+    expect(vi.getTimerCount()).toBe(0);
+    wrapper.unmount();
+    vi.useRealTimers();
+  });
+
+  it("keeps a finalizing notice from being overwritten by answer wait timers", async () => {
+    vi.useFakeTimers();
+    mocks.submitTurnStream.mockImplementation(async (_uuid, _payload, onEvent) => {
+      await onEvent({ event: "session_finalizing", data: {} });
+      await new Promise<void>(() => undefined);
+    });
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("正在整理报告");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(wrapper.text()).toContain("正在整理报告");
+    expect(wrapper.text()).not.toContain("仍在处理中");
+    expect(vi.getTimerCount()).toBe(0);
+    wrapper.unmount();
+    vi.useRealTimers();
+  });
+
+  it("removes an expired wait notice when the stream later fails", async () => {
+    vi.useFakeTimers();
+    let rejectStream: ((reason?: unknown) => void) | undefined;
+    mocks.submitTurnStream.mockImplementation(
+      () => new Promise<void>((_resolve, reject) => {
+        rejectStream = reject;
+      }),
+    );
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(wrapper.text()).toContain("仍在处理中");
+
+    rejectStream?.(new Error("与访谈模型的连接暂时中断"));
+    await flushPromises();
+    expect(wrapper.text()).toContain("与访谈模型的连接暂时中断");
+    expect(wrapper.text()).not.toContain("仍在处理中");
+    expect(vi.getTimerCount()).toBe(0);
+    wrapper.unmount();
+    vi.useRealTimers();
+  });
+
+  it("shows an empty-model error without calling it a network interruption", async () => {
+    mocks.submitTurnStream.mockImplementation(async (_uuid, _payload, onEvent) => {
+      await onEvent({
+        event: "error",
+        code: "model_empty_response",
+        message: "模型暂时未返回有效内容；你的回答已保存，可以安全重试。",
+      });
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("模型暂时未返回有效内容");
+    expect(wrapper.text()).not.toContain("连接暂时中断");
+    expect(localStorage.getItem("v6:pending-turn:session-v6")).not.toBeNull();
+  });
+
+  it("clears pending wait timers when the page unmounts", async () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    mocks.submitTurnStream.mockImplementation(() => new Promise<void>(() => undefined));
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+
+    wrapper.unmount();
+    expect(clearTimeoutSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    vi.useRealTimers();
+  });
+
   it("allows a nonblank short first answer and submits once with an unmodified Enter", async () => {
     const wrapper = mount(InterviewView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
@@ -334,7 +567,9 @@ describe("InterviewView", () => {
     const textarea = wrapper.get("textarea");
     await textarea.setValue("我还在想。");
     expect(wrapper.get("button.send-button").attributes("disabled")).toBeUndefined();
-    expect(wrapper.get(".char-count").text()).toContain("首次回答可以简短");
+    expect(wrapper.get(".char-count").text()).toBe("首次可简短；之后每次至少 20 字");
+    expect(wrapper.get(".char-count").text()).not.toContain("4000");
+    expect(textarea.attributes("aria-describedby")).toBe("answer-requirement");
     expect(textarea.attributes("placeholder")).not.toContain("至少 20 字");
 
     await textarea.trigger("keydown", { key: "Enter", shiftKey: true });
@@ -365,16 +600,20 @@ describe("InterviewView", () => {
     await flushPromises();
 
     const textarea = wrapper.get("textarea");
-    expect(textarea.attributes("placeholder")).toContain("至少 20 字");
+    expect(textarea.attributes("placeholder")).not.toContain("至少 20 字");
     await textarea.setValue("我还在想。");
     expect(wrapper.get("button.send-button").attributes("disabled")).toBeDefined();
-    expect(wrapper.get(".char-count").text()).toContain("还差");
+    expect(wrapper.get(".char-count").text()).toMatch(/^至少 20 字，还差 \d+ 字$/);
     await textarea.trigger("keydown", { key: "Enter" });
     await flushPromises();
     expect(mocks.submitTurnStream).not.toHaveBeenCalled();
 
     await textarea.setValue("我不知道，但我会先核实。");
     expect(wrapper.get("button.send-button").attributes("disabled")).toBeDefined();
+
+    await textarea.setValue("我会先核实相关信息，再比较不同选择可能带来的具体影响和限制。");
+    expect(wrapper.get("button.send-button").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get(".char-count").text()).toBe("可以提交");
 
     await textarea.setValue("我暂时不知道。");
     expect(wrapper.get("button.send-button").attributes("disabled")).toBeUndefined();

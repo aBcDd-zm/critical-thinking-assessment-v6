@@ -13,7 +13,8 @@ export type InputMode = "text" | "voice" | "voice_edited";
 export type EvidenceStatus = "sufficient" | "limited" | "unmeasured";
 export type InterviewerState = "listening" | "thinking" | "speaking";
 export type FinishReason = "enough_understanding" | "natural_closure" | "user_requested" | "safety_stopped" | null;
-export type NaturalSessionAction = "continue" | "finish";
+export type NaturalSessionAction = "continue" | "suggest_finish" | "finish";
+export type ClosureFinishReason = "enough_understanding" | "natural_closure";
 
 export interface ParticipantProfile {
   display_name?: string;
@@ -28,7 +29,16 @@ export interface DialogueTurn {
   input_mode?: InputMode | null;
   answer_duration_ms?: number | null;
   phase?: SessionPhase | string;
+  session_action?: NaturalSessionAction | null;
+  finish_reason?: FinishReason;
   created_at?: string;
+}
+
+export interface ClosureSuggestion {
+  closure_turn_id: number;
+  transcript_fingerprint: string;
+  finish_reason: ClosureFinishReason;
+  session_uuid?: string;
 }
 
 export interface SessionSnapshot {
@@ -37,12 +47,14 @@ export interface SessionSnapshot {
   consent_version?: string;
   consent_accepted_at?: string | null;
   participant?: ParticipantProfile;
+  current_turn?: DialogueTurn | null;
   turns: DialogueTurn[];
   user_answer_count?: number;
   technical_turn_cap?: number;
   technical_turn_cap_reached?: boolean;
   transcript_fingerprint?: string | null;
   finalization_state?: string | null;
+  closure_suggestion?: ClosureSuggestion | null;
   report_available?: boolean;
   ended_early?: boolean;
   exit_reason?: string | null;
@@ -77,6 +89,7 @@ export type StreamEventType =
   | "agent_started"
   | "heartbeat"
   | "agent_delta"
+  | "session_closure_suggested"
   | "agent_completed"
   | "session_finalizing"
   | "error";
@@ -87,6 +100,10 @@ export interface AgentCompletedData {
   finish_reason: FinishReason;
   speech_url?: string | null;
   session?: SessionSnapshot;
+}
+
+export interface AcceptClosureSuggestionRequest {
+  expected_transcript_fingerprint: string;
 }
 
 export interface TurnStreamEvent {

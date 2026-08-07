@@ -4,7 +4,9 @@ import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import InterviewerAvatar from "@/components/InterviewerAvatar.vue";
 import { ApiError } from "@/api/http";
 import {
+  acceptClosureSuggestion,
   checkReportReadiness,
+  closureSuggestionData,
   completedData,
   exitSession,
   finalizingSession,
@@ -14,6 +16,7 @@ import {
 } from "@/api/session";
 import { useSpeechPlayback, useVoiceInput } from "@/composables/useVoice";
 import type {
+  ClosureSuggestion,
   DialogueTurn,
   InputMode,
   InterviewerState,
@@ -33,17 +36,44 @@ const loading = ref(true);
 const sending = ref(false);
 const finalizing = ref(false);
 const checkingReadiness = ref(false);
+const acceptingClosure = ref(false);
+const closureSuggestion = ref<ClosureSuggestion | null>(null);
+const dismissedClosureTurnId = ref<number | null>(null);
 const error = ref("");
 const notice = ref("");
 const inputMode = ref<InputMode>("text");
 const voiceWasUsed = ref(false);
 const answerStartedAt = ref(Date.now());
 const transcriptEnd = ref<HTMLElement | null>(null);
+const answerInput = ref<HTMLTextAreaElement | null>(null);
 const voiceInputEnabled = import.meta.env.VITE_VOICE_INPUT_ENABLED === "true";
 const ttsEnabled = ref(localStorage.getItem("v6:tts-enabled") !== "false");
 const leaving = ref(false);
 const playback = useSpeechPlayback();
 let activeController: AbortController | null = null;
+let savedWaitTimer: number | null = null;
+let extendedWaitTimer: number | null = null;
+
+function clearInterviewWaitTimers() {
+  if (savedWaitTimer !== null) window.clearTimeout(savedWaitTimer);
+  if (extendedWaitTimer !== null) window.clearTimeout(extendedWaitTimer);
+  savedWaitTimer = null;
+  extendedWaitTimer = null;
+}
+
+function startInterviewWaitTimers() {
+  clearInterviewWaitTimers();
+  savedWaitTimer = window.setTimeout(() => {
+    if (sending.value && !leaving.value) {
+      notice.value = "正在整理这条回答；本次提交已在本地保留。";
+    }
+  }, 8_000);
+  extendedWaitTimer = window.setTimeout(() => {
+    if (sending.value && !leaving.value) {
+      notice.value = "仍在处理中；如果中断，可以使用原提交编号安全重试。";
+    }
+  }, 20_000);
+}
 
 const MIN_ANSWER_VISIBLE_CHARACTERS = 20;
 const MIN_ANSWER_MESSAGE = `从第二个回答起，每次回答至少需要 ${MIN_ANSWER_VISIBLE_CHARACTERS} 个字。`;
@@ -66,7 +96,7 @@ function isExplicitUncertaintyAnswer(value: string): boolean {
 const interviewerState = computed<InterviewerState>(() => {
   if (voice.listening.value) return "listening";
   if (playback.speaking.value) return "speaking";
-  if (sending.value || finalizing.value || checkingReadiness.value) return "thinking";
+  if (sending.value || finalizing.value || checkingReadiness.value || acceptingClosure.value) return "thinking";
   return "listening";
 });
 
@@ -103,20 +133,20 @@ const remainingAnswerCharacters = computed(() => (
     : Math.max(0, MIN_ANSWER_VISIBLE_CHARACTERS - visibleDraftLength.value)
 ));
 const answerRequirementHint = computed(() => {
-  if (isFirstAnswer.value) return "首次回答可以简短";
+  if (isFirstAnswer.value) return "首次可简短；之后每次至少 20 字";
   if (isUncertaintyAnswer.value) return "可以直接提交";
-  return `至少 ${MIN_ANSWER_VISIBLE_CHARACTERS} 字${remainingAnswerCharacters.value > 0 ? `，还差 ${remainingAnswerCharacters.value} 字` : ""}`;
+  if (remainingAnswerCharacters.value > 0) {
+    return `至少 ${MIN_ANSWER_VISIBLE_CHARACTERS} 字，还差 ${remainingAnswerCharacters.value} 字`;
+  }
+  return "可以提交";
 });
-const answerPlaceholder = computed(() => (
-  isFirstAnswer.value
-    ? "按你此刻真实的想法说就好…"
-    : "按你此刻真实的想法说就好（至少 20 字）…"
-));
+const answerPlaceholder = "按你此刻真实的想法说就好…";
 const canSubmit = computed(() => (
   draft.value.trim().length > 0
   && meetsAnswerRequirement.value
   && isInterviewing.value
   && !technicalTurnCapReached.value
+  && !closureSuggestion.value
   && !sending.value
   && !checkingReadiness.value
   && !loading.value
@@ -126,6 +156,7 @@ const canFinish = computed(() => (
   && !sending.value
   && !finalizing.value
   && !checkingReadiness.value
+  && !acceptingClosure.value
   && !loading.value
 ));
 const pendingKey = computed(() => `v6:pending-turn:${uuid.value}`);
@@ -178,6 +209,32 @@ function updateTurns(nextTurns: DialogueTurn[]) {
     .sort((a, b) => a.turn_index - b.turn_index);
 }
 
+function isClosureSuggestion(value: unknown): value is ClosureSuggestion {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ClosureSuggestion>;
+  return (
+    typeof candidate.closure_turn_id === "number"
+    && Number.isInteger(candidate.closure_turn_id)
+    && candidate.closure_turn_id > 0
+    && typeof candidate.transcript_fingerprint === "string"
+    && /^[0-9a-f]{64}$/.test(candidate.transcript_fingerprint)
+    && (candidate.finish_reason === "natural_closure" || candidate.finish_reason === "enough_understanding")
+  );
+}
+
+function synchronizeClosureSuggestion(snapshot: SessionSnapshot) {
+  if (snapshot.phase !== "interviewing" || !isClosureSuggestion(snapshot.closure_suggestion)) {
+    closureSuggestion.value = null;
+    if (!snapshot.closure_suggestion) dismissedClosureTurnId.value = null;
+    return;
+  }
+  if (dismissedClosureTurnId.value === snapshot.closure_suggestion.closure_turn_id) {
+    closureSuggestion.value = null;
+    return;
+  }
+  closureSuggestion.value = snapshot.closure_suggestion;
+}
+
 function onDraftInput() {
   inputMode.value = voiceWasUsed.value ? "voice_edited" : "text";
   if (error.value === MIN_ANSWER_MESSAGE) error.value = "";
@@ -221,7 +278,22 @@ function eventDelta(event: TurnStreamEvent): string {
 
 async function handleEvent(event: TurnStreamEvent) {
   if (event.event === "agent_delta") streamedText.value += eventDelta(event);
+  if (event.event === "session_closure_suggested") {
+    clearInterviewWaitTimers();
+    const suggestion = closureSuggestionData(event);
+    if (
+      !suggestion
+      || (suggestion.session_uuid && suggestion.session_uuid !== uuid.value)
+      || dismissedClosureTurnId.value === suggestion.closure_turn_id
+    ) return;
+    if (closureSuggestion.value?.closure_turn_id !== suggestion.closure_turn_id) {
+      closureSuggestion.value = suggestion;
+    }
+    notice.value = "澄澄认为当前内容可以在这里收束，请选择继续交流或结束并生成报告。";
+    return;
+  }
   if (event.event === "session_finalizing") {
+    clearInterviewWaitTimers();
     const snapshot = finalizingSession(event);
     if (snapshot) {
       session.value = snapshot;
@@ -235,16 +307,19 @@ async function handleEvent(event: TurnStreamEvent) {
     return;
   }
   if (event.event === "error") {
+    clearInterviewWaitTimers();
     const dataMessage = event.data && typeof event.data === "object" ? (event.data as Record<string, unknown>).message : null;
     throw new Error(event.message || (typeof dataMessage === "string" ? dataMessage : "访谈处理出现异常"));
   }
   if (event.event !== "agent_completed") return;
+  clearInterviewWaitTimers();
   const completed = completedData(event);
   if (!completed) throw new Error("服务端未返回已保存的访谈内容");
   streamedText.value = "";
   if (completed.session) {
     session.value = completed.session;
     updateTurns(completed.session.turns ?? [...turns.value, completed.turn]);
+    synchronizeClosureSuggestion(completed.session);
   } else {
     updateTurns([...turns.value, completed.turn]);
   }
@@ -253,6 +328,8 @@ async function handleEvent(event: TurnStreamEvent) {
   answerStartedAt.value = Date.now();
   if (session.value?.phase === "safety_stopped") {
     notice.value = "本次对话已暂停，不会继续提问或自动生成报告。";
+  } else if (completed.session_action === "suggest_finish") {
+    notice.value = "澄澄认为当前内容可以在这里收束，请选择继续交流或结束并生成报告。";
   } else if (completed.session_action === "finish") {
     notice.value = "澄澄觉得这段对话已经自然收束，正在整理报告…";
   }
@@ -263,6 +340,7 @@ async function synchronizeSession() {
   const snapshot = await getSession(uuid.value);
   session.value = snapshot;
   updateTurns(snapshot.turns ?? turns.value);
+  synchronizeClosureSuggestion(snapshot);
   return snapshot;
 }
 
@@ -302,8 +380,7 @@ async function generateReport(automatic = false) {
   }
 }
 
-async function finishAndGenerate() {
-  if (!canFinish.value) return;
+async function confirmReportGeneration(): Promise<boolean> {
   checkingReadiness.value = true;
   error.value = "";
   notice.value = "正在检查现有回答能否支持完整报告…";
@@ -317,8 +394,8 @@ async function finishAndGenerate() {
       notice.value = shouldGenerate ? "" : "现有回答已达到报告准备条件，你可以继续说，也可以随时生成报告。";
     } else if (readiness.status === "insufficient" && readiness.ready === false) {
       const message = technicalTurnCapReached.value
-        ? "按当前终评证据规则，现有回答可能还不足以支持完整的六维报告。本次访谈已达到技术保护上限，你仍可根据已有回答生成报告，证据有限的部分会如实说明。是否仍然生成？"
-        : "按当前终评证据规则，现有回答可能还不足以支持完整的六维报告。建议继续访谈，补充更多可核对的具体经历、理由和判断依据；你也可以仍然按现有回答生成报告。是否仍然生成？";
+        ? "按当前终评证据规则，现有回答可能还不足以支持完整报告。本次访谈已达到技术保护上限，你仍可根据已有回答生成报告，证据有限的部分会如实说明。是否仍然生成？"
+        : "按当前终评证据规则，现有回答可能还不足以支持完整报告。建议继续访谈，补充更多可核对的具体经历、理由和判断依据；你也可以仍然按现有回答生成报告。是否仍然生成？";
       shouldGenerate = window.confirm(message);
       notice.value = shouldGenerate
         ? ""
@@ -343,17 +420,88 @@ async function finishAndGenerate() {
   } finally {
     checkingReadiness.value = false;
   }
-  if (!shouldGenerate) return;
+  return shouldGenerate;
+}
+
+async function finishAndGenerate() {
+  if (!canFinish.value) return;
+  if (!(await confirmReportGeneration())) return;
   draft.value = "";
   voice.stop();
   playback.stop();
   await generateReport();
 }
 
+function continueAfterClosureSuggestion() {
+  if (!closureSuggestion.value || sending.value || acceptingClosure.value) return;
+  dismissedClosureTurnId.value = closureSuggestion.value.closure_turn_id;
+  closureSuggestion.value = null;
+  notice.value = "你可以继续补充；此前的回答已经保存。";
+  answerStartedAt.value = Date.now();
+  void nextTick(() => answerInput.value?.focus());
+}
+
+async function acceptSuggestedClosure() {
+  const suggestion = closureSuggestion.value;
+  if (!suggestion || !canFinish.value) return;
+  if (!(await confirmReportGeneration())) return;
+
+  acceptingClosure.value = true;
+  error.value = "";
+  notice.value = "正在确认结束并生成报告…";
+  draft.value = "";
+  voice.stop();
+  playback.stop();
+  try {
+    const result = await acceptClosureSuggestion(
+      uuid.value,
+      suggestion.closure_turn_id,
+      { expected_transcript_fingerprint: suggestion.transcript_fingerprint },
+    );
+    session.value = result.session;
+    updateTurns(result.session.turns ?? turns.value);
+    synchronizeClosureSuggestion(result.session);
+    if (result.session.phase === "completed" || result.report) {
+      localStorage.removeItem("v6:last-session");
+      await router.replace(`/assessment/report/${uuid.value}`);
+      return;
+    }
+    notice.value = result.session.phase === "finalizing"
+      ? "访谈已冻结，报告仍在整理中。你可以稍后安全重试。"
+      : "会话状态已更新，请根据当前状态继续操作。";
+  } catch (cause) {
+    error.value = cause instanceof ApiError
+      ? cause.message
+      : "暂时无法确认结束。已保存的访谈不会丢失，请根据当前状态重试。";
+    try {
+      const snapshot = await synchronizeSession();
+      if (snapshot.phase === "completed" || snapshot.report_available) {
+        localStorage.removeItem("v6:last-session");
+        await router.replace(`/assessment/report/${uuid.value}`);
+        return;
+      }
+      if (snapshot.phase === "finalizing") {
+        notice.value = snapshot.finalization_state === "failed"
+          ? "结束选择已保存，但报告生成失败；可以安全重试。"
+          : "结束选择已保存，报告仍在生成中；可以稍后安全重试。";
+      } else if (snapshot.closure_suggestion) {
+        notice.value = "收束建议仍然有效，你可以再次选择继续交流或结束并生成报告。";
+      } else {
+        notice.value = "对话已更新，原收束建议不再有效；你可以继续交流。";
+      }
+    } catch {
+      notice.value = "暂时无法同步会话状态；已保存的访谈不会丢失，请稍后刷新。";
+    }
+  } finally {
+    acceptingClosure.value = false;
+  }
+}
+
 async function sendPayload(payload: TurnRequest, restoring = false) {
   sending.value = true;
   error.value = "";
   notice.value = restoring ? "正在恢复上次中断的提交…" : "";
+  startInterviewWaitTimers();
   streamedText.value = "";
   const alreadySaved = turns.value.some((turn) => turn.client_turn_id === payload.client_turn_id);
   if (!alreadySaved) {
@@ -390,9 +538,11 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
     }
   } catch (cause) {
     if (!leaving.value) {
+      notice.value = "";
       error.value = cause instanceof ApiError || cause instanceof Error ? cause.message : "提交中断；刷新页面会使用相同编号恢复，不会重复计入。";
     }
   } finally {
+    clearInterviewWaitTimers();
     activeController = null;
     sending.value = false;
   }
@@ -435,8 +585,9 @@ function clearLocalRecovery() {
 }
 
 async function leaveEarly() {
-  if (!window.confirm("退出不会生成报告。已经保存的记录会保留在本地复核范围内，确定退出吗？")) return;
+  if (!window.confirm("退出不会生成报告。已经提交的内容仍会按开始页说明保留，确定退出吗？")) return;
   leaving.value = true;
+  clearInterviewWaitTimers();
   activeController?.abort();
   activeController = null;
   playback.stop();
@@ -500,6 +651,7 @@ onBeforeRouteLeave(async (to) => {
   ) return true;
   if (!window.confirm("离开将退出当前访谈且不生成报告，确定继续吗？")) return false;
   leaving.value = true;
+  clearInterviewWaitTimers();
   activeController?.abort();
   playback.stop();
   voice.stop();
@@ -508,6 +660,7 @@ onBeforeRouteLeave(async (to) => {
   return true;
 });
 onBeforeUnmount(() => {
+  clearInterviewWaitTimers();
   activeController?.abort();
 });
 </script>
@@ -586,15 +739,42 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
+        <section
+          v-else-if="closureSuggestion"
+          class="closure-suggestion-card"
+          aria-labelledby="closure-suggestion-title"
+        >
+          <div>
+            <strong id="closure-suggestion-title">这段对话可以在这里收束</strong>
+            <span>澄澄认为当前内容已形成一个自然停点。你可以继续补充，也可以确认结束并生成报告；无论怎样选择，已提交的回答都会保留。</span>
+          </div>
+          <div class="closure-suggestion-actions">
+            <button
+              type="button"
+              class="secondary-button"
+              :disabled="sending || checkingReadiness || acceptingClosure"
+              @click="continueAfterClosureSuggestion"
+            >继续交流</button>
+            <button
+              type="button"
+              class="primary-button"
+              :disabled="!canFinish"
+              @click="acceptSuggestedClosure"
+            >{{ checkingReadiness ? "正在检查…" : acceptingClosure ? "正在生成…" : "结束并生成报告" }}</button>
+          </div>
+        </section>
+
         <form v-else class="answer-composer" @submit.prevent="submitAnswer">
           <label for="answer-input">你的回答</label>
           <textarea
             id="answer-input"
+            ref="answerInput"
             v-model="draft"
             rows="4"
             maxlength="4000"
             :placeholder="answerPlaceholder"
-            :disabled="sending || finalizing || checkingReadiness"
+            aria-describedby="answer-requirement"
+            :disabled="sending || finalizing || checkingReadiness || acceptingClosure"
             @input="onDraftInput"
             @keydown="onAnswerKeydown"
           />
@@ -604,7 +784,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="mic-button"
                 :class="{ recording: voice.listening.value }"
-                :disabled="!voice.supported.value || sending || finalizing || checkingReadiness"
+                :disabled="!voice.supported.value || sending || finalizing || checkingReadiness || acceptingClosure"
                 :aria-pressed="voice.listening.value"
                 @click="toggleVoice"
               >
@@ -613,8 +793,14 @@ onBeforeUnmount(() => {
               <small v-if="voice.error.value">{{ voice.error.value }}</small>
               <small v-else-if="voiceWasUsed">转写已放入文本框，请确认或修改后手动提交</small>
             </div>
-            <span class="char-count" :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }">
-              {{ visibleDraftLength }}/4000 · {{ answerRequirementHint }}
+            <span
+              id="answer-requirement"
+              class="char-count"
+              :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }"
+              role="status"
+              aria-live="polite"
+            >
+              {{ answerRequirementHint }}
             </span>
             <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">
               {{ checkingReadiness ? "正在检查…" : "结束并生成报告" }}

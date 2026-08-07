@@ -1,7 +1,9 @@
 import { API_BASE_URL, ApiError, apiRequest } from "./http";
 import type {
+  AcceptClosureSuggestionRequest,
   AgentCompletedData,
   AssessmentReport,
+  ClosureSuggestion,
   CreateSessionRequest,
   CreateSessionResponse,
   FinalizeResponse,
@@ -38,6 +40,19 @@ export const checkReportReadiness = (uuid: string) =>
     { method: "POST" },
   );
 
+export async function acceptClosureSuggestion(
+  uuid: string,
+  closureTurnId: number,
+  payload: AcceptClosureSuggestionRequest,
+): Promise<FinalizeResponse> {
+  const result = await apiRequest<FinalizeResponse | SessionSnapshot>(
+    `/sessions/${encodeURIComponent(uuid)}/closure-suggestions/${encodeURIComponent(String(closureTurnId))}/accept`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+  if ("session" in result) return result;
+  return { session: result };
+}
+
 export async function finalizeSession(uuid: string): Promise<FinalizeResponse> {
   const result = await apiRequest<FinalizeResponse | SessionSnapshot>(
     `/sessions/${encodeURIComponent(uuid)}/finalize`,
@@ -68,7 +83,11 @@ export function completedData(event: TurnStreamEvent): AgentCompletedData | null
   if (!turn) return null;
   return {
     turn,
-    session_action: data.session_action === "finish" ? "finish" : "continue",
+    session_action: data.session_action === "finish"
+      ? "finish"
+      : data.session_action === "suggest_finish"
+        ? "suggest_finish"
+        : "continue",
     finish_reason: data.finish_reason === "enough_understanding"
       || data.finish_reason === "natural_closure"
       || data.finish_reason === "user_requested"
@@ -76,6 +95,25 @@ export function completedData(event: TurnStreamEvent): AgentCompletedData | null
       : null,
     speech_url: typeof data.speech_url === "string" ? data.speech_url : null,
     session: data.session as SessionSnapshot | undefined,
+  };
+}
+
+export function closureSuggestionData(event: TurnStreamEvent): ClosureSuggestion | null {
+  if (event.event !== "session_closure_suggested" || !event.data || typeof event.data !== "object") return null;
+  const data = event.data as Record<string, unknown>;
+  if (
+    typeof data.closure_turn_id !== "number"
+    || !Number.isInteger(data.closure_turn_id)
+    || data.closure_turn_id < 1
+    || typeof data.transcript_fingerprint !== "string"
+    || !/^[0-9a-f]{64}$/.test(data.transcript_fingerprint)
+    || (data.finish_reason !== "natural_closure" && data.finish_reason !== "enough_understanding")
+  ) return null;
+  return {
+    closure_turn_id: data.closure_turn_id,
+    transcript_fingerprint: data.transcript_fingerprint,
+    finish_reason: data.finish_reason,
+    session_uuid: typeof data.session_uuid === "string" ? data.session_uuid : undefined,
   };
 }
 

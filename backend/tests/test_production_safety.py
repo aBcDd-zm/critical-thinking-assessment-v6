@@ -76,12 +76,12 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
     )
     candidate_config = Settings(
         _env_file=None,
-        natural_interviewer_prompt_version="v6.0.5",
+        natural_interviewer_prompt_version="v6.1.1",
     )
 
     assert default_config.natural_interviewer_prompt_version == "v6.0.5"
     assert rollback_config.natural_interviewer_prompt_version == "v6.0.3"
-    assert candidate_config.natural_interviewer_prompt_version == "v6.0.5"
+    assert candidate_config.natural_interviewer_prompt_version == "v6.1.1"
     with pytest.raises(ValidationError):
         Settings(
             _env_file=None,
@@ -127,7 +127,7 @@ print("rollback-ok")
     assert completed.stdout.strip() == "rollback-ok"
 
 
-def test_v6_0_5_candidate_is_isolated_from_the_final_scorer_in_a_fresh_process() -> None:
+def test_v6_0_5_default_is_isolated_from_the_final_scorer_in_a_fresh_process() -> None:
     env = os.environ.copy()
     env.update(
         {
@@ -168,6 +168,49 @@ print("candidate-isolated-ok")
     )
 
     assert completed.stdout.strip() == "candidate-isolated-ok"
+
+
+def test_v6_1_1_candidate_is_selectable_without_changing_the_default() -> None:
+    env = os.environ.copy()
+    env.update(
+        {
+            "MODEL_GATEWAY_MODE": "real",
+            "NATURAL_INTERVIEWER_PROMPT_VERSION": "v6.1.1",
+            "DEEPSEEK_API_KEY": "not-used-by-this-test",
+        }
+    )
+    script = """
+from app.services.model_gateway import (
+    ModelGatewayService,
+    NATURAL_FINAL_SCORER_PROMPT_ID,
+    NATURAL_FINAL_SCORER_SYSTEM_PROMPT,
+    NATURAL_INTERVIEWER_PROMPT_ID,
+    NATURAL_INTERVIEWER_PROMPT_VERSION,
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1,
+)
+
+captured = []
+service = ModelGatewayService()
+service._typed_call = lambda **kwargs: captured.append(kwargs)
+service.generate_interviewer({"participant": {}, "transcript": []})
+service.generate_final_scorer({"participant": {}, "transcript": []})
+assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.1.1"
+assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.1.1"
+assert captured[0]["system_prompt"] == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1
+assert NATURAL_FINAL_SCORER_PROMPT_ID == "natural_final_scorer_v6.1.0"
+assert captured[1]["system_prompt"] == NATURAL_FINAL_SCORER_SYSTEM_PROMPT
+print("v611-candidate-isolated-ok")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "v611-candidate-isolated-ok"
 
 
 def test_production_doubao_configuration_is_accepted_without_exposing_the_key() -> None:

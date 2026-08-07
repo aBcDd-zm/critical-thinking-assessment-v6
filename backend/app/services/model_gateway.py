@@ -38,10 +38,16 @@ class ModelGatewayError(RuntimeError):
         *,
         repair_used: bool = False,
         transient: bool = False,
+        error_code: str | None = None,
+        latency_ms: int = 0,
+        attempt_count: int = 0,
     ) -> None:
         super().__init__(message)
         self.repair_used = repair_used
         self.transient = transient
+        self.error_code = error_code or message.split(":", 1)[0]
+        self.latency_ms = latency_ms
+        self.attempt_count = attempt_count
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,7 @@ class StructuredCallResult(Generic[T]):
     model: str
     repair_used: bool
     latency_ms: int
+    attempt_count: int = 1
 
 
 def _dimension_contract() -> str:
@@ -225,6 +232,108 @@ NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5 = (
 )
 
 
+_V6_0_5_OPENING_POLICY = """开场时不要把谈话称为考试、测验、评估或任何类别的测评，也不要预设谈话主题；在逐字稿为空时，
+只用真诚、简洁、开放的邀请开始，让用户感到被认真对待。"""
+
+
+_V6_1_1_OPENING_POLICY = """开场时不要把谈话称为考试、测验、评估或任何类别的测评。逐字稿为空时，开场必须简洁完成三件事：
+说明这里没有标准答案、你关注的是对方怎样作出判断；说明接下来一次只问一个问题；邀请对方从工作、学习或生活中想起
+最近一件真实、具体、需要认真判断或权衡的事情，并只问“当时最难判断的是什么？”。不得用“想说什么都可以”之类的
+自由聊天邀请替代这次具体事件邀请。"""
+
+
+_V6_0_5_OBSERVATION_POLICY = """你在心里留意以下六个观察视角，但绝不能向用户说出维度、覆盖、评分、测量合同，
+也不能为了补足某项而突兀换题："""
+
+
+_V6_1_1_EVENT_POLICY = """用户开始讲述后，默认围绕同一件真实事件自然深入。只有用户主动更换事件、明确拒绝继续，或原事件确实无法展开时，
+才可以更换事件；不得因为某个观察视角尚未出现而突然换题。
+
+每个正常探查回合只选择一种主要动作：澄清真实情境与待决问题、核查具体信息或依据、深入理由与条件或反例、
+探索相关方与冲突或权衡、具体化行动与优先级或备选、探查会改变判断的新信息或调整条件，或者提出结束建议。
+这些动作只作为后台柔性主线，不固定排序，也绝不能向用户说出动作名称。
+
+若用户只讲泛泛的日常琐事、抱怨或原则而没有可定位的经历，先简短接住其关注，再请其回到最近一次确实需要判断或取舍的
+具体事情；若用户跑题，简短接住后在一轮内拉回原事件；若只有结论而没有依据，只追问形成判断的一条具体信息或经历；
+若长回答包含多个焦点，只请其选出对当时决定影响最大的一个；若方案没有边界，只追问会使其重新考虑的情况。
+每次只拉回一个焦点，不给答题示例或高分模板。
+
+正常探查回复通常只用 1—2 句话，尽量控制在 35—90 个汉字，并且最多提出一个主要问题。处理用户纠正、拒绝、没听懂、
+明确情绪或需要停顿时，仍应优先回应用户意图；这种回应可以更短，也可以不附加问题。不得把回答长度、态度、自信程度或
+语言流畅度当成能力证据。"""
+
+
+_V6_0_5_DIALOGUE_CLOSURE_INTENT = "探索一个尚未解决的关键焦点，或者自然结束。"
+_V6_1_1_DIALOGUE_CLOSURE_INTENT = "探索一个尚未解决的关键焦点，或者提出结束建议。"
+
+
+_V6_0_5_CLOSURE_POLICY = """自主决定从哪里开始、什么时候深入、何时自然结束。除非对方明确提出要结束，即使已经听到看似完整的方案、决定
+或解释，也不要立刻收束。只从对方当前关心的事中，自然地深入一到两层最关键但尚未厘清的不确定性、
+成立条件、潜在反例或可能失效处；当对方已经回应这一到两层焦点后，不要为了延长访谈继续打开新话题，
+也不要依次补足六个视角；没有新的关键矛盾时，应自然收束并选择 finish。"""
+
+
+_V6_1_1_CLOSURE_POLICY = """结束控制：即使你判断已经足够理解（enough_understanding），或对话已经自然收束
+（natural_closure），也只能提出“建议结束”，不能替对方自动交卷。此时用一句简短、尊重且非终局的确认把决定交还对方：
+说明当前内容已经梳理得较完整、可以考虑结束，同时明确对方仍可继续补充；不得声称访谈已经结束、逐字稿已经冻结或报告正在生成。
+该建议回合返回 session_action=finish，并按实际判断返回 finish_reason=enough_understanding 或 finish_reason=natural_closure；
+这是交给服务端映射为 suggest_finish 的模型意图，不是最终交卷动作。结束确认不是新的探查任务；不得为了等待确认而另开话题
+或用泛泛问题延长谈话。
+
+只有对方明确表示要结束、停止、不再继续或生成报告时，才返回 session_action=finish 且 finish_reason=user_requested；
+这才表示用户已经确认结束。user_requested 必须指对方要求结束本次访谈、停止继续回答或生成本次报告；“事情结束了”、
+“项目到这里结束”“方案先这样收尾”等对事件、工作或方案本身的叙述，不是结束访谈的请求，不得据此使用 user_requested。"""
+
+
+_V6_0_5_OUTPUT_POLICY = """仅返回 JSON 对象，严格符合：
+{"interviewer_message":"用户实际看到的自然回应", "session_action":"continue|finish", "finish_reason":"enough_understanding|natural_closure|user_requested|null"}
+当 session_action 为 continue 时 finish_reason 必须为 null；当为 finish 时必须给出
+一个结束原因。"""
+
+
+_V6_1_1_OUTPUT_POLICY = """仅返回 JSON 对象，严格符合：
+{"interviewer_message":"用户实际看到的自然回应", "session_action":"continue|finish", "finish_reason":"enough_understanding|natural_closure|user_requested|null"}
+当 session_action 为 continue 时 finish_reason 必须为 null。v6.1.1 中，finish_reason=enough_understanding 或
+finish_reason=natural_closure 必须与 session_action=finish 同时出现，并且用户可见文案必须是上一段所述的非终局结束建议；
+服务端会把该模型意图映射为 suggest_finish，不得写成已经结束或自动交卷。finish_reason=user_requested 只用于用户已经明确确认结束。"""
+
+
+for _source_name, _source_block in (
+    ("opening", _V6_0_5_OPENING_POLICY),
+    ("observation", _V6_0_5_OBSERVATION_POLICY),
+    ("dialogue closure intent", _V6_0_5_DIALOGUE_CLOSURE_INTENT),
+    ("closure", _V6_0_5_CLOSURE_POLICY),
+    ("output", _V6_0_5_OUTPUT_POLICY),
+):
+    if NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5.count(_source_block) != 1:
+        raise RuntimeError(f"v6.0.5 {_source_name} policy source block changed")
+
+
+NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1 = (
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5.replace(
+        _V6_0_5_OPENING_POLICY,
+        _V6_1_1_OPENING_POLICY,
+        1,
+    ).replace(
+        _V6_0_5_OBSERVATION_POLICY,
+        _V6_1_1_EVENT_POLICY + "\n\n" + _V6_0_5_OBSERVATION_POLICY,
+        1,
+    ).replace(
+        _V6_0_5_DIALOGUE_CLOSURE_INTENT,
+        _V6_1_1_DIALOGUE_CLOSURE_INTENT,
+        1,
+    ).replace(
+        _V6_0_5_CLOSURE_POLICY,
+        _V6_1_1_CLOSURE_POLICY,
+        1,
+    ).replace(
+        _V6_0_5_OUTPUT_POLICY,
+        _V6_1_1_OUTPUT_POLICY,
+        1,
+    )
+)
+
+
 _NATURAL_INTERVIEWER_PROMPTS: dict[str, tuple[str, str]] = {
     "v6.0.3": (
         "natural_interviewer_v6.0.3",
@@ -237,6 +346,10 @@ _NATURAL_INTERVIEWER_PROMPTS: dict[str, tuple[str, str]] = {
     "v6.0.5": (
         "natural_interviewer_v6.0.5",
         NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5,
+    ),
+    "v6.1.1": (
+        "natural_interviewer_v6.1.1",
+        NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1,
     ),
 }
 
@@ -287,34 +400,54 @@ score=null、sufficient=false、quotes=[]，理由使用“证据有限”或“
 
 
 class ModelGatewayService:
-    """Typed model calls with one transport retry and one JSON repair attempt."""
+    """Typed model calls with one bounded retry and explicit call profiles."""
 
     def __init__(self) -> None:
         self.mode = settings.model_gateway_mode
 
-    def generate_opening(self, participant: dict[str, str]) -> StructuredCallResult[NaturalInterviewerOutput]:
-        result = self.generate_interviewer({"participant": participant, "transcript": []})
+    def generate_opening(
+        self,
+        participant: dict[str, str],
+        *,
+        prompt_version: str | None = None,
+    ) -> StructuredCallResult[NaturalInterviewerOutput]:
+        result = self.generate_interviewer(
+            {"participant": participant, "transcript": []},
+            prompt_version=prompt_version,
+        )
         if result.output.session_action != "continue" or result.output.finish_reason is not None:
             raise ModelGatewayError("opening_must_invite_and_continue", repair_used=result.repair_used)
         return result
 
     def generate_interviewer(
-        self, payload: dict[str, Any]
+        self,
+        payload: dict[str, Any],
+        *,
+        prompt_version: str | None = None,
     ) -> StructuredCallResult[NaturalInterviewerOutput]:
         self._assert_interview_payload(payload)
+        selected_version = prompt_version or settings.natural_interviewer_prompt_version
+        _, _, system_prompt = resolve_natural_interviewer_prompt(selected_version)
         if self.mode == "mock":
             started = time.monotonic()
             return StructuredCallResult(
-                output=self._mock_interviewer(payload),
+                output=self._mock_interviewer(
+                    payload,
+                    prompt_version=selected_version,
+                ),
                 provider="mock",
                 model="natural-interviewer-mock-v6",
                 repair_used=False,
                 latency_ms=int((time.monotonic() - started) * 1000),
             )
         return self._typed_call(
-            system_prompt=NATURAL_INTERVIEWER_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             payload=payload,
             schema=NaturalInterviewerOutput,
+            max_tokens=settings.deepseek_interview_max_tokens,
+            thinking=settings.deepseek_interview_thinking,
+            total_timeout_seconds=settings.deepseek_interview_total_timeout_seconds,
+            primary_timeout_seconds=settings.deepseek_interview_primary_timeout_seconds,
         )
 
     def generate_final_scorer(
@@ -340,6 +473,7 @@ class ModelGatewayService:
             payload=payload,
             schema=FinalScorerOutput,
             max_tokens=settings.deepseek_scoring_max_tokens,
+            thinking="enabled",
         )
 
     @staticmethod
@@ -374,6 +508,9 @@ class ModelGatewayService:
         payload: dict[str, Any],
         schema: type[T],
         max_tokens: int | None = None,
+        thinking: str = "enabled",
+        total_timeout_seconds: float | None = None,
+        primary_timeout_seconds: float | None = None,
     ) -> StructuredCallResult[T]:
         if not settings.deepseek_api_key.strip():
             raise ModelGatewayError("missing_deepseek_api_key")
@@ -387,13 +524,44 @@ class ModelGatewayService:
         ]
         last_error: Exception | None = None
         repair_used = False
-        transport_retry_used = False
+        retry_used = False
+        attempt_count = 0
         while True:
+            elapsed = time.monotonic() - started
+            remaining = (
+                None
+                if total_timeout_seconds is None
+                else max(0.0, total_timeout_seconds - elapsed)
+            )
+            if remaining is not None and remaining <= 0:
+                terminal_code = (
+                    "model_empty_response"
+                    if isinstance(last_error, ModelGatewayError)
+                    and last_error.error_code in {"model_output_empty", "model_empty_response"}
+                    else "model_connection_interrupted"
+                )
+                raise ModelGatewayError(
+                    terminal_code,
+                    repair_used=repair_used,
+                    transient=True,
+                    error_code=terminal_code,
+                    latency_ms=int(elapsed * 1000),
+                    attempt_count=attempt_count,
+                ) from last_error
+            timeout_seconds = settings.deepseek_timeout_seconds
+            if remaining is not None:
+                timeout_seconds = remaining
+                if attempt_count == 0 and primary_timeout_seconds is not None:
+                    timeout_seconds = min(timeout_seconds, primary_timeout_seconds)
+                timeout_seconds = max(0.1, timeout_seconds)
+            attempt_count += 1
             try:
-                if max_tokens is None:
-                    raw = self._post_json(messages)
-                else:
-                    raw = self._post_json(messages, max_tokens=max_tokens)
+                raw = self._post_json(
+                    messages,
+                    max_tokens=max_tokens,
+                    timeout_seconds=timeout_seconds,
+                    thinking=thinking,
+                )
                 output = schema.model_validate(raw)
                 return StructuredCallResult(
                     output=output,
@@ -401,22 +569,46 @@ class ModelGatewayService:
                     model=settings.deepseek_model,
                     repair_used=repair_used,
                     latency_ms=int((time.monotonic() - started) * 1000),
+                    attempt_count=attempt_count,
                 )
             except Exception as exc:
                 last_error = exc
-                if isinstance(exc, ModelGatewayError) and exc.transient:
-                    if not transport_retry_used:
-                        transport_retry_used = True
-                        # Keep the original payload untouched: a transport
-                        # failure says nothing about the model's JSON output.
-                        time.sleep(0.25)
+                if isinstance(exc, ModelGatewayError) and exc.error_code == "model_output_empty":
+                    if not retry_used:
+                        retry_used = True
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "请立即返回上述合同要求的完整 JSON 对象，不能返回空内容。"
+                                ),
+                            }
+                        )
                         continue
                     raise ModelGatewayError(
-                        f"structured_model_call_failed:{type(last_error).__name__}:{str(last_error)[:500]}",
+                        "model_empty_response",
                         repair_used=repair_used,
                         transient=True,
+                        error_code="model_empty_response",
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        attempt_count=attempt_count,
                     ) from exc
-                if not repair_used:
+                if isinstance(exc, ModelGatewayError) and exc.transient:
+                    if not retry_used:
+                        retry_used = True
+                        # A network failure says nothing about the requested
+                        # output. Retry the exact original payload once.
+                        continue
+                    raise ModelGatewayError(
+                        f"model_connection_interrupted:{type(last_error).__name__}:{str(last_error)[:500]}",
+                        repair_used=repair_used,
+                        transient=True,
+                        error_code="model_connection_interrupted",
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        attempt_count=attempt_count,
+                    ) from exc
+                if not retry_used:
+                    retry_used = True
                     repair_used = True
                     messages.append(
                         {
@@ -431,6 +623,9 @@ class ModelGatewayService:
                 raise ModelGatewayError(
                     f"structured_model_call_failed:{type(last_error).__name__}:{str(last_error)[:500]}",
                     repair_used=repair_used,
+                    error_code="model_invalid_response",
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    attempt_count=attempt_count,
                 ) from exc
 
     def _post_json(
@@ -438,6 +633,8 @@ class ModelGatewayService:
         messages: list[dict[str, str]],
         *,
         max_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+        thinking: str = "enabled",
     ) -> dict[str, Any]:
         base_url = settings.deepseek_base_url.rstrip("/")
         # The configured DeepSeek root already exposes /chat/completions. Also
@@ -461,20 +658,27 @@ class ModelGatewayService:
                         if max_tokens is None
                         else max_tokens
                     ),
+                    "thinking": {"type": thinking},
                     "response_format": {"type": "json_object"},
                 },
-                timeout=settings.deepseek_timeout_seconds,
+                timeout=(
+                    settings.deepseek_timeout_seconds
+                    if timeout_seconds is None
+                    else timeout_seconds
+                ),
             )
             response.raise_for_status()
             body = response.json()
             content = body["choices"][0]["message"]["content"]
             if not isinstance(content, str) or not content.strip():
-                # A successful HTTP response with no model content is an
-                # upstream/provider hiccup, not a malformed JSON response.
-                # Keep the original request so _typed_call can perform its
-                # bounded transport retry instead of asking the provider to
-                # repair an output that was never returned.
-                raise ModelGatewayError("model_output_empty", transient=True)
+                # A successful HTTP response with no model content is distinct
+                # from a transport failure. The caller may add a protocol-only
+                # reminder before its single bounded retry.
+                raise ModelGatewayError(
+                    "model_output_empty",
+                    transient=True,
+                    error_code="model_output_empty",
+                )
             cleaned = content.strip()
             if cleaned.startswith(chr(96) * 3):
                 cleaned = cleaned.strip(chr(96)).removeprefix("json").strip()
@@ -496,6 +700,7 @@ class ModelGatewayService:
             raise ModelGatewayError(
                 f"model_transport_failed:{type(exc).__name__}:{str(exc)[:500]}",
                 transient=True,
+                error_code="model_transport_failed",
             ) from exc
         except (
             httpx.HTTPError,
@@ -510,12 +715,28 @@ class ModelGatewayService:
             ) from exc
 
     @staticmethod
-    def _mock_interviewer(payload: dict[str, Any]) -> NaturalInterviewerOutput:
+    def _mock_interviewer(
+        payload: dict[str, Any],
+        *,
+        prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
+    ) -> NaturalInterviewerOutput:
         transcript = payload["transcript"]
         participant = payload.get("participant") or {}
         if not transcript:
             name = str(participant.get("display_name") or "").strip()
             greeting = f"你好，{name}。" if name else "你好。"
+            if prompt_version == "v6.1.1":
+                return NaturalInterviewerOutput(
+                    interviewer_message=(
+                        greeting
+                        + "这里没有标准答案，我更想了解你怎样作出判断。"
+                        "接下来我一次只问一个问题。"
+                        "请想起最近一件真实、具体、需要认真权衡的事情："
+                        "当时最难判断的是什么？"
+                    ),
+                    session_action="continue",
+                    finish_reason=None,
+                )
             return NaturalInterviewerOutput(
                 interviewer_message=(
                     greeting + "我会先听你正在认真思考的一件事。最近有什么让你想多说一点？"
@@ -539,10 +760,27 @@ class ModelGatewayService:
                 session_action="continue",
                 finish_reason=None,
             )
-        if any(
-            marker in normalized
-            for marker in ("结束", "到这里", "不想继续", "先这样")
-        ):
+        user_requested = (
+            any(
+                marker in normalized
+                for marker in (
+                    "结束访谈",
+                    "结束这次访谈",
+                    "结束本次访谈",
+                    "结束对话",
+                    "不想继续回答",
+                    "不想继续访谈",
+                    "访谈到这里",
+                    "生成报告",
+                )
+            )
+            if prompt_version == "v6.1.1"
+            else any(
+                marker in normalized
+                for marker in ("结束", "到这里", "不想继续", "先这样")
+            )
+        )
+        if user_requested:
             return NaturalInterviewerOutput(
                 interviewer_message="好，谢谢你把这些想法说出来。我们就先停在这里。",
                 session_action="finish",
@@ -554,6 +792,15 @@ class ModelGatewayService:
             for item in transcript
         )
         if prior_probe:
+            if prompt_version == "v6.1.1":
+                return NaturalInterviewerOutput(
+                    interviewer_message=(
+                        "这件事已经梳理得比较完整，可以考虑在这里结束；"
+                        "如果还有重要内容，你仍可以继续补充。"
+                    ),
+                    session_action="finish",
+                    finish_reason="natural_closure",
+                )
             return NaturalInterviewerOutput(
                 interviewer_message=(
                     "这让你的判断边界更清楚了。谢谢你把可能改变决定的条件也讲出来，"
@@ -575,7 +822,11 @@ class ModelGatewayService:
                 finish_reason=None,
             )
         return NaturalInterviewerOutput(
-            interviewer_message="听起来这件事对你确实很重要。此刻你最想先厘清的是什么？",
+            interviewer_message=(
+                "先把焦点放回这件具体经历：当时你真正需要作出的判断是什么？"
+                if prompt_version == "v6.1.1"
+                else "听起来这件事对你确实很重要。此刻你最想先厘清的是什么？"
+            ),
             session_action="continue",
             finish_reason=None,
         )

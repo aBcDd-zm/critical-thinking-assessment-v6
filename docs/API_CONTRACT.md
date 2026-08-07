@@ -4,7 +4,7 @@
 
 `interviewing | finalizing | completed | exited | safety_stopped`
 
-`interviewing` 不包含阶段、coverage、目标维度或测量轮次。恢复快照会带 `user_answer_count`；客户端可将其如实显示为“已进行 N 轮问答”，但不得渲染为阶段、目标进度或必答数量。快照同时带 `technical_turn_cap` 与 `technical_turn_cap_reached`，它们只表示 40 次的稳定性保护上限，不是测量完成条件。快照还带 transcript 指纹以支持审计，但不带实时评分或路由结论。
+`interviewing` 不包含阶段、coverage、目标维度或测量轮次。恢复快照会带 `user_answer_count`；客户端可将其如实显示为“已进行 N 轮问答”，但不得渲染为阶段、目标进度或必答数量。快照同时带 `technical_turn_cap` 与 `technical_turn_cap_reached`，它们只表示 40 次的稳定性保护上限，不是测量完成条件。快照还带 transcript 指纹以支持审计，但不带实时评分或路由结论。开启用户确认结束合同的快照可另带当前 `closure_suggestion`：`closure_turn_id`、精确 transcript 指纹与 `finish_reason`；它只是可接受或可被后续回答取代的结束建议。
 
 ## 会话与同意
 
@@ -44,18 +44,19 @@
 1. `user_turn_saved`
 2. `agent_started`
 3. 等待模型时每 10 秒可出现 `heartbeat`，并有零或多个 `agent_delta`
-4. 可选 `session_finalizing`（仅访谈官自然选择 `finish` 时）
+4. 可选 `session_closure_suggested`（用户确认结束合同下的自然结束意图）或 `session_finalizing`（仅收到有效终局结束时）
 5. `agent_completed` 或 `error`
 
-`heartbeat` 只用于保持 HTTP 连接，客户端不将它渲染为对话。`session_finalizing` 提示 UI 停止继续输入并单独调用 `/finalize`；转入 `finalizing` 的本轮不再同步等待最终评分。真正的本轮 session 快照仍以 `agent_completed` 为准。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。访谈官只允许输出 `interviewer_message`、`session_action` 和 `finish_reason`；当 `session_action=finish` 时，服务端转入 `finalizing`，而非要求客户端补任何特定题目。除用户主动结束外，版本化访谈 Prompt 要求在看似完整的方案后先自然探查一到两层关键不确定性、条件或反例；该行为仍由模型根据逐字稿决定，不由 API 传入轮次或维度控制字段。
+`heartbeat` 只用于保持 HTTP 连接，客户端不将它渲染为对话。`session_finalizing` 提示 UI 停止继续输入并单独调用 `/finalize`；转入 `finalizing` 的本轮不再同步等待最终评分。真正的本轮 session 快照仍以 `agent_completed` 为准。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。模型只允许输出 `interviewer_message`、`session_action` 和 `finish_reason`。每个会话按开场 trace 绑定 Prompt 版本；进程配置变更不会使旧会话中途换版。显式候选 `v6.1.1` 或新版用户确认结束说明下的会话收到 `finish/enough_understanding|natural_closure` 时，服务端记录原始模型意图，把参与者可见文案确定性归一为“可结束且仍可继续补充”，并把对外有效动作映射为 `suggest_finish`，发出 `session_closure_suggested`，保持 `interviewing`。只有旧说明下绑定旧 Prompt 的会话保留历史冻结语义。模型输出 `finish/user_requested` 只用于用户明确结束本次访谈或生成本次报告，并直接进入 `finalizing`；事件或方案“结束”的叙述不得视为该意图。API 不向模型传入轮次、维度或下一题控制字段。
 
-`content` 去除空白后的可见字符数必须至少为 20。客户端在输入框中即时显示剩余字数；普通 `Enter` 提交有效回答，`Shift+Enter` 保留换行，中文输入法选词期间不得误提交。服务端也会再次校验该限制。
+首个 `content` 只需非空；从第二个回答起，普通回答去除空白后的可见字符数必须至少为 20，完整的明确不确定短答例外。客户端在输入框中即时显示状态或剩余字数；普通 `Enter` 提交有效回答，`Shift+Enter` 保留换行，中文输入法选词期间不得误提交。服务端也会再次校验该限制。
 
 同一 `client_turn_id` 与相同载荷必须回放同一已持久化结果；不同载荷返回 `409 idempotency_payload_mismatch`。在第一个流事件之前发现的输入或幂等错误仍使用 HTTP 4xx；流已开始后的模型/JSON 错误使用 HTTP 200 中的终止 `error` 事件。此时用户回答已经保存，客户端应保留同一键并允许刷新恢复，不能伪造一条固定 AI 问题。
 
 ## 结束、报告与语音
 
 - `POST /sessions/{uuid}/report-readiness`：在用户主动结束前，对当前未冻结逐字稿执行可选的六维证据准备度预检。预检复用正式终评的证据验证规则，并以会话、精确逐字稿指纹和评分资产指纹作为幂等键。公开响应只含 `status: ready|insufficient|checking`、`ready: boolean|null` 和 `cached: boolean`；不返回缺失维度、分数、引文、理由或逐字稿指纹。预检不冻结会话，不写入正式 `ScoringRun`、`EvidenceItem` 或报告，也不作为生成报告的强制前置条件。
+- `POST /sessions/{uuid}/closure-suggestions/{closure_turn_id}/accept`：接受仍为最新状态的结束建议。请求体必须提供 `expected_transcript_fingerprint`；服务端同时校验会话、建议 turn、最新逐字稿指纹与建议未被后续回答取代，成功后才冻结并生成/重试报告。陈旧或不匹配建议返回 `409 stale_closure_suggestion`；相同建议与指纹的重试保持幂等。
 - `POST /sessions/{uuid}/finalize`：用户主动结束访谈，或对已经冻结且评分失败的会话作幂等评分重试。它不检查阶段、coverage、题库或固定轮次。
 - `POST /sessions/{uuid}/exit`：明确退出且不生成报告。
 - `GET /sessions/{uuid}/report`：获取唯一的结构化报告；未完成时返回相应状态错误。
@@ -89,5 +90,7 @@
 - `409 technical_turn_cap_reached`：已达 40 次技术保护上限，不再接收新回答；同一 `client_turn_id` 的已保存失败提交仍可恢复。
 - `422 answer_too_short`：从第二个回答起，普通回答少于 20 个可见字符。首个非空回答及完整匹配“不知道／不清楚／不确定／没想好”等明确不确定表达的后续短答例外；请求、同意或模型结构合同无效仍使用其各自的 `422` 语义。
 - `500 turn_processing_failed`：一次修复后访谈官仍失败；用户 turn 已保留。
+- NDJSON `model_empty_response`：供应商连续两次没有返回有效内容；用户 turn 已保留，可用原 `client_turn_id` 恢复。
+- NDJSON `model_connection_interrupted`：连接、读取或协议传输中断；用户 turn 已保留，可用原 `client_turn_id` 恢复。
 - `503 scoring_failed`：评分失败，会话保持 `finalizing`，可幂等重试。
 - `503 tts_fallback_required`：语音供应商不可用；文本会话不受影响。

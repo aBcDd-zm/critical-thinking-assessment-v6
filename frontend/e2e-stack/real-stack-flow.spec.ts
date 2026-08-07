@@ -16,8 +16,8 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
   await page.addInitScript(() => localStorage.setItem("v6:tts-enabled", "false"));
 
   await page.goto("/assessment");
-  await page.getByLabel("用户名").fill("真栈验收");
-  await page.getByLabel(/我已阅读并同意/).check();
+  await page.getByLabel("参与编号或昵称").fill("真栈验收");
+  await page.getByLabel(/我已阅读并理解/).check();
   await page.getByRole("button", { name: /开始访谈/ }).click();
 
   await expect(page).toHaveURL(/\/assessment\/session\/[0-9a-f-]+$/);
@@ -88,6 +88,9 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
     page,
     "如果导师确认无法提供稳定指导，或两周试用没有得到有效反馈，我会暂停申请，重新比较其他项目。",
   );
+  await expect(page.getByText("这段对话可以在这里收束", { exact: true })).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "结束并生成报告" }).click();
   await expect(page).toHaveURL(new RegExp(`/assessment/report/${sessionUuid}$`));
   await expect(page.getByRole("heading", { name: "访谈结果" })).toBeVisible();
   await expect(page.locator(".radar-chart")).toBeVisible();
@@ -114,8 +117,8 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
 test("真实栈中可以在任意时刻主动结束并生成报告", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("v6:tts-enabled", "false"));
   await page.goto("/assessment");
-  await page.getByLabel("用户名").fill("结束流程验收");
-  await page.getByLabel(/我已阅读并同意/).check();
+  await page.getByLabel("参与编号或昵称").fill("结束流程验收");
+  await page.getByLabel(/我已阅读并理解/).check();
   await page.getByRole("button", { name: /开始访谈/ }).click();
   await expect(page).toHaveURL(/\/assessment\/session\/[0-9a-f-]+$/);
   page.once("dialog", (dialog) => dialog.accept());

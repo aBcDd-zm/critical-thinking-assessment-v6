@@ -35,14 +35,14 @@ from app.schemas import (
 from app.services.model_gateway import (
     NATURAL_FINAL_SCORER_PROMPT_ID,
     NATURAL_FINAL_SCORER_PROMPT_VERSION,
-    NATURAL_INTERVIEWER_PROMPT_ID,
-    NATURAL_INTERVIEWER_PROMPT_VERSION,
     ModelGatewayError,
+    resolve_natural_interviewer_prompt,
 )
 from app.services.orchestrator import (
     FinalizationError,
     InterviewContractError,
     InterviewOrchestrator,
+    SUGGEST_FINISH_ACTION,
     transcript_fingerprint,
 )
 
@@ -59,6 +59,7 @@ _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 TECHNICAL_USER_TURN_CAP = 40
 REPORT_READINESS_RULE_VERSION = "final-output-evidence-v1"
 REPORT_READINESS_LEASE_SECONDS = 15 * 60
+LEGACY_INTERVIEWER_PROMPT_VERSION = "v6.0.5"
 
 
 def _report_readiness_asset_fingerprint() -> str:
@@ -115,6 +116,33 @@ def serialize_report(session: AssessmentSession) -> dict[str, Any] | None:
     return data
 
 
+def active_closure_suggestion(session: AssessmentSession) -> dict[str, Any] | None:
+    """Return the current model-authored close suggestion, if it is still current.
+
+    A suggestion is active only while it is the latest persisted turn in an
+    interviewing session.  Any subsequent participant answer supersedes it
+    without adding mutable session-level state.
+    """
+
+    if session.phase != "interviewing":
+        return None
+    turns = sorted(session.turns, key=lambda item: item.turn_index)
+    if not turns:
+        return None
+    latest = turns[-1]
+    if (
+        latest.role != "assistant"
+        or latest.session_action != SUGGEST_FINISH_ACTION
+        or latest.id is None
+    ):
+        return None
+    return {
+        "closure_turn_id": latest.id,
+        "transcript_fingerprint": transcript_fingerprint(session),
+        "finish_reason": latest.finish_reason,
+    }
+
+
 def session_snapshot(session: AssessmentSession) -> dict[str, Any]:
     turns = sorted(session.turns, key=lambda item: item.turn_index)
     return {
@@ -145,6 +173,7 @@ def session_snapshot(session: AssessmentSession) -> dict[str, Any]:
             else None
         ),
         "finalization_state": session.finalization_state,
+        "closure_suggestion": active_closure_suggestion(session),
         "manual_review_recommended": session.manual_review_recommended,
         "experimental_notice": (
             "思衡 V6 是探索性、非标准化的自然访谈演示，"
@@ -190,7 +219,10 @@ class SessionService:
             "collaboration_role": session.collaboration_role or "",
         }
         try:
-            opening = self.orchestrator.opening(participant_payload)
+            opening = self.orchestrator.opening(
+                participant_payload,
+                prompt_version=settings.natural_interviewer_prompt_version,
+            )
         except (ModelGatewayError, InterviewContractError) as exc:
             db.rollback()
             raise ServiceError(
@@ -222,6 +254,7 @@ class SessionService:
                     "session_action": opening.session_action,
                     "finish_reason": opening.finish_reason,
                     "quality_flags": opening.quality_flags,
+                    "attempt_count": opening.attempt_count,
                 },
                 renderer_status="repaired" if opening.repair_used else "accepted",
                 repair_used=opening.repair_used,
@@ -241,6 +274,31 @@ class SessionService:
         if not session:
             raise ServiceError(404, "session_not_found", "会话不存在。")
         return session
+
+    @staticmethod
+    def _bound_interviewer_prompt_version(db: Session, session_id: int) -> str:
+        """Keep every turn on the prompt version recorded by its opening.
+
+        Sessions created before opening traces existed conservatively remain on
+        the previous production baseline instead of inheriting a deployment
+        switch halfway through the conversation.
+        """
+
+        recorded = db.scalar(
+            select(AgentTrace.prompt_version)
+            .where(
+                AgentTrace.session_id == session_id,
+                AgentTrace.action == "natural_opening",
+            )
+            .order_by(AgentTrace.id.asc())
+            .limit(1)
+        )
+        candidate = str(recorded or LEGACY_INTERVIEWER_PROMPT_VERSION)
+        try:
+            resolve_natural_interviewer_prompt(candidate)
+        except ValueError:
+            return LEGACY_INTERVIEWER_PROMPT_VERSION
+        return candidate
 
     @staticmethod
     def _payload_hash(request: SubmitTurnRequest) -> str:
@@ -280,6 +338,21 @@ class SessionService:
                     "data": {
                         "session_uuid": session.uuid,
                         "finish_reason": assistant_turn.finish_reason,
+                    },
+                }
+            )
+        suggestion = active_closure_suggestion(session)
+        if (
+            assistant_turn.session_action == SUGGEST_FINISH_ACTION
+            and suggestion is not None
+            and suggestion["closure_turn_id"] == assistant_turn.id
+        ):
+            events.append(
+                {
+                    "event": "session_closure_suggested",
+                    "data": {
+                        "session_uuid": session.uuid,
+                        **suggestion,
                     },
                 }
             )
@@ -437,7 +510,15 @@ class SessionService:
                         emit(event)
 
                 session = self.get(db, session_uuid)
-                result = self.orchestrator.process(session, user_turn)
+                bound_prompt_version = self._bound_interviewer_prompt_version(
+                    db,
+                    session.id,
+                )
+                result = self.orchestrator.process(
+                    session,
+                    user_turn,
+                    prompt_version=bound_prompt_version,
+                )
                 assistant_turn = DialogueTurn(
                     # Attach through the relationship, not only the foreign
                     # key.  The orchestrator has already read session.turns to
@@ -459,11 +540,16 @@ class SessionService:
                 # above replays this exact answer rather than generating a
                 # second one for the same client_turn_id.
                 submission.assistant_turn_id = assistant_turn.id
+                trace_action = (
+                    "natural_close_suggested"
+                    if result.session_action == SUGGEST_FINISH_ACTION
+                    else "natural_interview_turn"
+                )
                 db.add(
                     AgentTrace(
                         session_id=session.id,
                         assistant_turn_id=assistant_turn.id,
-                        action="natural_interview_turn",
+                        action=trace_action,
                         model_provider=result.provider,
                         model_name=result.model,
                         prompt_template_id=result.prompt_template_id,
@@ -472,7 +558,10 @@ class SessionService:
                         output_contract={
                             "session_action": result.session_action,
                             "finish_reason": result.finish_reason,
+                            "model_session_action": result.model_session_action,
+                            "model_finish_reason": result.model_finish_reason,
                             "quality_flags": result.quality_flags,
+                            "attempt_count": result.attempt_count,
                         },
                         renderer_status="repaired" if result.repair_used else "accepted",
                         repair_used=result.repair_used,
@@ -546,6 +635,18 @@ class SessionService:
                             )
                         )
                     else:
+                        failed_prompt_version = self._bound_interviewer_prompt_version(
+                            db,
+                            failed.session_id,
+                        )
+                        failed_prompt_id, _, _ = resolve_natural_interviewer_prompt(
+                            failed_prompt_version
+                        )
+                        error_code = str(
+                            getattr(exc, "error_code", type(exc).__name__)
+                        )
+                        attempt_count = int(getattr(exc, "attempt_count", 0) or 0)
+                        latency_ms = int(getattr(exc, "latency_ms", 0) or 0)
                         db.add(
                             AgentTrace(
                                 session_id=failed.session_id,
@@ -561,8 +662,8 @@ class SessionService:
                                     if settings.model_gateway_mode == "real"
                                     else "natural-interviewer-mock-v6"
                                 ),
-                                prompt_template_id=NATURAL_INTERVIEWER_PROMPT_ID,
-                                prompt_version=NATURAL_INTERVIEWER_PROMPT_VERSION,
+                                prompt_template_id=failed_prompt_id,
+                                prompt_version=failed_prompt_version,
                                 input_fingerprint=(
                                     self.orchestrator.trace_input_fingerprint(failed_session)
                                     if failed_session
@@ -571,11 +672,14 @@ class SessionService:
                                 output_contract={
                                     "status": "failed",
                                     "exception_type": type(exc).__name__,
+                                    "error_code": error_code,
+                                    "attempt_count": attempt_count,
                                     "recoverable": True,
                                 },
                                 renderer_status="failed",
                                 repair_used=bool(getattr(exc, "repair_used", False)),
                                 fallback_reason=failed.error_message,
+                                latency_ms=latency_ms,
                             )
                         )
                     db.commit()
@@ -737,6 +841,114 @@ class SessionService:
                     "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
                 ) from exc
 
+    def _run_finalization(
+        self, db: Session, session: AssessmentSession
+    ) -> AssessmentSession:
+        try:
+            return self.orchestrator.finalize(db, session)
+        except FinalizationError as exc:
+            raise ServiceError(
+                503,
+                "scoring_failed",
+                "独立评分暂时失败；访谈已冻结，请稍后重试生成报告。",
+            ) from exc
+
+    @staticmethod
+    def _stale_closure_suggestion() -> ServiceError:
+        return ServiceError(
+            409,
+            "stale_closure_suggestion",
+            "该收束建议已不是当前对话的最新状态，请刷新后再决定。",
+        )
+
+    def accept_closure_suggestion(
+        self,
+        db: Session,
+        session_uuid: str,
+        closure_turn_id: int,
+        expected_transcript_fingerprint: str,
+    ) -> AssessmentSession:
+        """Accept only the latest persisted natural-close suggestion.
+
+        The turn id and fingerprint form an optimistic concurrency boundary for
+        refreshes and multiple browser tabs.  Retrying an already accepted
+        suggestion remains idempotent and can also retry a failed frozen score.
+        """
+
+        with _locks[session_uuid]:
+            session = self.get(db, session_uuid)
+            closure_turn = db.scalar(
+                select(DialogueTurn).where(
+                    DialogueTurn.id == closure_turn_id,
+                    DialogueTurn.session_id == session.id,
+                    DialogueTurn.role == "assistant",
+                    DialogueTurn.session_action == SUGGEST_FINISH_ACTION,
+                )
+            )
+            if closure_turn is None:
+                raise self._stale_closure_suggestion()
+
+            accepted_trace = db.scalar(
+                select(AgentTrace).where(
+                    AgentTrace.session_id == session.id,
+                    AgentTrace.assistant_turn_id == closure_turn.id,
+                    AgentTrace.action == "user_accepted_closure_suggestion",
+                )
+            )
+            if accepted_trace is not None:
+                if (
+                    accepted_trace.input_fingerprint
+                    != expected_transcript_fingerprint
+                    or session.transcript_fingerprint
+                    != expected_transcript_fingerprint
+                ):
+                    raise self._stale_closure_suggestion()
+                if session.report and session.phase == "completed":
+                    return session
+                if session.phase != "finalizing":
+                    raise self._stale_closure_suggestion()
+                return self._run_finalization(db, session)
+
+            suggestion = active_closure_suggestion(session)
+            if (
+                suggestion is None
+                or suggestion["closure_turn_id"] != closure_turn.id
+                or suggestion["transcript_fingerprint"]
+                != expected_transcript_fingerprint
+            ):
+                raise self._stale_closure_suggestion()
+
+            session.phase = "finalizing"
+            session.finalization_state = "user_accepted_close"
+            frozen_fingerprint = self.orchestrator.freeze_transcript(session)
+            if frozen_fingerprint != expected_transcript_fingerprint:
+                db.rollback()
+                raise self._stale_closure_suggestion()
+            db.add(
+                AgentTrace(
+                    session_id=session.id,
+                    assistant_turn_id=closure_turn.id,
+                    action="user_accepted_closure_suggestion",
+                    model_provider="none",
+                    model_name="none",
+                    prompt_template_id="v6_closure_confirmation",
+                    prompt_version="v6.0.0",
+                    input_fingerprint=frozen_fingerprint,
+                    output_contract={
+                        "session_action": "finish",
+                        "finish_reason": "user_requested",
+                        "source_session_action": SUGGEST_FINISH_ACTION,
+                        "source_finish_reason": closure_turn.finish_reason,
+                        "closure_turn_id": closure_turn.id,
+                        "transcript_fingerprint": frozen_fingerprint,
+                    },
+                    renderer_status="accepted",
+                )
+            )
+            db.commit()
+            db.refresh(session)
+            return self._run_finalization(db, session)
+
     def finalize(self, db: Session, session_uuid: str) -> AssessmentSession:
         with _locks[session_uuid]:
             session = self.get(db, session_uuid)
@@ -769,14 +981,7 @@ class SessionService:
                     "session_not_ready_for_finalization",
                     "当前会话不能生成报告。",
                 )
-            try:
-                return self.orchestrator.finalize(db, session)
-            except FinalizationError as exc:
-                raise ServiceError(
-                    503,
-                    "scoring_failed",
-                    "独立评分暂时失败；访谈已冻结，请稍后重试生成报告。",
-                ) from exc
+            return self._run_finalization(db, session)
 
     def exit(self, db: Session, session_uuid: str, reason: str | None) -> AssessmentSession:
         with _locks[session_uuid]:
