@@ -20,7 +20,9 @@ class Settings(BaseSettings):
     model_gateway_mode: Literal["real", "mock"] = "real"
     # Prompt selection is explicit so a deployment can roll back conversational
     # style without changing code or losing the version recorded in traces.
-    natural_interviewer_prompt_version: Literal["v6.0.3", "v6.0.4", "v6.0.5"] = "v6.0.5"
+    natural_interviewer_prompt_version: Literal[
+        "v6.0.3", "v6.0.4", "v6.0.5", "v6.1.0"
+    ] = "v6.0.5"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_base_url: str = "https://api.deepseek.com"

@@ -37,6 +37,10 @@ async function startInterview() {
       <a class="brand" href="/assessment" aria-label="思衡首页"><span>思衡</span></a>
       <h1 id="consent-title">开始访谈</h1>
       <form @submit.prevent="startInterview">
+        <div class="consent-guidance">
+          <p>在访谈对话中展现你的思维</p>
+          <p>请从一件真实、具体、需要判断的经历说起</p>
+        </div>
         <label>
           <span>用户名</span>
           <input v-model="form.display_name" autocomplete="username" maxlength="40" placeholder="用于后续统计，请勿使用真实姓名" required />

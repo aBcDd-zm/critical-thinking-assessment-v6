@@ -76,12 +76,12 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
     )
     candidate_config = Settings(
         _env_file=None,
-        natural_interviewer_prompt_version="v6.0.5",
+        natural_interviewer_prompt_version="v6.1.0",
     )
 
     assert default_config.natural_interviewer_prompt_version == "v6.0.5"
     assert rollback_config.natural_interviewer_prompt_version == "v6.0.3"
-    assert candidate_config.natural_interviewer_prompt_version == "v6.0.5"
+    assert candidate_config.natural_interviewer_prompt_version == "v6.1.0"
     with pytest.raises(ValidationError):
         Settings(
             _env_file=None,
@@ -168,6 +168,47 @@ print("candidate-isolated-ok")
     )
 
     assert completed.stdout.strip() == "candidate-isolated-ok"
+
+
+def test_v6_1_0_candidate_uses_guided_opening_without_changing_the_default() -> None:
+    env = os.environ.copy()
+    env.update(
+        {
+            "MODEL_GATEWAY_MODE": "mock",
+            "NATURAL_INTERVIEWER_PROMPT_VERSION": "v6.1.0",
+        }
+    )
+    script = """
+from app.services.model_gateway import (
+    ModelGatewayService,
+    NATURAL_INTERVIEWER_PROMPT_ID,
+    NATURAL_INTERVIEWER_PROMPT_VERSION,
+)
+
+service = ModelGatewayService()
+result = service.generate_opening({"display_name": "小陈"})
+message = result.output.interviewer_message
+assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.1.0"
+assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.1.0"
+assert "没有标准答案" in message
+assert "一次只问一个问题" in message
+assert "真实事情" in message
+assert "最难判断的是什么" in message
+assert message.count("？") == 1
+for hidden_term in ("问题界定", "证据评估", "推理与论证", "多元视角", "综合决策", "动态调整", "评分", "覆盖"):
+    assert hidden_term not in message
+print("v610-opening-ok")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "v610-opening-ok"
 
 
 def test_production_doubao_configuration_is_accepted_without_exposing_the_key() -> None:

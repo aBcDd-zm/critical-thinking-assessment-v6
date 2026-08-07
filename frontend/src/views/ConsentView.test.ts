@@ -27,6 +27,12 @@ describe("ConsentView", () => {
     });
 
     expect(wrapper.get("h1").text()).toBe("开始访谈");
+    expect(wrapper.get(".consent-guidance").text()).toBe(
+      "在访谈对话中展现你的思维请从一件真实、具体、需要判断的经历说起",
+    );
+    expect(wrapper.get(".consent-guidance").findAll("p")).toHaveLength(2);
+    expect(wrapper.get(".consent-guidance").text()).not.toContain("证据不足");
+    expect(wrapper.get(".consent-guidance").text()).not.toContain("没有标准答案");
     expect(wrapper.text()).toContain("隐私与使用说明");
     expect(wrapper.find("details").attributes("open")).toBeUndefined();
     expect(wrapper.get("input[autocomplete=username]").attributes("required")).toBeDefined();

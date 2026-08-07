@@ -41,6 +41,7 @@ from app.services.model_gateway import (
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_3,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_4,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5,
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_0,
     StructuredCallResult,
     resolve_natural_interviewer_prompt,
 )
@@ -170,7 +171,7 @@ def test_interviewer_prompt_v6_0_3_is_preserved_for_rollback() -> None:
     assert "可轻声重复对方最后一句话的关键词" in prompt
 
 
-def test_interviewer_prompt_resolver_preserves_v6_0_4_and_selects_v6_0_5() -> None:
+def test_interviewer_prompt_resolver_preserves_old_versions_and_adds_v6_1_0() -> None:
     prompt_id, version, prompt = resolve_natural_interviewer_prompt("v6.0.4")
 
     assert prompt_id == "natural_interviewer_v6.0.4"
@@ -195,6 +196,24 @@ def test_interviewer_prompt_resolver_preserves_v6_0_4_and_selects_v6_0_5() -> No
     assert "不要再次用同义复述重新建立承接" in prompt
     assert "如果删除后不会损失必要的" in prompt
     assert "把提高直接提问比例当作目标" in prompt
+
+    prompt_id, version, prompt = resolve_natural_interviewer_prompt("v6.1.0")
+
+    assert prompt_id == "natural_interviewer_v6.1.0"
+    assert version == "v6.1.0"
+    assert prompt == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_0
+    assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
+        "774a52c5d63e1b2c6b746274b74b589c979393272a5dd69d89ef3381ed354fc9"
+    )
+    assert "这里没有标准答案" in prompt
+    assert "一次只问一个问题" in prompt
+    assert "真实、具体事情" in prompt
+    assert "同一件真实事件" in prompt
+    assert "若用户跑题" in prompt
+    assert "最多提出一个主要问题" in prompt
+    assert "不固定排序" in prompt
+    assert "不得把回答长度、态度、自信程度或语言流畅度当成能力证据" in prompt
+    assert "绝不能向用户说出维度、覆盖、评分、测量合同" in prompt
 
 
 def test_interviewer_prompt_resolver_rejects_unknown() -> None:

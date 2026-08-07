@@ -225,6 +225,52 @@ NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5 = (
 )
 
 
+_V6_0_5_OPENING_POLICY = """开场时不要把谈话称为考试、测验、评估或任何类别的测评，也不要预设谈话主题；在逐字稿为空时，
+只用真诚、简洁、开放的邀请开始，让用户感到被认真对待。"""
+
+
+_V6_1_0_OPENING_POLICY = """开场时不要把谈话称为考试、测验、评估或任何类别的测评。逐字稿为空时，开场必须简洁完成三件事：
+说明这里没有标准答案、你更关注对方怎样作出判断；说明接下来一次只问一个问题；邀请对方想起最近一件认真权衡过的
+真实、具体事情，并只问“当时最难判断的是什么？”。不得用泛泛的自由聊天邀请替代这次真实事件邀请。"""
+
+
+_V6_0_5_OBSERVATION_POLICY = """你在心里留意以下六个观察视角，但绝不能向用户说出维度、覆盖、评分、测量合同，
+也不能为了补足某项而突兀换题："""
+
+
+_V6_1_0_EVENT_POLICY = """用户开始讲述后，默认围绕同一件真实事件自然深入。只有用户主动更换事件、明确拒绝继续，或原事件确实无法展开时，
+才可以更换事件；不得因为某个观察视角尚未出现而突然换题。
+
+每个正常探查回合只选择一种主要动作：澄清真实情境与待决问题、核查具体信息或依据、深入理由与条件或反例、
+探索相关方与冲突或权衡、具体化行动与优先级或备选、探查会改变判断的新信息或调整条件，或者自然结束。
+这些动作只作为后台柔性主线，不固定排序，也绝不能向用户说出动作名称。
+
+若用户只说原则而没有经历，温和请其回到一次真实发生的事情；若用户跑题，简短接住后在一轮内回到原事件；
+若只有结论而没有依据，只追问形成判断的一条具体信息或经历；若长回答包含多个焦点，只请其选出对当时决定影响最大的一个；
+若方案没有边界，只追问会使其重新考虑的情况。每次只拉回一个焦点，不给答题示例或高分模板。
+
+正常探查回复通常只用 1—2 句话，尽量控制在 35—90 个汉字，并且最多提出一个主要问题。处理用户纠正、拒绝、没听懂、
+明确情绪或需要停顿时，仍应优先回应用户意图；这种回应可以更短，也可以不附加问题。不得把回答长度、态度、自信程度或语言流畅度当成能力证据。"""
+
+
+if _V6_0_5_OPENING_POLICY not in NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5:
+    raise RuntimeError("v6.0.5 opening policy source block changed")
+if _V6_0_5_OBSERVATION_POLICY not in NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5:
+    raise RuntimeError("v6.0.5 observation policy source block changed")
+
+NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_0 = (
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5.replace(
+        _V6_0_5_OPENING_POLICY,
+        _V6_1_0_OPENING_POLICY,
+        1,
+    ).replace(
+        _V6_0_5_OBSERVATION_POLICY,
+        _V6_1_0_EVENT_POLICY + "\n\n" + _V6_0_5_OBSERVATION_POLICY,
+        1,
+    )
+)
+
+
 _NATURAL_INTERVIEWER_PROMPTS: dict[str, tuple[str, str]] = {
     "v6.0.3": (
         "natural_interviewer_v6.0.3",
@@ -237,6 +283,10 @@ _NATURAL_INTERVIEWER_PROMPTS: dict[str, tuple[str, str]] = {
     "v6.0.5": (
         "natural_interviewer_v6.0.5",
         NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5,
+    ),
+    "v6.1.0": (
+        "natural_interviewer_v6.1.0",
+        NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_0,
     ),
 }
 
@@ -516,6 +566,17 @@ class ModelGatewayService:
         if not transcript:
             name = str(participant.get("display_name") or "").strip()
             greeting = f"你好，{name}。" if name else "你好。"
+            if NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.1.0":
+                return NaturalInterviewerOutput(
+                    interviewer_message=(
+                        greeting
+                        + "这里没有标准答案，我更想了解你是怎样作出判断的；"
+                        "接下来我会一次只问一个问题。请想起最近一件你认真权衡过的"
+                        "真实事情，当时最难判断的是什么？"
+                    ),
+                    session_action="continue",
+                    finish_reason=None,
+                )
             return NaturalInterviewerOutput(
                 interviewer_message=(
                     greeting + "我会先听你正在认真思考的一件事。最近有什么让你想多说一点？"

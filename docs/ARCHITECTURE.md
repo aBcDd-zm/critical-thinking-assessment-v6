@@ -6,7 +6,7 @@
 flowchart LR
     U["用户 / 可编辑文本输入"] --> C["知情同意与会话 API"]
     C --> S["V6 会话编排\n状态、幂等、安全、审计"]
-    S --> I["natural_interviewer_v6.0.4 (default)\n完整逐字稿 → 一次自然回应"]
+    S --> I["natural_interviewer_v6.0.5 (default)\nv6.1.0 light-guided candidate"]
     I --> S
     S --> D[("Session / Turns / Traces\nPrompt and model versions")]
     S --> F["冻结 transcript + SHA-256"]
@@ -17,7 +17,7 @@ flowchart LR
 
 - 用户只看到“澄澄”、当前已完成的问答轮数和必要的输入提示，不接触六维、评分或后台审计字段；轮数不表示阶段、配额或上限。
 - 访谈期模型读完整逐字稿，只返回用户实际可见的自然回应及 `continue|finish`。它不接收目标维度、缺失维度、候选问题、coverage、阶段命令、每维预算或固定轮次。
-- `NATURAL_INTERVIEWER_PROMPT_VERSION` 默认为 `v6.0.4`；只可显式回滚到完整保留的 `v6.0.3`。新版只改变自然承接、纠正优先和问题信息价值约束，不引入题库、阶段、维度轮询或第二模型。
+- `NATURAL_INTERVIEWER_PROMPT_VERSION` 默认为 `v6.0.5`；`v6.1.0` 仅作为显式启用的轻引导候选，`v6.0.4` 与 `v6.0.3` 完整保留为回滚版本。V6.1.0 只增加真实事件锚定、同一事件柔性主线和极简拉回，不引入题库、阶段、维度轮询或第二模型。
 - 终评与访谈官是独立调用。评分器读取冻结后的完整逐字稿和固定测量合同，不读取访谈官的内部评价作为证据。
 
 ## 状态与事务边界

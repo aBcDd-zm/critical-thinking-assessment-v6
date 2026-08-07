@@ -103,15 +103,14 @@ const remainingAnswerCharacters = computed(() => (
     : Math.max(0, MIN_ANSWER_VISIBLE_CHARACTERS - visibleDraftLength.value)
 ));
 const answerRequirementHint = computed(() => {
-  if (isFirstAnswer.value) return "首次回答可以简短";
+  if (isFirstAnswer.value) return "首次可简短；之后每次至少 20 字";
   if (isUncertaintyAnswer.value) return "可以直接提交";
-  return `至少 ${MIN_ANSWER_VISIBLE_CHARACTERS} 字${remainingAnswerCharacters.value > 0 ? `，还差 ${remainingAnswerCharacters.value} 字` : ""}`;
+  if (remainingAnswerCharacters.value > 0) {
+    return `至少 ${MIN_ANSWER_VISIBLE_CHARACTERS} 字，还差 ${remainingAnswerCharacters.value} 字`;
+  }
+  return "可以提交";
 });
-const answerPlaceholder = computed(() => (
-  isFirstAnswer.value
-    ? "按你此刻真实的想法说就好…"
-    : "按你此刻真实的想法说就好（至少 20 字）…"
-));
+const answerPlaceholder = "按你此刻真实的想法说就好…";
 const canSubmit = computed(() => (
   draft.value.trim().length > 0
   && meetsAnswerRequirement.value
@@ -594,6 +593,7 @@ onBeforeUnmount(() => {
             rows="4"
             maxlength="4000"
             :placeholder="answerPlaceholder"
+            aria-describedby="answer-requirement"
             :disabled="sending || finalizing || checkingReadiness"
             @input="onDraftInput"
             @keydown="onAnswerKeydown"
@@ -613,8 +613,14 @@ onBeforeUnmount(() => {
               <small v-if="voice.error.value">{{ voice.error.value }}</small>
               <small v-else-if="voiceWasUsed">转写已放入文本框，请确认或修改后手动提交</small>
             </div>
-            <span class="char-count" :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }">
-              {{ visibleDraftLength }}/4000 · {{ answerRequirementHint }}
+            <span
+              id="answer-requirement"
+              class="char-count"
+              :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }"
+              role="status"
+              aria-live="polite"
+            >
+              {{ answerRequirementHint }}
             </span>
             <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">
               {{ checkingReadiness ? "正在检查…" : "结束并生成报告" }}

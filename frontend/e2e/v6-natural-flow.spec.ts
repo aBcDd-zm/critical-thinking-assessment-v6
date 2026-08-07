@@ -129,6 +129,8 @@ async function installMockBackend(page: Page) {
 
 async function startInterview(page: Page) {
   await page.goto("/assessment");
+  await expect(page.getByText("在访谈对话中展现你的思维", { exact: true })).toBeVisible();
+  await expect(page.getByText("请从一件真实、具体、需要判断的经历说起", { exact: true })).toBeVisible();
   await page.getByLabel("用户名").fill("本地流程验收");
   await page.getByLabel(/我已阅读并同意/).check();
   await page.getByRole("button", { name: /开始访谈/ }).click();
@@ -146,7 +148,7 @@ test("consent → natural conversation → model closing → evidence report", a
   await expect(page.getByText("已进行 0 轮问答", { exact: true })).toBeVisible();
   await page.getByLabel("你的回答").fill("我还在想。");
   await expect(page.getByRole("button", { name: /提交回答/ })).toBeEnabled();
-  await expect(page.getByText("首次回答可以简短", { exact: false })).toBeVisible();
+  await expect(page.getByText("首次可简短；之后每次至少 20 字", { exact: true })).toBeVisible();
   await page.getByLabel("你的回答").press("Enter");
   await expect(page.getByText("听起来这对你很重要；你现在最在意的是什么？")).toBeVisible();
   await expect(page.getByText("已进行 1 轮问答", { exact: true })).toBeVisible();
@@ -163,6 +165,24 @@ test("consent → natural conversation → model closing → evidence report", a
   expect(state.answers).toBe(2);
   expect(state.payloads).toHaveLength(2);
   expect(state.payloads.every((payload) => !JSON.stringify(payload).includes("coverage"))).toBe(true);
+});
+
+test("mobile keeps the later 20-character requirement visible", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => localStorage.setItem("v6:tts-enabled", "false"));
+  await installMockBackend(page);
+  await startInterview(page);
+
+  await page.getByLabel("你的回答").fill("我还在想。");
+  await page.getByLabel("你的回答").press("Enter");
+  await expect(page.getByText("已进行 1 轮问答", { exact: true })).toBeVisible();
+
+  await page.getByLabel("你的回答").fill("我再想想。");
+  const requirement = page.locator("#answer-requirement");
+  await expect(requirement).toBeVisible();
+  await expect(requirement).toHaveText(/至少 20 字，还差 \d+ 字/);
+  await expect(requirement).not.toContainText("4000");
+  await expect(page.getByRole("button", { name: /提交回答/ })).toBeDisabled();
 });
 
 test("participant can exit without generating a report", async ({ page }) => {

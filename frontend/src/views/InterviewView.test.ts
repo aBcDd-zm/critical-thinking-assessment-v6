@@ -334,7 +334,9 @@ describe("InterviewView", () => {
     const textarea = wrapper.get("textarea");
     await textarea.setValue("我还在想。");
     expect(wrapper.get("button.send-button").attributes("disabled")).toBeUndefined();
-    expect(wrapper.get(".char-count").text()).toContain("首次回答可以简短");
+    expect(wrapper.get(".char-count").text()).toBe("首次可简短；之后每次至少 20 字");
+    expect(wrapper.get(".char-count").text()).not.toContain("4000");
+    expect(textarea.attributes("aria-describedby")).toBe("answer-requirement");
     expect(textarea.attributes("placeholder")).not.toContain("至少 20 字");
 
     await textarea.trigger("keydown", { key: "Enter", shiftKey: true });
@@ -365,16 +367,20 @@ describe("InterviewView", () => {
     await flushPromises();
 
     const textarea = wrapper.get("textarea");
-    expect(textarea.attributes("placeholder")).toContain("至少 20 字");
+    expect(textarea.attributes("placeholder")).not.toContain("至少 20 字");
     await textarea.setValue("我还在想。");
     expect(wrapper.get("button.send-button").attributes("disabled")).toBeDefined();
-    expect(wrapper.get(".char-count").text()).toContain("还差");
+    expect(wrapper.get(".char-count").text()).toMatch(/^至少 20 字，还差 \d+ 字$/);
     await textarea.trigger("keydown", { key: "Enter" });
     await flushPromises();
     expect(mocks.submitTurnStream).not.toHaveBeenCalled();
 
     await textarea.setValue("我不知道，但我会先核实。");
     expect(wrapper.get("button.send-button").attributes("disabled")).toBeDefined();
+
+    await textarea.setValue("我会先核实相关信息，再比较不同选择可能带来的具体影响和限制。");
+    expect(wrapper.get("button.send-button").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get(".char-count").text()).toBe("可以提交");
 
     await textarea.setValue("我暂时不知道。");
     expect(wrapper.get("button.send-button").attributes("disabled")).toBeUndefined();

@@ -1,7 +1,8 @@
 # 思衡 V6 Prompt 交接
 
-默认版本：`natural_interviewer_v6.0.4`、`natural_final_scorer_v6.1.0`
-可回滚访谈版本：`natural_interviewer_v6.0.3`
+默认版本：`natural_interviewer_v6.0.5`、`natural_final_scorer_v6.1.0`
+轻引导候选：`natural_interviewer_v6.1.0`
+可回滚访谈版本：`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
 适用分支：`system/v6-natural-interview-demo`
 
 ## 设计意图
@@ -28,15 +29,26 @@ V6 不是把 V5 的控制器放宽一点。它明确取消“服务端告诉模�
 
 ### 版本选择与回滚
 
-运行时只允许选择已冻结的 `v6.0.3|v6.0.4`：
+运行时只允许选择版本化的 `v6.0.3|v6.0.4|v6.0.5|v6.1.0`：
 
 ```text
-NATURAL_INTERVIEWER_PROMPT_VERSION=v6.0.4
+NATURAL_INTERVIEWER_PROMPT_VERSION=v6.1.0
 ```
 
-默认使用 `v6.0.4`。若新版发生系统性对话回归，部署环境可显式改为 `v6.0.3`
-并重启后端；旧版 Prompt 文本保持完整，无需改代码。每个 trace 仍记录实际使用的
+默认使用 `v6.0.5`；`v6.1.0` 只用于本地或测试环境验收，不随代码变更自动切换生产默认。若候选版发生系统性对话回归，环境可显式改回 `v6.0.5`、`v6.0.4` 或 `v6.0.3`
+并重启后端；旧版 Prompt 文本和哈希保持完整，无需改代码。每个 trace 仍记录实际使用的
 `prompt_template_id` 与 `prompt_version`，不得将两个版本的数据当作同一干预条件。
+
+### `natural_interviewer_v6.1.0` 的轻引导约束
+
+- 首问简洁说明没有标准答案、关注判断过程、一次只问一个问题，并邀请用户选择一件真实、具体、认真权衡过的事件。
+- 默认围绕同一事件推进，只在用户主动切换、拒绝继续或事件确实无法展开时换题。
+- 后台可柔性探索情境、依据、理由与反例、相关方与权衡、行动以及调整条件；不固定排序，也不向用户泄露动作名或六维名称。
+- 抽象、跑题、无依据或多焦点回答只做一次单焦点拉回。正常探查回复通常 1—2 句话、35—90 个汉字、最多一个主要问题。
+- 继续保留 V6.0.5 的共情、纠正、拒绝、解释请求与停顿优先规则；这些回合可以不附加问题。
+- 不把回答长度、态度、自信或语言流畅度当成能力证据；不提供答题示例或高分模板。
+
+完整 Prompt 文本以 `backend/app/services/model_gateway.py` 中的版本常量为准；自动化测试固定校验 V6.0.3、V6.0.4、V6.0.5 的历史 SHA-256，避免候选开发破坏回滚资产。
 
 ### `natural_interviewer_v6.0.4` 的系统约束
 
