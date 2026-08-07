@@ -17,6 +17,7 @@ from app.api import router as api_router
 from app.core.config import settings
 from app.services import session_service as session_service_module
 from app.models import (
+    AgentTrace,
     AssessmentReport,
     AssessmentSession,
     DialogueTurn,
@@ -35,9 +36,6 @@ from app.schemas import (
 from app.services.model_gateway import (
     ModelGatewayError,
     ModelGatewayService,
-    NATURAL_INTERVIEWER_PROMPT_ID,
-    NATURAL_INTERVIEWER_PROMPT_VERSION,
-    NATURAL_INTERVIEWER_SYSTEM_PROMPT,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_3,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_4,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5,
@@ -137,13 +135,15 @@ def test_consent_and_model_generated_opening_are_natural_only(client) -> None:
     opening = detail["traces"][0]
     assert opening["action"] == "natural_opening"
     assert opening["prompt_template_id"] == "natural_interviewer_v6.0.5"
+    assert opening["output_contract"]["attempt_count"] == 1
 
 
-def test_default_interviewer_prompt_v6_0_5_preserves_empathy_without_formulaic_acknowledgement() -> None:
-    prompt = "".join(NATURAL_INTERVIEWER_SYSTEM_PROMPT.split())
+def test_preserved_interviewer_prompt_v6_0_5_keeps_its_original_text() -> None:
+    prompt_id, version, source = resolve_natural_interviewer_prompt("v6.0.5")
+    prompt = "".join(source.split())
 
-    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.5"
-    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.5"
+    assert prompt_id == "natural_interviewer_v6.0.5"
+    assert version == "v6.0.5"
     assert "有来源支持" in prompt
     assert "不需要通过复述、改写或总结" in prompt
     assert "有原话依据" in prompt
@@ -217,13 +217,16 @@ def test_interviewer_prompt_resolver_preserves_old_versions_and_adds_v6_1_1() ->
     assert version == "v6.1.1"
     assert prompt == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
-        "e336fd8dc6247d0f0dba3c3ce9924c403ee3cdd0f2a866325106aa3ff55418e6"
+        "7bc38dc4853a850ac8870927e3a5b8a7e140a061ac9630dd19702373aa57efe5"
     )
     assert "这里没有标准答案" in compact_prompt
     assert "真实、具体、需要认真判断或权衡的事情" in compact_prompt
     assert "同一件真实事件" in compact_prompt
     assert "泛泛的日常琐事、抱怨或原则" in compact_prompt
     assert "在一轮内拉回原事件" in compact_prompt
+    assert "35—90个汉字" in compact_prompt
+    assert "最多提出一个主要问题" in compact_prompt
+    assert "不得把回答长度、态度、自信程度或语言流畅度当成能力证据" in compact_prompt
     assert "探索一个尚未解决的关键焦点，或者提出结束建议" in compact_prompt
     assert "也只能提出“建议结束”" in compact_prompt
     assert "映射为suggest_finish的模型意图" in compact_prompt
@@ -246,6 +249,7 @@ def test_v6_1_1_mock_anchors_the_opening_and_confirms_before_closure() -> None:
     )
 
     assert "没有标准答案" in opening.interviewer_message
+    assert "一次只问一个问题" in opening.interviewer_message
     assert "真实、具体" in opening.interviewer_message
     assert "当时最难判断的是什么" in opening.interviewer_message
     assert opening.session_action == "continue"
@@ -501,6 +505,54 @@ def test_interview_payload_has_no_controller_fields_and_idempotently_replays(cli
     assert replay.text == first.text
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert snapshot["user_answer_count"] == 1
+
+
+def test_existing_session_keeps_opening_prompt_version_after_default_changes(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    with TestSession() as db:
+        session = db.scalar(
+            select(AssessmentSession).where(AssessmentSession.uuid == session_uuid)
+        )
+        assert session
+        opening_trace = db.scalar(
+            select(AgentTrace).where(
+                AgentTrace.session_id == session.id,
+                AgentTrace.action == "natural_opening",
+            )
+        )
+        assert opening_trace
+        opening_trace.prompt_template_id = "natural_interviewer_v6.0.5"
+        opening_trace.prompt_version = "v6.0.5"
+        db.commit()
+
+    gateway = api_router.sessions.orchestrator.gateway
+    original = gateway.generate_interviewer
+    selected_versions: list[str | None] = []
+
+    def capture(payload, **kwargs):
+        selected_versions.append(kwargs.get("prompt_version"))
+        return original(payload, **kwargs)
+
+    monkeypatch.setattr(gateway, "generate_interviewer", capture)
+    response = send(
+        client,
+        session_uuid,
+        "这是部署前建立的测试会话，我希望继续沿用开场时的访谈规则。",
+        "client-turn-bound-prompt",
+    )
+
+    assert response.status_code == 200
+    assert parse_events(response)[-1]["event"] == "agent_completed"
+    assert selected_versions == ["v6.0.5"]
+    login_admin(client)
+    detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
+    turn_trace = next(
+        trace for trace in detail["traces"] if trace["action"] == "natural_interview_turn"
+    )
+    assert turn_trace["prompt_version"] == "v6.0.5"
+    assert turn_trace["output_contract"]["attempt_count"] == 1
 
 
 def test_slow_model_flushes_saved_events_before_completion_and_keeps_working(
@@ -1124,6 +1176,7 @@ def test_model_natural_close_is_an_idempotent_suggestion_until_accepted(
         "model_session_action": "finish",
         "model_finish_reason": "natural_closure",
         "quality_flags": ["closure_suggestion_message_normalized"],
+        "attempt_count": 1,
     }
     accepted_traces = [
         item
@@ -1494,6 +1547,46 @@ def test_transient_model_connection_error_has_a_clear_recoverable_message(
     assert event["message"] == "与访谈模型的连接暂时中断，已保存你的回答。请重试。"
 
 
+def test_empty_model_response_has_a_distinct_recoverable_message_and_trace_stats(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    gateway = api_router.sessions.orchestrator.gateway
+
+    def empty_response(_payload, **_kwargs):
+        raise ModelGatewayError(
+            "model_empty_response",
+            transient=True,
+            error_code="model_empty_response",
+            latency_ms=24_321,
+            attempt_count=2,
+        )
+
+    monkeypatch.setattr(gateway, "generate_interviewer", empty_response)
+    failed = send(
+        client,
+        session_uuid,
+        "我已经说明了这次真实决定，也补充了当时核对过的信息和判断依据。",
+        "client-turn-empty-response",
+    )
+
+    event = parse_events(failed)[-1]
+    assert event["code"] == "model_empty_response"
+    assert event["message"] == "模型暂时未返回有效内容；你的回答已保存，可以安全重试。"
+    assert event["data"]["attempt_count"] == 2
+    assert event["data"]["latency_ms"] == 24_321
+    login_admin(client)
+    detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
+    failed_trace = next(
+        trace
+        for trace in detail["traces"]
+        if trace["action"] == "natural_interview_turn_failed"
+    )
+    assert failed_trace["latency_ms"] == 24_321
+    assert failed_trace["output_contract"]["attempt_count"] == 2
+    assert failed_trace["output_contract"]["error_code"] == "model_empty_response"
+
+
 def test_fortieth_saved_turn_can_recover_with_the_same_id_after_model_failure(
     client, monkeypatch
 ) -> None:
@@ -1740,7 +1833,7 @@ def test_model_gateway_repairs_json_at_most_once(monkeypatch) -> None:
     monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
     calls: list[list[dict[str, str]]] = []
 
-    def malformed_twice(messages):
+    def malformed_twice(messages, **_kwargs):
         calls.append(list(messages))
         return {
             "interviewer_message": "你想从哪里说起？",
@@ -1765,7 +1858,7 @@ def test_model_gateway_retries_transient_transport_once_without_json_repair(monk
     monkeypatch.setattr("app.services.model_gateway.time.sleep", lambda _seconds: None)
     calls: list[list[dict[str, str]]] = []
 
-    def fail_once_then_return(messages):
+    def fail_once_then_return(messages, **_kwargs):
         calls.append([dict(message) for message in messages])
         if len(calls) == 1:
             raise ModelGatewayError("model_transport_failed:ConnectError:EOF", transient=True)

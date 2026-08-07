@@ -254,6 +254,7 @@ class SessionService:
                     "session_action": opening.session_action,
                     "finish_reason": opening.finish_reason,
                     "quality_flags": opening.quality_flags,
+                    "attempt_count": opening.attempt_count,
                 },
                 renderer_status="repaired" if opening.repair_used else "accepted",
                 repair_used=opening.repair_used,
@@ -560,6 +561,7 @@ class SessionService:
                             "model_session_action": result.model_session_action,
                             "model_finish_reason": result.model_finish_reason,
                             "quality_flags": result.quality_flags,
+                            "attempt_count": result.attempt_count,
                         },
                         renderer_status="repaired" if result.repair_used else "accepted",
                         repair_used=result.repair_used,
@@ -640,6 +642,11 @@ class SessionService:
                         failed_prompt_id, _, _ = resolve_natural_interviewer_prompt(
                             failed_prompt_version
                         )
+                        error_code = str(
+                            getattr(exc, "error_code", type(exc).__name__)
+                        )
+                        attempt_count = int(getattr(exc, "attempt_count", 0) or 0)
+                        latency_ms = int(getattr(exc, "latency_ms", 0) or 0)
                         db.add(
                             AgentTrace(
                                 session_id=failed.session_id,
@@ -665,11 +672,14 @@ class SessionService:
                                 output_contract={
                                     "status": "failed",
                                     "exception_type": type(exc).__name__,
+                                    "error_code": error_code,
+                                    "attempt_count": attempt_count,
                                     "recoverable": True,
                                 },
                                 renderer_status="failed",
                                 repair_used=bool(getattr(exc, "repair_used", False)),
                                 fallback_reason=failed.error_message,
+                                latency_ms=latency_ms,
                             )
                         )
                     db.commit()

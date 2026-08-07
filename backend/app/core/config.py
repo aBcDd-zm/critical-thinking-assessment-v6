@@ -27,10 +27,17 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_base_url: str = "https://api.deepseek.com"
     # Final scoring includes the full six-dimension rubric and can take
-    # longer than an interviewer turn. Keep this below the 120s /finalize
-    # reverse-proxy timeout so the server can return a retryable result.
+    # longer than an interviewer turn. Synchronous scoring routes keep a
+    # 200-second reverse-proxy budget for at most two 90-second attempts.
     deepseek_timeout_seconds: float = 90.0
     deepseek_max_tokens: int = 3000
+    # Interview turns use a deliberately smaller, non-thinking profile. The
+    # first request receives at most 15 seconds and a single retry may use the
+    # rest of the 25-second wall-clock budget.
+    deepseek_interview_thinking: Literal["enabled", "disabled"] = "disabled"
+    deepseek_interview_max_tokens: int = 512
+    deepseek_interview_primary_timeout_seconds: float = 15.0
+    deepseek_interview_total_timeout_seconds: float = 25.0
     # Final scoring spends tokens on six dimensions plus exact evidence quotes;
     # keep its completion budget separate from short interviewer turns.
     deepseek_scoring_max_tokens: int = 12000

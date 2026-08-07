@@ -187,6 +187,7 @@ class InterviewResult:
     prompt_version: str
     repair_used: bool
     latency_ms: int
+    attempt_count: int
     quality_flags: list[str]
     input_fingerprint: str
     model_session_action: str | None
@@ -437,6 +438,7 @@ class InterviewOrchestrator:
                 prompt_version="v6.0.0",
                 repair_used=False,
                 latency_ms=0,
+                attempt_count=0,
                 quality_flags=["safety_stopped"],
                 input_fingerprint=hashlib.sha256(user_turn.content.encode("utf-8")).hexdigest(),
                 model_session_action=None,
@@ -635,6 +637,7 @@ class InterviewOrchestrator:
             prompt_version=resolved_version,
             repair_used=call.repair_used,
             latency_ms=call.latency_ms,
+            attempt_count=call.attempt_count,
             quality_flags=quality_flags,
             input_fingerprint=input_fingerprint,
             model_session_action=call.output.session_action,

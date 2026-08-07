@@ -421,7 +421,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
   .message { max-width: 93%; }
   .answer-composer { padding: 16px; }
   .composer-actions { grid-template-columns: 1fr auto; }
-  .char-count { display: block; grid-column: 1 / -1; font-size: 12px; }
+  .char-count { display: block; grid-column: 1 / -1; justify-self: start; font-size: 12px; }
   .report-header, .report-section-heading, .admin-title, .detail-title { align-items: start; flex-direction: column; }
   .report-shell { width: calc(100% - 28px); padding-top: 18px; }
   .report-summary { padding: 24px 18px; }

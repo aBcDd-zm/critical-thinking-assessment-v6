@@ -51,6 +51,29 @@ const ttsEnabled = ref(localStorage.getItem("v6:tts-enabled") !== "false");
 const leaving = ref(false);
 const playback = useSpeechPlayback();
 let activeController: AbortController | null = null;
+let savedWaitTimer: number | null = null;
+let extendedWaitTimer: number | null = null;
+
+function clearInterviewWaitTimers() {
+  if (savedWaitTimer !== null) window.clearTimeout(savedWaitTimer);
+  if (extendedWaitTimer !== null) window.clearTimeout(extendedWaitTimer);
+  savedWaitTimer = null;
+  extendedWaitTimer = null;
+}
+
+function startInterviewWaitTimers() {
+  clearInterviewWaitTimers();
+  savedWaitTimer = window.setTimeout(() => {
+    if (sending.value && !leaving.value) {
+      notice.value = "正在整理这条回答；本次提交已在本地保留。";
+    }
+  }, 8_000);
+  extendedWaitTimer = window.setTimeout(() => {
+    if (sending.value && !leaving.value) {
+      notice.value = "仍在处理中；如果中断，可以使用原提交编号安全重试。";
+    }
+  }, 20_000);
+}
 
 const MIN_ANSWER_VISIBLE_CHARACTERS = 20;
 const MIN_ANSWER_MESSAGE = `从第二个回答起，每次回答至少需要 ${MIN_ANSWER_VISIBLE_CHARACTERS} 个字。`;
@@ -110,15 +133,14 @@ const remainingAnswerCharacters = computed(() => (
     : Math.max(0, MIN_ANSWER_VISIBLE_CHARACTERS - visibleDraftLength.value)
 ));
 const answerRequirementHint = computed(() => {
-  if (isFirstAnswer.value) return "首次回答可以简短";
+  if (isFirstAnswer.value) return "首次可简短；之后每次至少 20 字";
   if (isUncertaintyAnswer.value) return "可以直接提交";
-  return `至少 ${MIN_ANSWER_VISIBLE_CHARACTERS} 字${remainingAnswerCharacters.value > 0 ? `，还差 ${remainingAnswerCharacters.value} 字` : ""}`;
+  if (remainingAnswerCharacters.value > 0) {
+    return `至少 ${MIN_ANSWER_VISIBLE_CHARACTERS} 字，还差 ${remainingAnswerCharacters.value} 字`;
+  }
+  return "可以提交";
 });
-const answerPlaceholder = computed(() => (
-  isFirstAnswer.value
-    ? "按你此刻真实的想法说就好…"
-    : "按你此刻真实的想法说就好（至少 20 字）…"
-));
+const answerPlaceholder = "按你此刻真实的想法说就好…";
 const canSubmit = computed(() => (
   draft.value.trim().length > 0
   && meetsAnswerRequirement.value
@@ -257,6 +279,7 @@ function eventDelta(event: TurnStreamEvent): string {
 async function handleEvent(event: TurnStreamEvent) {
   if (event.event === "agent_delta") streamedText.value += eventDelta(event);
   if (event.event === "session_closure_suggested") {
+    clearInterviewWaitTimers();
     const suggestion = closureSuggestionData(event);
     if (
       !suggestion
@@ -270,6 +293,7 @@ async function handleEvent(event: TurnStreamEvent) {
     return;
   }
   if (event.event === "session_finalizing") {
+    clearInterviewWaitTimers();
     const snapshot = finalizingSession(event);
     if (snapshot) {
       session.value = snapshot;
@@ -283,10 +307,12 @@ async function handleEvent(event: TurnStreamEvent) {
     return;
   }
   if (event.event === "error") {
+    clearInterviewWaitTimers();
     const dataMessage = event.data && typeof event.data === "object" ? (event.data as Record<string, unknown>).message : null;
     throw new Error(event.message || (typeof dataMessage === "string" ? dataMessage : "访谈处理出现异常"));
   }
   if (event.event !== "agent_completed") return;
+  clearInterviewWaitTimers();
   const completed = completedData(event);
   if (!completed) throw new Error("服务端未返回已保存的访谈内容");
   streamedText.value = "";
@@ -475,6 +501,7 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
   sending.value = true;
   error.value = "";
   notice.value = restoring ? "正在恢复上次中断的提交…" : "";
+  startInterviewWaitTimers();
   streamedText.value = "";
   const alreadySaved = turns.value.some((turn) => turn.client_turn_id === payload.client_turn_id);
   if (!alreadySaved) {
@@ -511,9 +538,11 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
     }
   } catch (cause) {
     if (!leaving.value) {
+      notice.value = "";
       error.value = cause instanceof ApiError || cause instanceof Error ? cause.message : "提交中断；刷新页面会使用相同编号恢复，不会重复计入。";
     }
   } finally {
+    clearInterviewWaitTimers();
     activeController = null;
     sending.value = false;
   }
@@ -558,6 +587,7 @@ function clearLocalRecovery() {
 async function leaveEarly() {
   if (!window.confirm("退出不会生成报告。已经提交的内容仍会按开始页说明保留，确定退出吗？")) return;
   leaving.value = true;
+  clearInterviewWaitTimers();
   activeController?.abort();
   activeController = null;
   playback.stop();
@@ -621,6 +651,7 @@ onBeforeRouteLeave(async (to) => {
   ) return true;
   if (!window.confirm("离开将退出当前访谈且不生成报告，确定继续吗？")) return false;
   leaving.value = true;
+  clearInterviewWaitTimers();
   activeController?.abort();
   playback.stop();
   voice.stop();
@@ -629,6 +660,7 @@ onBeforeRouteLeave(async (to) => {
   return true;
 });
 onBeforeUnmount(() => {
+  clearInterviewWaitTimers();
   activeController?.abort();
 });
 </script>
@@ -741,6 +773,7 @@ onBeforeUnmount(() => {
             rows="4"
             maxlength="4000"
             :placeholder="answerPlaceholder"
+            aria-describedby="answer-requirement"
             :disabled="sending || finalizing || checkingReadiness || acceptingClosure"
             @input="onDraftInput"
             @keydown="onAnswerKeydown"
@@ -760,8 +793,14 @@ onBeforeUnmount(() => {
               <small v-if="voice.error.value">{{ voice.error.value }}</small>
               <small v-else-if="voiceWasUsed">转写已放入文本框，请确认或修改后手动提交</small>
             </div>
-            <span class="char-count" :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }">
-              {{ visibleDraftLength }}/4000 · {{ answerRequirementHint }}
+            <span
+              id="answer-requirement"
+              class="char-count"
+              :class="{ insufficient: draft.trim() && remainingAnswerCharacters > 0 }"
+              role="status"
+              aria-live="polite"
+            >
+              {{ answerRequirementHint }}
             </span>
             <button class="secondary-button compact-action" type="button" :disabled="!canFinish" @click="finishAndGenerate">
               {{ checkingReadiness ? "正在检查…" : "结束并生成报告" }}

@@ -35,6 +35,7 @@ def test_nginx_keeps_admin_review_protected_and_streaming_unbuffered() -> None:
     nginx = _text("frontend/nginx/default.conf.template")
     frontend_dockerfile = _text("frontend/Dockerfile")
     frontend_http = _text("frontend/src/api/http.ts")
+    admin_location = nginx.split("location ^~ /api/v1/admin", 1)[1].split("}", 1)[0]
 
     assert "auth_basic" not in nginx
     assert '${ADMIN_TOKEN}' not in nginx
@@ -46,7 +47,11 @@ def test_nginx_keeps_admin_review_protected_and_streaming_unbuffered() -> None:
     assert "location = /api/v1/health/db" in nginx
     assert "return 404;" in nginx
     assert "turns:stream$" in nginx
-    assert "/finalize$" in nginx
+    assert "(?:finalize|report-readiness|closure-suggestions/[0-9]+/accept)$" in nginx
+    assert "proxy_read_timeout 200s;" in nginx
+    assert "proxy_send_timeout 200s;" in nginx
+    assert "proxy_read_timeout 200s;" in admin_location
+    assert "proxy_send_timeout 200s;" in admin_location
     assert "proxy_buffering off" in nginx
     assert "proxy_request_buffering off" in nginx
     assert "limit_req zone=turn_submit" in nginx
