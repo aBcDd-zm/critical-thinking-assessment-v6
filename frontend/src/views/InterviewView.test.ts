@@ -5,6 +5,7 @@ import InterviewView from "./InterviewView.vue";
 const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
   checkReportReadiness: vi.fn(),
+  acceptClosureSuggestion: vi.fn(),
   finalizeSession: vi.fn(),
   exitSession: vi.fn(),
   submitTurnStream: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("@/api/session", async (importOriginal) => {
     ...actual,
     getSession: mocks.getSession,
     checkReportReadiness: mocks.checkReportReadiness,
+    acceptClosureSuggestion: mocks.acceptClosureSuggestion,
     finalizeSession: mocks.finalizeSession,
     exitSession: mocks.exitSession,
     submitTurnStream: mocks.submitTurnStream,
@@ -55,6 +57,9 @@ describe("InterviewView", () => {
     });
     mocks.finalizeSession.mockResolvedValue({
       session: { uuid: "session-v6", phase: "completed", turns: [], report_available: true },
+    });
+    mocks.acceptClosureSuggestion.mockResolvedValue({
+      session: { uuid: "session-v6", phase: "completed", turns: [], report_available: true, closure_suggestion: null },
     });
   });
 
@@ -205,7 +210,117 @@ describe("InterviewView", () => {
     expect(wrapper.text()).toContain("语音播报");
   });
 
-  it("automatically requests a report after the interviewer naturally closes", async () => {
+  it("restores a persisted close suggestion after refresh and lets the participant continue", async () => {
+    const fingerprint = "c".repeat(64);
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 1,
+      closure_suggestion: {
+        closure_turn_id: 3,
+        transcript_fingerprint: fingerprint,
+        finish_reason: "natural_closure",
+      },
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user", content: validAnswer },
+        { id: 3, turn_index: 2, role: "assistant", content: "这里似乎是一个自然的停点。", session_action: "suggest_finish", finish_reason: "natural_closure" },
+      ],
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.get(".closure-suggestion-card").text()).toContain("继续交流");
+    expect(wrapper.get(".closure-suggestion-card").text()).toContain("结束并生成报告");
+    expect(wrapper.find("textarea").exists()).toBe(false);
+    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
+    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+
+    await wrapper.get(".closure-suggestion-card .secondary-button").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".closure-suggestion-card").exists()).toBe(false);
+    expect(wrapper.find("textarea").exists()).toBe(true);
+    expect(wrapper.text()).toContain("你可以继续补充");
+    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
+    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("replays one close suggestion idempotently and only accepts it after participant confirmation", async () => {
+    const fingerprint = "d".repeat(64);
+    const suggestedSession = {
+      uuid: "session-v6",
+      phase: "interviewing" as const,
+      user_answer_count: 1,
+      closure_suggestion: {
+        closure_turn_id: 3,
+        transcript_fingerprint: fingerprint,
+        finish_reason: "natural_closure" as const,
+      },
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user" as const, content: validAnswer, client_turn_id: "client-suggest-finish", input_mode: "text" as const, answer_duration_ms: 100 },
+        { id: 3, turn_index: 2, role: "assistant" as const, content: "如果你愿意，我们可以在这里收束。", session_action: "suggest_finish" as const, finish_reason: "natural_closure" as const },
+      ],
+    };
+    mocks.getSession
+      .mockResolvedValueOnce({ uuid: "session-v6", phase: "interviewing", user_answer_count: 0, turns: [openingTurn] })
+      .mockResolvedValueOnce(suggestedSession);
+    mocks.submitTurnStream.mockImplementation(async (_uuid, _payload, onEvent) => {
+      const suggestionEvent = {
+        event: "session_closure_suggested",
+        data: {
+          session_uuid: "session-v6",
+          closure_turn_id: 3,
+          transcript_fingerprint: fingerprint,
+          finish_reason: "natural_closure",
+        },
+      };
+      await onEvent(suggestionEvent);
+      await onEvent(suggestionEvent);
+      await onEvent({
+        event: "agent_completed",
+        data: {
+          turn: suggestedSession.turns[2],
+          session_action: "suggest_finish",
+          finish_reason: "natural_closure",
+          session: suggestedSession,
+        },
+      });
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.findAll(".closure-suggestion-card")).toHaveLength(1);
+    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
+    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+
+    await wrapper.get(".closure-suggestion-card .primary-button").trigger("click");
+    await flushPromises();
+
+    expect(mocks.checkReportReadiness).toHaveBeenCalledTimes(1);
+    expect(mocks.acceptClosureSuggestion).toHaveBeenCalledTimes(1);
+    expect(mocks.acceptClosureSuggestion).toHaveBeenCalledWith(
+      "session-v6",
+      3,
+      { expected_transcript_fingerprint: fingerprint },
+    );
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
+  it("keeps the legacy automatic report path for older prompt versions that already froze the session", async () => {
     const finishedSession = {
       uuid: "session-v6",
       phase: "finalizing",

@@ -21,37 +21,60 @@ describe("ConsentView", () => {
     });
   });
 
-  it("keeps the entry page to essential consent and start controls", async () => {
+  it("shows concise task guidance, evidence boundaries, and explicit consent", async () => {
     const wrapper = mount(ConsentView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
     });
 
-    expect(wrapper.get("h1").text()).toBe("开始访谈");
-    expect(wrapper.text()).toContain("隐私与使用说明");
+    expect(wrapper.get("h1").text()).toBe("开始一次具体的思维访谈");
+    expect(wrapper.text()).toContain("这不是与 AI 随意聊天");
+    expect(wrapper.text()).toContain("需要判断、取舍或行动的具体事情");
+    expect(wrapper.text()).toContain("首答可以简短");
+    expect(wrapper.text()).toContain("至少需要 20 个非空白字符");
+    expect(wrapper.text()).toContain("没有固定题单或轮数");
+    expect(wrapper.text()).toContain("AI 每次只会询问一个主要问题");
+    expect(wrapper.text()).toContain("是否生成报告由你确认");
+    expect(wrapper.text()).toContain("证据有限");
+    expect(wrapper.text()).toContain("探索性、非标准化访谈");
+    expect(wrapper.text()).toContain("隐私摘要");
+    expect(wrapper.text()).toContain("发送给已配置的模型服务");
+    expect(wrapper.text()).toContain("获授权的管理人员可能查看完整逐字稿");
     expect(wrapper.find("details").attributes("open")).toBeUndefined();
-    expect(wrapper.get("input[autocomplete=username]").attributes("required")).toBeDefined();
-    expect(wrapper.text()).not.toContain("自然访谈实验");
+    expect(wrapper.get("input[autocomplete=off]").attributes("required")).toBeDefined();
+    expect(wrapper.get("input[type=checkbox]").attributes("required")).toBeDefined();
     expect(wrapper.text()).not.toContain("复核工作台");
-    expect(wrapper.text()).not.toContain("没有固定题单、阶段或答题次数");
-    expect(wrapper.text()).not.toContain("真实议题");
+    expect(wrapper.text()).not.toContain("问题界定");
+    expect(wrapper.text()).not.toContain("证据评估");
+    expect(wrapper.text()).not.toContain("经科学验证");
     expect(wrapper.text()).not.toContain("8–12");
     expect(wrapper.get("button[type=submit]").attributes("disabled")).toBeDefined();
     expect(wrapper.find("[name=occupation]").exists()).toBe(false);
 
-    await wrapper.get("input[autocomplete=username]").setValue("本地统计样本");
+    await wrapper.get("input[autocomplete=off]").setValue("参与编号-07");
     await wrapper.get("input[type=checkbox]").setValue(true);
     await wrapper.get("form").trigger("submit");
     await flushPromises();
 
     expect(mocks.createSession).toHaveBeenCalledWith({
-      consent_version: "v6-natural-interview-2026-08",
+      consent_version: "v6-natural-interview-guidance-2026-08",
       consent_given: true,
-      participant: { display_name: "本地统计样本" },
+      participant: { display_name: "参与编号-07" },
     });
     const request = mocks.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(JSON.stringify(request)).not.toContain("occupation");
     expect(JSON.stringify(request)).not.toContain("identity_type");
     expect(localStorage.getItem("v6:last-session")).toBe("session-v6");
     expect(mocks.push).toHaveBeenCalledWith("/assessment/session/session-v6");
+  });
+
+  it("offers the saved session before a participant starts another one", () => {
+    localStorage.setItem("v6:last-session", "saved-session");
+
+    const wrapper = mount(ConsentView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+
+    expect(wrapper.get(".resume-banner").text()).toContain("检测到一段未完成的访谈");
+    expect(wrapper.get(".resume-banner").text()).toContain("继续上次访谈");
   });
 });

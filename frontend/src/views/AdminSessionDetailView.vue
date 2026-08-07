@@ -30,7 +30,13 @@ const scores = ref<ExpertScore[]>(DIMENSIONS.map((item) => ({ dimension_key: ite
 const participant = computed(() => detail.value?.participant ?? {});
 const naturalTraces = computed(() =>
   [...(detail.value?.traces ?? [])]
-    .filter((trace) => ["natural_opening", "natural_interview_turn", "user_requested_finalize"].includes(trace.action ?? ""))
+    .filter((trace) => [
+      "natural_opening",
+      "natural_interview_turn",
+      "natural_close_suggested",
+      "user_accepted_closure_suggestion",
+      "user_requested_finalize",
+    ].includes(trace.action ?? ""))
     .sort((a, b) => (a.turn_index ?? -1) - (b.turn_index ?? -1)),
 );
 const scoringRuns = computed(() =>
@@ -85,6 +91,13 @@ function phaseName(value?: string) {
 
 function sourceName(value?: string) {
   return value === "user" || !value ? "用户原话" : value;
+}
+
+function sessionActionName(value?: unknown) {
+  if (value === "suggest_finish") return "建议结束";
+  if (value === "finish") return "结束";
+  if (value === "continue") return "继续";
+  return "—";
 }
 
 async function load() {
@@ -217,10 +230,10 @@ onMounted(load);
 
       <section v-else-if="activeTab === 'interview'" class="evidence-review">
         <article class="natural-audit-card">
-          <div class="section-heading"><div><span class="eyebrow">NATURAL INTERVIEW AUDIT</span><h2>访谈运行记录</h2></div><p>这里只记录模型实际的结束选择、质量标记与硬约束；不展示题库、目标维度或后台选题。</p></div>
+          <div class="section-heading"><div><span class="eyebrow">NATURAL INTERVIEW AUDIT</span><h2>访谈运行记录</h2></div><p>这里记录模型实际的继续或结束建议、参与者确认与质量标记；不展示题库、目标维度或后台选题。</p></div>
           <div v-for="trace in naturalTraces" :key="trace.id ?? `${trace.action}-${trace.turn_index}`" class="natural-audit-row">
             <strong>{{ trace.turn_index === undefined ? '开场 / 用户结束' : `第 ${trace.turn_index} 次回答后` }}</strong>
-            <span>动作：{{ trace.output_contract?.session_action === 'finish' ? '结束' : '继续' }}</span>
+            <span>动作：{{ sessionActionName(trace.output_contract?.session_action) }}</span>
             <span>原因：{{ trace.output_contract?.finish_reason || '—' }}</span>
             <span>质量标记：{{ trace.output_contract?.quality_flags?.join('；') || '无' }}</span>
             <span>运行记录：{{ trace.action || '—' }}</span>

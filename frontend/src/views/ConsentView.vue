@@ -10,6 +10,7 @@ const submitting = ref(false);
 const error = ref("");
 const recentSession = localStorage.getItem("v6:last-session");
 const canSubmit = computed(() => form.consent && Boolean(form.display_name.trim()));
+const CONSENT_VERSION = "v6-natural-interview-guidance-2026-08";
 
 async function startInterview() {
   if (!canSubmit.value || submitting.value) return;
@@ -17,7 +18,7 @@ async function startInterview() {
   error.value = "";
   try {
     const response = await createSession({
-      consent_version: "v6-natural-interview-2026-08",
+      consent_version: CONSENT_VERSION,
       consent_given: true,
       participant: { display_name: form.display_name.trim() || undefined },
     });
@@ -35,28 +36,61 @@ async function startInterview() {
   <main class="consent-page">
     <section class="consent-card" aria-labelledby="consent-title">
       <a class="brand" href="/assessment" aria-label="思衡首页"><span>思衡</span></a>
-      <h1 id="consent-title">开始访谈</h1>
-      <form @submit.prevent="startInterview">
-        <label>
-          <span>用户名</span>
-          <input v-model="form.display_name" autocomplete="username" maxlength="40" placeholder="用于后续统计，请勿使用真实姓名" required />
+      <header class="consent-intro">
+        <span class="eyebrow">批判性思维探索访谈</span>
+        <h1 id="consent-title">开始一次具体的思维访谈</h1>
+        <p>感谢你参与「思衡」。这不是与 AI 随意聊天：请从工作、学习、项目或生活中，选择一件亲身经历、需要判断、取舍或行动的具体事情，围绕同一件事说明经过、想法和理由。</p>
+      </header>
+
+      <aside v-if="recentSession" class="resume-banner" aria-labelledby="resume-title">
+        <div>
+          <strong id="resume-title">检测到一段未完成的访谈</strong>
+          <span>可继续已保存的对话，也可在下方开始新访谈。</span>
+        </div>
+        <RouterLink class="secondary-button small" :to="`/assessment/session/${recentSession}`">继续上次访谈</RouterLink>
+      </aside>
+
+      <section class="assessment-guide" aria-labelledby="guide-title">
+        <h2 id="guide-title">开始前请了解</h2>
+        <ul class="process-facts">
+          <li>没有标准答案，也不需要专业术语；请按真实想法回答。</li>
+          <li>首答可以简短；第二次起，普通回答至少需要 20 个非空白字符。不知道或没想好时可直接说明。</li>
+          <li>没有固定题单或轮数，AI 每次只会询问一个主要问题；内容初步谈清时会建议结束，是否生成报告由你确认。时长因回答而异。</li>
+        </ul>
+        <p class="evidence-boundary">报告只依据可核对原话；证据不足会标注「证据有限」或「未充分测得」，不代表能力不足。本工具是探索性、非标准化访谈，不用于诊断、人格或智力判断、跨人排名或替代专业决定。</p>
+      </section>
+
+      <form :aria-busy="submitting" @submit.prevent="startInterview">
+        <label for="participant-alias">
+          <span>参与编号或昵称</span>
+          <input
+            id="participant-alias"
+            v-model="form.display_name"
+            aria-describedby="participant-alias-help"
+            autocomplete="off"
+            maxlength="40"
+            placeholder="请勿填写真实姓名"
+            required
+            :disabled="submitting"
+          />
+          <small id="participant-alias-help" class="field-help">请勿填写真实姓名、单位、联系方式或其他可识别个人的信息。</small>
         </label>
+        <p class="privacy-summary"><strong>隐私摘要：</strong>你的昵称和逐字稿会被保存，并发送给已配置的模型服务，用于生成回应和报告。退出前已提交的内容仍可能保留。</p>
         <details class="consent-details">
-          <summary>隐私与使用说明</summary>
-          <p>请使用用户名，不要填写真实姓名、单位、联系方式或其他可识别个人的信息。你的文字会被保存，用于恢复会话和生成报告。</p>
-          <p>当前访谈使用已配置的模型服务；提交后，回答与逐字稿会发送给该服务以生成回应和报告。</p>
-          <p>这是实验性、非标准化访谈；你可以随时结束或退出，结果不能替代专业决定。</p>
+          <summary>查看完整的隐私与使用说明</summary>
+          <p>访谈进行时，截至当时已保存的逐字稿与参与昵称会发送给已配置的模型服务，用于生成下一轮回应；访谈结束后，完整逐字稿会再用于生成报告。</p>
+          <p>系统会保存你主动提交的内容、模型回应、会话状态、报告与必要的技术记录，用于恢复会话和生成报告；获授权的管理人员可能查看完整逐字稿以进行质量复核。</p>
+          <p>你可以主动结束并生成报告，也可以退出且不生成报告；退出不会撤回已经保存或发送的内容。</p>
         </details>
         <label class="consent-check">
-          <input v-model="form.consent" type="checkbox" />
-          <span>我已阅读并同意以上说明，自愿参加本次访谈。</span>
+          <input v-model="form.consent" type="checkbox" required :disabled="submitting" />
+          <span>我已阅读并理解访谈说明、数据处理方式和结果边界，自愿参加。</span>
         </label>
         <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
         <button class="primary-button" type="submit" :disabled="!canSubmit || submitting">
-          {{ submitting ? "正在开始…" : "开始访谈" }}
+          {{ submitting ? "正在开始…" : "我已了解，开始访谈" }}
           <span aria-hidden="true">→</span>
         </button>
-        <RouterLink v-if="recentSession" class="resume-link" :to="`/assessment/session/${recentSession}`">继续上次未完成的访谈</RouterLink>
       </form>
     </section>
   </main>

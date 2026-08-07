@@ -42,6 +42,7 @@ from app.models import (
     utcnow,
 )
 from app.schemas import (
+    AcceptClosureSuggestionRequest,
     AdminLoginRequest,
     CreateSessionRequest,
     ExitRequest,
@@ -438,6 +439,27 @@ async def submit_turn_stream(
 def finalize_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
     try:
         session = sessions.finalize(db, session_uuid)
+        return {"session": session_snapshot(session), "report": serialize_report(session)}
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
+@router.post(
+    "/sessions/{session_uuid}/closure-suggestions/{closure_turn_id}/accept"
+)
+def accept_closure_suggestion(
+    session_uuid: str,
+    closure_turn_id: int,
+    request: AcceptClosureSuggestionRequest,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        session = sessions.accept_closure_suggestion(
+            db,
+            session_uuid,
+            closure_turn_id,
+            request.expected_transcript_fingerprint,
+        )
         return {"session": session_snapshot(session), "report": serialize_report(session)}
     except ServiceError as exc:
         return _service_error(exc)

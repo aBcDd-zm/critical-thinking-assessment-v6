@@ -198,6 +198,14 @@ class SubmitTurnRequest(BaseModel):
         return details[:10]
 
 
+class AcceptClosureSuggestionRequest(BaseModel):
+    expected_transcript_fingerprint: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
 class ReviewRequest(BaseModel):
     status: Literal["pending", "in_review", "approved", "needs_followup"] = "pending"
     decision: Optional[str] = Field(default=None, max_length=80)

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  acceptClosureSuggestion,
   checkReportReadiness,
+  closureSuggestionData,
   completedData,
   createSession,
   finalizingSession,
@@ -68,6 +70,58 @@ describe("V6 natural interview NDJSON client", () => {
     expect(result).not.toHaveProperty("scores");
     expect(result).not.toHaveProperty("quotes");
     expect(result).not.toHaveProperty("transcript_fingerprint");
+  });
+
+  it("accepts one exact persisted closure suggestion with its transcript fingerprint", async () => {
+    const fingerprint = "a".repeat(64);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({
+        session: { uuid: "session-v6", phase: "completed", turns: [], closure_suggestion: null },
+        report: { session_uuid: "session-v6", dimensions: [], strengths: [], priorities: [] },
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+
+    const result = await acceptClosureSuggestion(
+      "session-v6",
+      23,
+      { expected_transcript_fingerprint: fingerprint },
+    );
+
+    expect(fetchMock.mock.calls[0]?.[0]).toContain("/sessions/session-v6/closure-suggestions/23/accept");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      expected_transcript_fingerprint: fingerprint,
+    });
+    expect(result.session.phase).toBe("completed");
+  });
+
+  it("parses a close suggestion without treating it as a finalizing event", () => {
+    const fingerprint = "b".repeat(64);
+    const event: TurnStreamEvent = {
+      event: "session_closure_suggested",
+      data: {
+        session_uuid: "session-v6",
+        closure_turn_id: 17,
+        transcript_fingerprint: fingerprint,
+        finish_reason: "natural_closure",
+      },
+    };
+
+    expect(closureSuggestionData(event)).toEqual({
+      session_uuid: "session-v6",
+      closure_turn_id: 17,
+      transcript_fingerprint: fingerprint,
+      finish_reason: "natural_closure",
+    });
+    expect(finalizingSession(event)).toBeNull();
+    expect(completedData({
+      event: "agent_completed",
+      data: {
+        turn: { turn_index: 2, role: "assistant", content: "我们可以在这里停一停。" },
+        session_action: "suggest_finish",
+        finish_reason: "natural_closure",
+      },
+    })).toMatchObject({ session_action: "suggest_finish", finish_reason: "natural_closure" });
   });
 
   it("keeps the exact idempotency payload and consumes a natural-close stream", async () => {

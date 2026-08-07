@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from sqlalchemy import func, select
@@ -30,16 +30,25 @@ from app.schemas import FinalScorerOutput, NaturalInterviewerOutput
 from app.services.model_gateway import (
     NATURAL_FINAL_SCORER_PROMPT_ID,
     NATURAL_FINAL_SCORER_PROMPT_VERSION,
-    NATURAL_INTERVIEWER_PROMPT_ID,
     NATURAL_INTERVIEWER_PROMPT_VERSION,
     ModelGatewayError,
     ModelGatewayService,
     StructuredCallResult,
     payload_fingerprint,
+    resolve_natural_interviewer_prompt,
 )
 
 
 FINALIZING_MESSAGE = "这段访谈已被冻结，正在仅依据你的原话整理报告。"
+SUGGEST_FINISH_ACTION = "suggest_finish"
+MODEL_NATURAL_CLOSE_REASONS = frozenset({"enough_understanding", "natural_closure"})
+CLOSURE_CONFIRMATION_CONSENT_VERSIONS = frozenset(
+    {"v6-natural-interview-guidance-2026-08"}
+)
+SAFE_CLOSURE_SUGGESTION_MESSAGE = (
+    "这件事已经梳理得比较完整，可以考虑在这里结束；"
+    "如果还有重要内容，你仍可以继续补充。"
+)
 SAFETY_STOP_MESSAGE = (
     "你刚才提到的内容可能涉及当下的人身安全。此刻比继续访谈更重要的是先获得"
     "现实中的即时支持；如果你或他人有立即危险，请联系当地紧急服务、身边可信的人，"
@@ -180,6 +189,8 @@ class InterviewResult:
     latency_ms: int
     quality_flags: list[str]
     input_fingerprint: str
+    model_session_action: str | None
+    model_finish_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -388,12 +399,30 @@ class InterviewOrchestrator:
     def __init__(self, gateway: ModelGatewayService | None = None) -> None:
         self.gateway = gateway or ModelGatewayService()
 
-    def opening(self, participant: dict[str, str]) -> InterviewResult:
+    def opening(
+        self,
+        participant: dict[str, str],
+        *,
+        prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
+    ) -> InterviewResult:
         payload = {"participant": participant, "transcript": []}
-        call = self.gateway.generate_opening(participant)
-        return self._result_from_call(call, input_fingerprint=payload_fingerprint(payload))
+        call = self.gateway.generate_opening(
+            participant,
+            prompt_version=prompt_version,
+        )
+        return self._result_from_call(
+            call,
+            input_fingerprint=payload_fingerprint(payload),
+            prompt_version=prompt_version,
+        )
 
-    def process(self, session: AssessmentSession, user_turn: DialogueTurn) -> InterviewResult:
+    def process(
+        self,
+        session: AssessmentSession,
+        user_turn: DialogueTurn,
+        *,
+        prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
+    ) -> InterviewResult:
         if is_immediate_high_risk(user_turn.content):
             session.phase = "safety_stopped"
             session.finalization_state = "safety_stopped"
@@ -410,6 +439,8 @@ class InterviewOrchestrator:
                 latency_ms=0,
                 quality_flags=["safety_stopped"],
                 input_fingerprint=hashlib.sha256(user_turn.content.encode("utf-8")).hexdigest(),
+                model_session_action=None,
+                model_finish_reason=None,
             )
         payload = {
             "participant": {
@@ -421,12 +452,43 @@ class InterviewOrchestrator:
             },
             "transcript": _transcript_rows(session),
         }
-        call = self.gateway.generate_interviewer(payload)
+        call = self.gateway.generate_interviewer(
+            payload,
+            prompt_version=prompt_version,
+        )
         result = self._result_from_call(
             call,
             input_fingerprint=payload_fingerprint(payload),
             latest_user_text=user_turn.content,
+            prompt_version=prompt_version,
         )
+        confirmation_enabled = (
+            result.prompt_version == "v6.1.1"
+            or session.consent_version in CLOSURE_CONFIRMATION_CONSENT_VERSIONS
+        )
+        if (
+            confirmation_enabled
+            and result.session_action == "finish"
+            and result.finish_reason in MODEL_NATURAL_CLOSE_REASONS
+        ):
+            # A candidate prompt or the matching participant consent enables the
+            # same visible contract: model-authored natural closure is only a
+            # suggestion, never authority to freeze the transcript. Sessions on
+            # the legacy consent retain the old behavior for rollback. The raw
+            # model action remains traceable while the effective action stays open.
+            # Do not rely on a language heuristic to decide whether generated
+            # text accidentally claims that the interview is already over. The
+            # participant-visible suggestion is deterministic; the model's raw
+            # action and reason remain recorded separately in the audit trace.
+            return replace(
+                result,
+                content=SAFE_CLOSURE_SUGGESTION_MESSAGE,
+                session_action=SUGGEST_FINISH_ACTION,
+                quality_flags=[
+                    *result.quality_flags,
+                    "closure_suggestion_message_normalized",
+                ],
+            )
         if result.session_action == "finish":
             session.phase = "finalizing"
             session.finalization_state = "awaiting_scoring"
@@ -557,20 +619,26 @@ class InterviewOrchestrator:
         *,
         input_fingerprint: str,
         latest_user_text: str | None = None,
+        prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
     ) -> InterviewResult:
         quality_flags = _validate_interviewer_output(call.output, latest_user_text)
+        prompt_template_id, resolved_version, _ = resolve_natural_interviewer_prompt(
+            prompt_version
+        )
         return InterviewResult(
             content=call.output.interviewer_message.strip(),
             session_action=call.output.session_action,
             finish_reason=call.output.finish_reason,
             provider=call.provider,
             model=call.model,
-            prompt_template_id=NATURAL_INTERVIEWER_PROMPT_ID,
-            prompt_version=NATURAL_INTERVIEWER_PROMPT_VERSION,
+            prompt_template_id=prompt_template_id,
+            prompt_version=resolved_version,
             repair_used=call.repair_used,
             latency_ms=call.latency_ms,
             quality_flags=quality_flags,
             input_fingerprint=input_fingerprint,
+            model_session_action=call.output.session_action,
+            model_finish_reason=call.output.finish_reason,
         )
 
     @staticmethod
