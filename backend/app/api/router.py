@@ -318,20 +318,34 @@ def _turn_stream_error(exc: Exception) -> dict[str, Any]:
             "message": exc.message,
             "data": {"exception_type": type(exc).__name__},
         }
-    model_connection_interrupted = isinstance(exc, ModelGatewayError) and exc.transient
+    model_empty_response = (
+        isinstance(exc, ModelGatewayError)
+        and exc.error_code == "model_empty_response"
+    )
+    model_connection_interrupted = (
+        isinstance(exc, ModelGatewayError)
+        and exc.transient
+        and not model_empty_response
+    )
+    if model_empty_response:
+        code = "model_empty_response"
+        message = "模型暂时未返回有效内容；你的回答已保存，可以安全重试。"
+    elif model_connection_interrupted:
+        code = "model_connection_interrupted"
+        message = "与访谈模型的连接暂时中断，已保存你的回答。请重试。"
+    else:
+        code = "turn_processing_failed"
+        message = "本轮处理中断，已保留可恢复状态。"
     return {
         "event": "error",
-        "code": (
-            "model_connection_interrupted"
-            if model_connection_interrupted
-            else "turn_processing_failed"
-        ),
-        "message": (
-            "与访谈模型的连接暂时中断，已保存你的回答。请重试。"
-            if model_connection_interrupted
-            else "本轮处理中断，已保留可恢复状态。"
-        ),
-        "data": {"exception_type": type(exc).__name__},
+        "code": code,
+        "message": message,
+        "data": {
+            "exception_type": type(exc).__name__,
+            "error_type": getattr(exc, "error_code", None),
+            "attempt_count": getattr(exc, "attempt_count", 0),
+            "latency_ms": getattr(exc, "latency_ms", 0),
+        },
     }
 
 

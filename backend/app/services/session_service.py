@@ -35,9 +35,8 @@ from app.schemas import (
 from app.services.model_gateway import (
     NATURAL_FINAL_SCORER_PROMPT_ID,
     NATURAL_FINAL_SCORER_PROMPT_VERSION,
-    NATURAL_INTERVIEWER_PROMPT_ID,
-    NATURAL_INTERVIEWER_PROMPT_VERSION,
     ModelGatewayError,
+    resolve_natural_interviewer_prompt,
 )
 from app.services.orchestrator import (
     FinalizationError,
@@ -59,6 +58,7 @@ _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 TECHNICAL_USER_TURN_CAP = 40
 REPORT_READINESS_RULE_VERSION = "final-output-evidence-v1"
 REPORT_READINESS_LEASE_SECONDS = 15 * 60
+LEGACY_INTERVIEWER_PROMPT_VERSION = "v6.0.5"
 
 
 def _report_readiness_asset_fingerprint() -> str:
@@ -190,7 +190,10 @@ class SessionService:
             "collaboration_role": session.collaboration_role or "",
         }
         try:
-            opening = self.orchestrator.opening(participant_payload)
+            opening = self.orchestrator.opening(
+                participant_payload,
+                prompt_version=settings.natural_interviewer_prompt_version,
+            )
         except (ModelGatewayError, InterviewContractError) as exc:
             db.rollback()
             raise ServiceError(
@@ -222,6 +225,7 @@ class SessionService:
                     "session_action": opening.session_action,
                     "finish_reason": opening.finish_reason,
                     "quality_flags": opening.quality_flags,
+                    "attempt_count": opening.attempt_count,
                 },
                 renderer_status="repaired" if opening.repair_used else "accepted",
                 repair_used=opening.repair_used,
@@ -241,6 +245,31 @@ class SessionService:
         if not session:
             raise ServiceError(404, "session_not_found", "会话不存在。")
         return session
+
+    @staticmethod
+    def _bound_interviewer_prompt_version(db: Session, session_id: int) -> str:
+        """Bind every turn to the prompt recorded by the session opening.
+
+        Sessions created before opening traces were introduced conservatively
+        retain the previous production baseline instead of inheriting a newer
+        deployment default halfway through their conversation.
+        """
+
+        recorded = db.scalar(
+            select(AgentTrace.prompt_version)
+            .where(
+                AgentTrace.session_id == session_id,
+                AgentTrace.action == "natural_opening",
+            )
+            .order_by(AgentTrace.id.asc())
+            .limit(1)
+        )
+        candidate = str(recorded or LEGACY_INTERVIEWER_PROMPT_VERSION)
+        try:
+            resolve_natural_interviewer_prompt(candidate)
+        except ValueError:
+            return LEGACY_INTERVIEWER_PROMPT_VERSION
+        return candidate
 
     @staticmethod
     def _payload_hash(request: SubmitTurnRequest) -> str:
@@ -437,7 +466,15 @@ class SessionService:
                         emit(event)
 
                 session = self.get(db, session_uuid)
-                result = self.orchestrator.process(session, user_turn)
+                bound_prompt_version = self._bound_interviewer_prompt_version(
+                    db,
+                    session.id,
+                )
+                result = self.orchestrator.process(
+                    session,
+                    user_turn,
+                    prompt_version=bound_prompt_version,
+                )
                 assistant_turn = DialogueTurn(
                     # Attach through the relationship, not only the foreign
                     # key.  The orchestrator has already read session.turns to
@@ -473,6 +510,7 @@ class SessionService:
                             "session_action": result.session_action,
                             "finish_reason": result.finish_reason,
                             "quality_flags": result.quality_flags,
+                            "attempt_count": result.attempt_count,
                         },
                         renderer_status="repaired" if result.repair_used else "accepted",
                         repair_used=result.repair_used,
@@ -546,6 +584,18 @@ class SessionService:
                             )
                         )
                     else:
+                        failed_prompt_version = self._bound_interviewer_prompt_version(
+                            db,
+                            failed.session_id,
+                        )
+                        failed_prompt_id, _, _ = resolve_natural_interviewer_prompt(
+                            failed_prompt_version
+                        )
+                        error_code = str(
+                            getattr(exc, "error_code", type(exc).__name__)
+                        )
+                        attempt_count = int(getattr(exc, "attempt_count", 0) or 0)
+                        latency_ms = int(getattr(exc, "latency_ms", 0) or 0)
                         db.add(
                             AgentTrace(
                                 session_id=failed.session_id,
@@ -561,8 +611,8 @@ class SessionService:
                                     if settings.model_gateway_mode == "real"
                                     else "natural-interviewer-mock-v6"
                                 ),
-                                prompt_template_id=NATURAL_INTERVIEWER_PROMPT_ID,
-                                prompt_version=NATURAL_INTERVIEWER_PROMPT_VERSION,
+                                prompt_template_id=failed_prompt_id,
+                                prompt_version=failed_prompt_version,
                                 input_fingerprint=(
                                     self.orchestrator.trace_input_fingerprint(failed_session)
                                     if failed_session
@@ -571,11 +621,14 @@ class SessionService:
                                 output_contract={
                                     "status": "failed",
                                     "exception_type": type(exc).__name__,
+                                    "error_code": error_code,
+                                    "attempt_count": attempt_count,
                                     "recoverable": True,
                                 },
                                 renderer_status="failed",
                                 repair_used=bool(getattr(exc, "repair_used", False)),
                                 fallback_reason=failed.error_message,
+                                latency_ms=latency_ms,
                             )
                         )
                     db.commit()

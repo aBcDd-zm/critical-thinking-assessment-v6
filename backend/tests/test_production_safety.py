@@ -79,7 +79,7 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
         natural_interviewer_prompt_version="v6.1.0",
     )
 
-    assert default_config.natural_interviewer_prompt_version == "v6.0.5"
+    assert default_config.natural_interviewer_prompt_version == "v6.1.0"
     assert rollback_config.natural_interviewer_prompt_version == "v6.0.3"
     assert candidate_config.natural_interviewer_prompt_version == "v6.1.0"
     with pytest.raises(ValidationError):
@@ -170,7 +170,7 @@ print("candidate-isolated-ok")
     assert completed.stdout.strip() == "candidate-isolated-ok"
 
 
-def test_v6_1_0_candidate_uses_guided_opening_without_changing_the_default() -> None:
+def test_v6_1_0_default_uses_guided_opening() -> None:
     env = os.environ.copy()
     env.update(
         {

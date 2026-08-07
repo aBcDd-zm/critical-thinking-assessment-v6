@@ -1,9 +1,8 @@
 # 思衡 V6 Prompt 交接
 
-默认版本：`natural_interviewer_v6.0.5`、`natural_final_scorer_v6.1.0`
-轻引导候选：`natural_interviewer_v6.1.0`
-可回滚访谈版本：`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
-适用分支：`system/v6-natural-interview-demo`
+默认版本：`natural_interviewer_v6.1.0`、`natural_final_scorer_v6.1.0`
+可回滚访谈版本：`natural_interviewer_v6.0.5`、`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
+适用分支：`system/v610-light-guided-assessment`
 
 ## 设计意图
 
@@ -35,9 +34,10 @@ V6 不是把 V5 的控制器放宽一点。它明确取消“服务端告诉模�
 NATURAL_INTERVIEWER_PROMPT_VERSION=v6.1.0
 ```
 
-默认使用 `v6.0.5`；`v6.1.0` 只用于本地或测试环境验收，不随代码变更自动切换生产默认。若候选版发生系统性对话回归，环境可显式改回 `v6.0.5`、`v6.0.4` 或 `v6.0.3`
-并重启后端；旧版 Prompt 文本和哈希保持完整，无需改代码。每个 trace 仍记录实际使用的
-`prompt_template_id` 与 `prompt_version`，不得将两个版本的数据当作同一干预条件。
+默认使用 `v6.1.0`。若真实延迟或质量回归，环境可显式改回 `v6.0.5`、`v6.0.4` 或 `v6.0.3`
+并重启后端；旧版 Prompt 文本和哈希保持完整，无需改代码。新配置只影响新会话；每个既有会话后续轮次读取其 `natural_opening` Trace 中的 `prompt_version`，没有开场 Trace 的历史会话保守回退到 `v6.0.5`，避免一次访谈中混用版本。每个 trace 继续记录实际使用的 `prompt_template_id` 与 `prompt_version`。
+
+访谈调用使用独立低延迟合同：`thinking=disabled`、`max_tokens=512`、总预算 25 秒，首次最多 15 秒，剩余时间只允许一次重试。首次空内容只追加“返回完整 JSON、不能返回空内容”的协议提醒；连接或读取失败保持原载荷重试。连续空内容对外返回 `model_empty_response`，网络失败返回 `model_connection_interrupted`，两者均保留同一 `client_turn_id` 恢复路径。终评与准备度检查显式 `thinking=enabled`，继续使用 12000 tokens 和原 90 秒超时配置。
 
 ### `natural_interviewer_v6.1.0` 的轻引导约束
 

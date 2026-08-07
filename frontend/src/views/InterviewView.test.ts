@@ -325,6 +325,75 @@ describe("InterviewView", () => {
     expect(localStorage.getItem("v6:pending-turn:session-v6")).not.toBeNull();
   });
 
+  it("shows saved and extended wait states at 8 and 20 seconds, then clears them", async () => {
+    vi.useFakeTimers();
+    let completeStream: (() => void) | undefined;
+    mocks.submitTurnStream.mockImplementation(
+      () => new Promise<void>((resolve) => {
+        completeStream = resolve;
+      }),
+    );
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(wrapper.text()).not.toContain("你的回答已保存");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(wrapper.text()).toContain("正在整理这条回答，你的回答已保存。");
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(wrapper.text()).toContain("仍在处理中；如果中断，可以使用原提交编号安全重试。");
+
+    completeStream?.();
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(wrapper.text()).not.toContain("仍在处理中；如果中断");
+    expect(vi.getTimerCount()).toBe(0);
+    wrapper.unmount();
+    vi.useRealTimers();
+  });
+
+  it("shows an empty-model error without calling it a network interruption", async () => {
+    mocks.submitTurnStream.mockImplementation(async (_uuid, _payload, onEvent) => {
+      await onEvent({
+        event: "error",
+        code: "model_empty_response",
+        message: "模型暂时未返回有效内容；你的回答已保存，可以安全重试。",
+      });
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("模型暂时未返回有效内容");
+    expect(wrapper.text()).not.toContain("连接暂时中断");
+    expect(localStorage.getItem("v6:pending-turn:session-v6")).not.toBeNull();
+  });
+
+  it("clears pending wait timers when the page unmounts", async () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    mocks.submitTurnStream.mockImplementation(() => new Promise<void>(() => undefined));
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+
+    wrapper.unmount();
+    expect(clearTimeoutSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    vi.useRealTimers();
+  });
+
   it("allows a nonblank short first answer and submits once with an unmodified Enter", async () => {
     const wrapper = mount(InterviewView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },

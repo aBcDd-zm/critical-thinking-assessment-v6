@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # style without changing code or losing the version recorded in traces.
     natural_interviewer_prompt_version: Literal[
         "v6.0.3", "v6.0.4", "v6.0.5", "v6.1.0"
-    ] = "v6.0.5"
+    ] = "v6.1.0"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_base_url: str = "https://api.deepseek.com"
@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     # reverse-proxy timeout so the server can return a retryable result.
     deepseek_timeout_seconds: float = 90.0
     deepseek_max_tokens: int = 3000
+    # Interview turns use a deliberately smaller, non-thinking profile. The
+    # first request receives at most 15 seconds and a single retry may use the
+    # rest of the 25-second wall-clock budget.
+    deepseek_interview_thinking: Literal["enabled", "disabled"] = "disabled"
+    deepseek_interview_max_tokens: int = 512
+    deepseek_interview_primary_timeout_seconds: float = 15.0
+    deepseek_interview_total_timeout_seconds: float = 25.0
     # Final scoring spends tokens on six dimensions plus exact evidence quotes;
     # keep its completion budget separate from short interviewer turns.
     deepseek_scoring_max_tokens: int = 12000

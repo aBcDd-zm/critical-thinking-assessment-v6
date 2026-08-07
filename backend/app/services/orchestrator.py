@@ -30,12 +30,12 @@ from app.schemas import FinalScorerOutput, NaturalInterviewerOutput
 from app.services.model_gateway import (
     NATURAL_FINAL_SCORER_PROMPT_ID,
     NATURAL_FINAL_SCORER_PROMPT_VERSION,
-    NATURAL_INTERVIEWER_PROMPT_ID,
     NATURAL_INTERVIEWER_PROMPT_VERSION,
     ModelGatewayError,
     ModelGatewayService,
     StructuredCallResult,
     payload_fingerprint,
+    resolve_natural_interviewer_prompt,
 )
 
 
@@ -178,6 +178,7 @@ class InterviewResult:
     prompt_version: str
     repair_used: bool
     latency_ms: int
+    attempt_count: int
     quality_flags: list[str]
     input_fingerprint: str
 
@@ -388,12 +389,30 @@ class InterviewOrchestrator:
     def __init__(self, gateway: ModelGatewayService | None = None) -> None:
         self.gateway = gateway or ModelGatewayService()
 
-    def opening(self, participant: dict[str, str]) -> InterviewResult:
+    def opening(
+        self,
+        participant: dict[str, str],
+        *,
+        prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
+    ) -> InterviewResult:
         payload = {"participant": participant, "transcript": []}
-        call = self.gateway.generate_opening(participant)
-        return self._result_from_call(call, input_fingerprint=payload_fingerprint(payload))
+        call = self.gateway.generate_opening(
+            participant,
+            prompt_version=prompt_version,
+        )
+        return self._result_from_call(
+            call,
+            input_fingerprint=payload_fingerprint(payload),
+            prompt_version=prompt_version,
+        )
 
-    def process(self, session: AssessmentSession, user_turn: DialogueTurn) -> InterviewResult:
+    def process(
+        self,
+        session: AssessmentSession,
+        user_turn: DialogueTurn,
+        *,
+        prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
+    ) -> InterviewResult:
         if is_immediate_high_risk(user_turn.content):
             session.phase = "safety_stopped"
             session.finalization_state = "safety_stopped"
@@ -408,6 +427,7 @@ class InterviewOrchestrator:
                 prompt_version="v6.0.0",
                 repair_used=False,
                 latency_ms=0,
+                attempt_count=0,
                 quality_flags=["safety_stopped"],
                 input_fingerprint=hashlib.sha256(user_turn.content.encode("utf-8")).hexdigest(),
             )
@@ -421,11 +441,15 @@ class InterviewOrchestrator:
             },
             "transcript": _transcript_rows(session),
         }
-        call = self.gateway.generate_interviewer(payload)
+        call = self.gateway.generate_interviewer(
+            payload,
+            prompt_version=prompt_version,
+        )
         result = self._result_from_call(
             call,
             input_fingerprint=payload_fingerprint(payload),
             latest_user_text=user_turn.content,
+            prompt_version=prompt_version,
         )
         if result.session_action == "finish":
             session.phase = "finalizing"
@@ -557,18 +581,23 @@ class InterviewOrchestrator:
         *,
         input_fingerprint: str,
         latest_user_text: str | None = None,
+        prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
     ) -> InterviewResult:
         quality_flags = _validate_interviewer_output(call.output, latest_user_text)
+        prompt_template_id, resolved_version, _ = resolve_natural_interviewer_prompt(
+            prompt_version
+        )
         return InterviewResult(
             content=call.output.interviewer_message.strip(),
             session_action=call.output.session_action,
             finish_reason=call.output.finish_reason,
             provider=call.provider,
             model=call.model,
-            prompt_template_id=NATURAL_INTERVIEWER_PROMPT_ID,
-            prompt_version=NATURAL_INTERVIEWER_PROMPT_VERSION,
+            prompt_template_id=prompt_template_id,
+            prompt_version=resolved_version,
             repair_used=call.repair_used,
             latency_ms=call.latency_ms,
+            attempt_count=call.attempt_count,
             quality_flags=quality_flags,
             input_fingerprint=input_fingerprint,
         )

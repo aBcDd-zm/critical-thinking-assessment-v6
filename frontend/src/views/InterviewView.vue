@@ -44,6 +44,29 @@ const ttsEnabled = ref(localStorage.getItem("v6:tts-enabled") !== "false");
 const leaving = ref(false);
 const playback = useSpeechPlayback();
 let activeController: AbortController | null = null;
+let savedWaitTimer: number | null = null;
+let extendedWaitTimer: number | null = null;
+
+function clearInterviewWaitTimers() {
+  if (savedWaitTimer !== null) window.clearTimeout(savedWaitTimer);
+  if (extendedWaitTimer !== null) window.clearTimeout(extendedWaitTimer);
+  savedWaitTimer = null;
+  extendedWaitTimer = null;
+}
+
+function startInterviewWaitTimers() {
+  clearInterviewWaitTimers();
+  savedWaitTimer = window.setTimeout(() => {
+    if (sending.value && !leaving.value) {
+      notice.value = "正在整理这条回答，你的回答已保存。";
+    }
+  }, 8_000);
+  extendedWaitTimer = window.setTimeout(() => {
+    if (sending.value && !leaving.value) {
+      notice.value = "仍在处理中；如果中断，可以使用原提交编号安全重试。";
+    }
+  }, 20_000);
+}
 
 const MIN_ANSWER_VISIBLE_CHARACTERS = 20;
 const MIN_ANSWER_MESSAGE = `从第二个回答起，每次回答至少需要 ${MIN_ANSWER_VISIBLE_CHARACTERS} 个字。`;
@@ -234,10 +257,12 @@ async function handleEvent(event: TurnStreamEvent) {
     return;
   }
   if (event.event === "error") {
+    clearInterviewWaitTimers();
     const dataMessage = event.data && typeof event.data === "object" ? (event.data as Record<string, unknown>).message : null;
     throw new Error(event.message || (typeof dataMessage === "string" ? dataMessage : "访谈处理出现异常"));
   }
   if (event.event !== "agent_completed") return;
+  clearInterviewWaitTimers();
   const completed = completedData(event);
   if (!completed) throw new Error("服务端未返回已保存的访谈内容");
   streamedText.value = "";
@@ -353,6 +378,7 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
   sending.value = true;
   error.value = "";
   notice.value = restoring ? "正在恢复上次中断的提交…" : "";
+  startInterviewWaitTimers();
   streamedText.value = "";
   const alreadySaved = turns.value.some((turn) => turn.client_turn_id === payload.client_turn_id);
   if (!alreadySaved) {
@@ -392,6 +418,7 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
       error.value = cause instanceof ApiError || cause instanceof Error ? cause.message : "提交中断；刷新页面会使用相同编号恢复，不会重复计入。";
     }
   } finally {
+    clearInterviewWaitTimers();
     activeController = null;
     sending.value = false;
   }
@@ -436,6 +463,7 @@ function clearLocalRecovery() {
 async function leaveEarly() {
   if (!window.confirm("退出不会生成报告。已经保存的记录会保留在本地复核范围内，确定退出吗？")) return;
   leaving.value = true;
+  clearInterviewWaitTimers();
   activeController?.abort();
   activeController = null;
   playback.stop();
@@ -499,6 +527,7 @@ onBeforeRouteLeave(async (to) => {
   ) return true;
   if (!window.confirm("离开将退出当前访谈且不生成报告，确定继续吗？")) return false;
   leaving.value = true;
+  clearInterviewWaitTimers();
   activeController?.abort();
   playback.stop();
   voice.stop();
@@ -507,6 +536,7 @@ onBeforeRouteLeave(async (to) => {
   return true;
 });
 onBeforeUnmount(() => {
+  clearInterviewWaitTimers();
   activeController?.abort();
 });
 </script>

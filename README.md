@@ -8,7 +8,8 @@
 
 - 独立目录、分支和 SQLite：不读取、迁移或修改 V3.3、V4、V5 的会话数据。
 - 会话只经历 `interviewing → finalizing → completed`；用户可随时 `exit`，高风险内容进入 `safety_stopped`。
-- 首问和每一次追问默认由 `natural_interviewer_v6.0.5` 生成，可通过服务端环境变量显式选择轻引导候选 `v6.1.0`，或回滚到完整保留的 `v6.0.4`、`v6.0.3`。V6.1.0 只增加真实事件锚定与同一事件柔性主线；服务端仍不提供候选题库、目标维度、coverage、阶段命令或测量轮次上下限。
+- 新会话默认由 `natural_interviewer_v6.1.0` 生成；每个会话以已有 `natural_opening` Trace 固定版本，因此部署前创建的会话仍沿用其开场版本。环境变量可将新会话回滚到完整保留的 `v6.0.5`、`v6.0.4` 或 `v6.0.3`。V6.1.0 只增加真实事件锚定与同一事件柔性主线；服务端仍不提供候选题库、目标维度、coverage、阶段命令或测量轮次上下限。
+- 访谈轮次使用关闭思考、512 tokens、25 秒总预算的独立低延迟配置；首次请求最多 15 秒，剩余预算只允许一次重试。终评与准备度检查继续使用独立的 90 秒、12000 tokens 思考配置。
 - 首个回答只要非空即可提交；从第二个回答起，普通回答仍需 20 个可见字符，完整的“不知道／不清楚／没想好”类表达例外。该例外不改变作答计数、证据语义或自然收束规则。
 - 40 次用户回答只是不可见的技术防失控上限，不是测量设计，也不应显示为进度。
 - 访谈冻结后，独立的 `natural_final_scorer_v6.1.0` 对完整逐字稿做一次性六维取证。证据不足时必须显示“证据有限”或“未充分测得”，不得补问或猜低分。
@@ -50,4 +51,4 @@ make check-stopped
 
 ## Git 与来源
 
-活动分支为 `system/v6-natural-interview-demo`。V6 从 V5 的本地工作区快照建立：来源分支 `system/v5-real-issue-demo`、来源提交 `e7ae0246cfa7c9e3cb1e43c8938c740d4cb945ea`。完整的来源边界、排除项与 SHA-256 聚合指纹见 [来源快照清单](artifacts/SOURCE_SNAPSHOT_MANIFEST.md)。
+当前 V6.1 发布分支为 `system/v610-light-guided-assessment`，基线分支为 `system/v6-natural-interview-demo`。V6 从 V5 的本地工作区快照建立：来源分支 `system/v5-real-issue-demo`、来源提交 `e7ae0246cfa7c9e3cb1e43c8938c740d4cb945ea`。完整的来源边界、排除项与 SHA-256 聚合指纹见 [来源快照清单](artifacts/SOURCE_SNAPSHOT_MANIFEST.md)。
