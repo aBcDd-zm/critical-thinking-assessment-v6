@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections.abc import Callable
 from collections import defaultdict
 from datetime import timedelta
 from typing import Any
@@ -300,7 +301,12 @@ class SessionService:
         return events
 
     def submit(
-        self, db: Session, session_uuid: str, request: SubmitTurnRequest
+        self,
+        db: Session,
+        session_uuid: str,
+        request: SubmitTurnRequest,
+        *,
+        emit: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         payload_hash = self._payload_hash(request)
         with _locks[session_uuid]:
@@ -318,6 +324,9 @@ class SessionService:
                     "同一 client_turn_id 不能用于不同载荷。",
                 )
             if existing and existing.state == "completed" and existing.response_events:
+                if emit:
+                    for event in existing.response_events:
+                        emit(event)
                 return existing.response_events
             if existing:
                 # A previously persisted assistant turn is authoritative.  It
@@ -337,6 +346,9 @@ class SessionService:
                         submission.state = "completed"
                         submission.completed_at = utcnow()
                         db.commit()
+                        if emit:
+                            for event in events:
+                                emit(event)
                         return events
             if session.phase != "interviewing":
                 raise ServiceError(
@@ -416,6 +428,14 @@ class SessionService:
                     db.commit()
                     db.refresh(user_turn)
 
+                started_events = [
+                    {"event": "user_turn_saved", "data": {"turn": serialize_turn(user_turn)}},
+                    {"event": "agent_started", "data": {"phase": "interviewing"}},
+                ]
+                if emit:
+                    for event in started_events:
+                        emit(event)
+
                 session = self.get(db, session_uuid)
                 result = self.orchestrator.process(session, user_turn)
                 assistant_turn = DialogueTurn(
@@ -462,15 +482,6 @@ class SessionService:
                 if session.phase == "finalizing":
                     self.orchestrator.freeze_transcript(session)
                 db.commit()
-
-                # A model-led natural close should attempt independent scoring
-                # immediately. If scoring is unavailable, the frozen session
-                # remains in finalizing and POST /finalize is the idempotent retry.
-                if session.phase == "finalizing":
-                    try:
-                        self.orchestrator.finalize(db, session)
-                    except FinalizationError:
-                        pass
                 session = self.get(db, session_uuid)
                 user_turn = db.get(DialogueTurn, user_turn.id)
                 assistant_turn = db.get(DialogueTurn, assistant_turn.id)
@@ -484,6 +495,11 @@ class SessionService:
                 submission.response_events = events
                 submission.completed_at = utcnow()
                 db.commit()
+                if emit:
+                    # The saved/started prefix was flushed before the model call.
+                    # Only deliver the persisted result suffix here.
+                    for event in events[len(started_events) :]:
+                        emit(event)
                 return events
             except ServiceError:
                 raise

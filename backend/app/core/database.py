@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
@@ -40,6 +40,12 @@ if settings.database_url.startswith("sqlite"):
 
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, class_=Session)
+
+
+def get_session_factory() -> Callable[[], Session]:
+    """Provide a factory for work that must own its Session outside a request."""
+
+    return SessionLocal
 
 
 def get_db() -> Generator[Session, None, None]:
