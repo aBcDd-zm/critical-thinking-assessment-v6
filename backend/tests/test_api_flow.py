@@ -23,7 +23,10 @@ from app.services.model_gateway import (
     NATURAL_INTERVIEWER_PROMPT_ID,
     NATURAL_INTERVIEWER_PROMPT_VERSION,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT,
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_3,
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_4,
     StructuredCallResult,
+    resolve_natural_interviewer_prompt,
 )
 from app.services.orchestrator import _quality_flags
 from tests.conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME
@@ -101,19 +104,32 @@ def test_consent_and_model_generated_opening_are_natural_only(client) -> None:
     detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     opening = detail["traces"][0]
     assert opening["action"] == "natural_opening"
-    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.3"
+    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.4"
 
 
-def test_interviewer_prompt_v6_0_3_guides_uncertainty_without_forcing_length() -> None:
+def test_interviewer_prompt_v6_0_4_avoids_formulaic_acknowledgement() -> None:
     prompt = "".join(NATURAL_INTERVIEWER_SYSTEM_PROMPT.split())
 
-    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.3"
-    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.3"
-    assert "共情不是机械复述" in prompt
+    assert NATURAL_INTERVIEWER_PROMPT_ID == "natural_interviewer_v6.0.4"
+    assert NATURAL_INTERVIEWER_PROMPT_VERSION == "v6.0.4"
+    assert "复述—表示理解—再提问" in prompt
+    assert "不得为了显得在听而重复" in prompt
+    assert "有原话依据" in prompt
+    assert "应使用试探性语气而不是下结论" in prompt
+    assert "反复用作每轮的固定开头" in prompt
+    assert "不得把提高直接提问的比例当作目标" in prompt
+    assert "非模板化的简短情绪或意义承接" in prompt
+    assert "它不是每轮必须的开场" in prompt
+    assert "必须先直接回应这个意图" in prompt
+    assert "答案是否已经出现在逐字稿中" in prompt
+    assert "实质性地改变或澄清当前理解" in prompt
+    assert "不得问逐字稿已经明确回答的内容" in prompt
+    assert "可以多用微观表达" not in prompt
+    assert "可轻声重复对方最后一句话的关键词" not in prompt
     assert "开放式问题" in prompt
     assert "两个选项" in prompt
     assert "不得要求对方凑字数" in prompt
-    assert "更低压力的开放式问法" in prompt
+    assert "更容易回答的开放式问法" in prompt
     assert "不得仅因这句不确定就选择finish" in prompt
     assert "心理咨询专家" not in prompt
     assert "除非对方明确提出要结束" in prompt
@@ -121,6 +137,29 @@ def test_interviewer_prompt_v6_0_3_guides_uncertainty_without_forcing_length() -
     assert "自然地深入一到两层" in prompt
     assert "不确定性、成立条件、潜在反例或可能失效处" in prompt
     assert "没有新的关键矛盾时，应自然收束并选择finish" in prompt
+
+
+def test_interviewer_prompt_v6_0_3_is_preserved_for_rollback() -> None:
+    prompt_id, version, prompt = resolve_natural_interviewer_prompt("v6.0.3")
+
+    assert prompt_id == "natural_interviewer_v6.0.3"
+    assert version == "v6.0.3"
+    assert prompt == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_3
+    assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
+        "d7ff7e1e0e29eef537fcbf8008501e322f2f22d1e11e37d7054c1c98a830cb3c"
+    )
+    assert "可以多用微观表达" in prompt
+    assert "可轻声重复对方最后一句话的关键词" in prompt
+
+
+def test_interviewer_prompt_resolver_selects_v6_0_4_and_rejects_unknown() -> None:
+    prompt_id, version, prompt = resolve_natural_interviewer_prompt("v6.0.4")
+
+    assert prompt_id == "natural_interviewer_v6.0.4"
+    assert version == "v6.0.4"
+    assert prompt == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_4
+    with pytest.raises(ValueError, match="unsupported natural interviewer prompt version"):
+        resolve_natural_interviewer_prompt("v6.0.5")
 
 
 def test_interviewer_style_flags_record_binary_questions_and_verbatim_echoes() -> None:

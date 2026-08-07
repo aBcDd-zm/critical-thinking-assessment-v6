@@ -37,6 +37,7 @@ const inputMode = ref<InputMode>("text");
 const voiceWasUsed = ref(false);
 const answerStartedAt = ref(Date.now());
 const transcriptEnd = ref<HTMLElement | null>(null);
+const voiceInputEnabled = import.meta.env.VITE_VOICE_INPUT_ENABLED === "true";
 const ttsEnabled = ref(localStorage.getItem("v6:tts-enabled") !== "false");
 const leaving = ref(false);
 const playback = useSpeechPlayback();
@@ -469,9 +470,11 @@ onBeforeUnmount(() => {
         <InterviewerAvatar :state="interviewerState" />
         <div class="interviewer-copy">
           <strong>访谈官 · 澄澄</strong>
-          <span v-if="voice.listening.value">我在听，转写后你可以继续修改</span>
+          <span v-if="voiceInputEnabled && voice.listening.value">我在听，转写后你可以继续修改</span>
           <span v-else-if="interviewerState === 'thinking'">正在回应你刚才说的话</span>
-          <span v-else-if="interviewerState === 'speaking'">正在播报，开始录音会立即停止</span>
+          <span v-else-if="interviewerState === 'speaking'">
+            {{ voiceInputEnabled ? "正在播报，开始录音会立即停止" : "正在播报当前回复" }}
+          </span>
         </div>
         <button type="button" class="tts-toggle" :aria-pressed="ttsEnabled" @click="toggleTts">
           <span :class="{ active: ttsEnabled }" />语音播报 {{ ttsEnabled ? "已开" : "已关" }}
@@ -484,7 +487,9 @@ onBeforeUnmount(() => {
           <article v-for="turn in turns" :key="turn.id ?? `${turn.turn_index}-${turn.role}`" class="message" :class="turn.role">
             <span class="message-author">{{ turn.role === "assistant" ? "澄澄" : "你" }}</span>
             <p>{{ turn.content }}</p>
-            <small v-if="turn.role === 'user' && turn.input_mode">{{ turn.input_mode === "text" ? "文字输入" : turn.input_mode === "voice" ? "语音转写" : "语音转写后编辑" }}</small>
+            <small
+              v-if="turn.role === 'user' && turn.input_mode && (voiceInputEnabled || turn.input_mode === 'text')"
+            >{{ turn.input_mode === "text" ? "文字输入" : turn.input_mode === "voice" ? "语音转写" : "语音转写后编辑" }}</small>
           </article>
           <article v-if="streamedText" class="message assistant streaming">
             <span class="message-author">澄澄</span><p>{{ streamedText }}<i class="typing-caret" /></p>
@@ -528,7 +533,7 @@ onBeforeUnmount(() => {
             @keydown="onAnswerKeydown"
           />
           <div class="composer-actions">
-            <div>
+            <div v-if="voiceInputEnabled">
               <button
                 type="button"
                 class="mic-button"

@@ -8,7 +8,9 @@ COPY index.html tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.t
 COPY src ./src
 
 ARG VITE_API_BASE_URL=/api/v1
+ARG VITE_VOICE_INPUT_ENABLED=false
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ENV VITE_VOICE_INPUT_ENABLED=${VITE_VOICE_INPUT_ENABLED}
 RUN npm run build
 
 FROM nginx:1.27-alpine
