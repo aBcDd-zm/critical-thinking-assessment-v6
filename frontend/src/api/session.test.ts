@@ -74,7 +74,7 @@ describe("V6 natural interview NDJSON client", () => {
     const encoder = new TextEncoder();
     const chunks = [
       '{"event":"user_turn_saved","data":{"turn_index":1}}\n{"event":"agent_',
-      'delta","delta":"我听"}\n{"event":"agent_delta","delta":"到了"}\n',
+      'delta","delta":"我听"}\n{"event":"heartbeat"}\n{"event":"agent_delta","delta":"到了"}\n',
       '{"event":"agent_completed","data":{"turn":{"turn_index":2,"role":"assistant","content":"谢谢你愿意说这些。"},"session_action":"finish","finish_reason":"natural_closure"}}\n',
       '{"event":"session_finalizing","data":{"session":{"uuid":"session-1","phase":"finalizing","turns":[]}}}\n',
     ];
@@ -99,17 +99,18 @@ describe("V6 natural interview NDJSON client", () => {
     expect(events.map((event) => event.event)).toEqual([
       "user_turn_saved",
       "agent_delta",
+      "heartbeat",
       "agent_delta",
       "agent_completed",
       "session_finalizing",
     ]);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(payload);
-    expect(completedData(events[3]!)).toMatchObject({
+    expect(completedData(events[4]!)).toMatchObject({
       turn: { content: "谢谢你愿意说这些。" },
       session_action: "finish",
       finish_reason: "natural_closure",
     });
-    expect(finalizingSession(events[4]!)).toMatchObject({ uuid: "session-1", phase: "finalizing" });
+    expect(finalizingSession(events[5]!)).toMatchObject({ uuid: "session-1", phase: "finalizing" });
   });
 
   it("awaits each async event callback before processing the next event", async () => {

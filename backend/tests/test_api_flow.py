@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
+import queue
+import threading
 import zipfile
 from datetime import timedelta
 
@@ -26,6 +29,7 @@ from app.models import (
 from app.schemas import (
     FinalScorerOutput,
     NaturalInterviewerOutput,
+    SubmitTurnRequest,
     is_explicit_uncertainty_answer,
 )
 from app.services.model_gateway import (
@@ -388,6 +392,85 @@ def test_interview_payload_has_no_controller_fields_and_idempotently_replays(cli
     assert snapshot["user_answer_count"] == 1
 
 
+def test_slow_model_flushes_saved_events_before_completion_and_keeps_working(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    gateway = api_router.sessions.orchestrator.gateway
+    original = gateway.generate_interviewer
+    model_started = threading.Event()
+    release_model = threading.Event()
+    emitted: queue.Queue[dict] = queue.Queue()
+    outcome: dict[str, object] = {}
+
+    def slow_interviewer(payload):
+        model_started.set()
+        if not release_model.wait(timeout=5):
+            raise TimeoutError("test_model_release_timeout")
+        return original(payload)
+
+    def run_submission() -> None:
+        try:
+            with TestSession() as db:
+                outcome["events"] = api_router.sessions.submit(
+                    db,
+                    session_uuid,
+                    SubmitTurnRequest(
+                        content="我想先把决定的目标、条件和风险一项项理清楚。",
+                        client_turn_id="client-slow-stream-1",
+                        input_mode="text",
+                        answer_duration_ms=1234,
+                    ),
+                    emit=emitted.put,
+                )
+        except Exception as exc:  # pragma: no cover - asserted below
+            outcome["error"] = exc
+
+    monkeypatch.setattr(gateway, "generate_interviewer", slow_interviewer)
+    worker = threading.Thread(target=run_submission, daemon=True)
+    worker.start()
+
+    assert emitted.get(timeout=2)["event"] == "user_turn_saved"
+    assert emitted.get(timeout=2)["event"] == "agent_started"
+    assert model_started.wait(timeout=2)
+    saved = client.get(f"/api/v1/sessions/{session_uuid}").json()
+    assert saved["user_answer_count"] == 1
+    assert [turn["role"] for turn in saved["turns"]] == ["assistant", "user"]
+
+    # No stream consumer is required for the worker to finish and persist the
+    # authoritative assistant turn.
+    release_model.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert "error" not in outcome
+    completed = client.get(f"/api/v1/sessions/{session_uuid}").json()
+    assert [turn["role"] for turn in completed["turns"]] == [
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+
+def test_turn_event_stream_emits_heartbeats_while_worker_is_idle(monkeypatch) -> None:
+    async def exercise() -> None:
+        monkeypatch.setattr(api_router, "TURN_STREAM_HEARTBEAT_SECONDS", 0.01)
+        stream_queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+        stream = api_router._turn_event_stream(
+            ("event", {"event": "user_turn_saved"}), stream_queue
+        )
+
+        first = json.loads(await stream.__anext__())
+        heartbeat = json.loads(await asyncio.wait_for(stream.__anext__(), timeout=0.2))
+        assert first["event"] == "user_turn_saved"
+        assert heartbeat == {"event": "heartbeat"}
+
+        await stream_queue.put(("done", None))
+        with pytest.raises(StopAsyncIteration):
+            await stream.__anext__()
+
+    asyncio.run(exercise())
+
+
 def test_prompt_injection_remains_untrusted_transcript_not_a_controller_instruction(
     client, monkeypatch
 ) -> None:
@@ -707,7 +790,7 @@ def test_self_label_cannot_be_reused_through_a_shorter_substring_quote(
     assert "自我评价" in entry["reason"]
 
 
-def test_model_natural_close_auto_finalizes_without_fixed_turn_limit(client, monkeypatch) -> None:
+def test_model_natural_close_freezes_then_finalizes_separately(client, monkeypatch) -> None:
     session_uuid = create_session(client)
     gateway = api_router.sessions.orchestrator.gateway
 
@@ -733,10 +816,11 @@ def test_model_natural_close_auto_finalizes_without_fixed_turn_limit(client, mon
     assert closing.status_code == 200
     events = parse_events(closing)
     completed = events[-1]["data"]
-    assert not any(item["event"] == "session_finalizing" for item in events)
+    assert any(item["event"] == "session_finalizing" for item in events)
     assert completed["session_action"] == "finish"
     assert completed["finish_reason"] == "natural_closure"
-    assert completed["session"]["phase"] == "completed"
+    assert completed["session"]["phase"] == "finalizing"
+    assert completed["session"]["report_available"] is False
     assert completed["session"]["turns"][-1]["id"] == completed["turn"]["id"]
     assert completed["session"]["turns"][-1]["role"] == "assistant"
     frozen_rows = [
@@ -754,6 +838,10 @@ def test_model_natural_close_auto_finalizes_without_fixed_turn_limit(client, mon
         canonical.encode("utf-8")
     ).hexdigest()
 
+    finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    assert finalized.status_code == 200
+    assert finalized.json()["session"]["phase"] == "completed"
+
 
 def test_failed_interviewer_call_preserves_user_turn_and_same_id_recovers(client, monkeypatch) -> None:
     session_uuid = create_session(client)
@@ -769,8 +857,13 @@ def test_failed_interviewer_call_preserves_user_turn_and_same_id_recovers(client
 
     monkeypatch.setattr(gateway, "generate_interviewer", fail_once)
     failed = send(client, session_uuid, "我需要慢慢想一想，也希望先整理清楚自己的顾虑和条件。", "client-turn-retry")
-    assert failed.status_code == 500
-    assert parse_events(failed)[0]["code"] == "turn_processing_failed"
+    assert failed.status_code == 200
+    failed_events = parse_events(failed)
+    assert [event["event"] for event in failed_events[:2]] == [
+        "user_turn_saved",
+        "agent_started",
+    ]
+    assert failed_events[-1]["code"] == "turn_processing_failed"
 
     recovered = send(client, session_uuid, "我需要慢慢想一想，也希望先整理清楚自己的顾虑和条件。", "client-turn-retry")
     assert recovered.status_code == 200
@@ -798,8 +891,8 @@ def test_transient_model_connection_error_has_a_clear_recoverable_message(
     monkeypatch.setattr(gateway, "generate_interviewer", interrupted)
     failed = send(client, session_uuid, "我正在等一个重要回复，也想先把接下来需要确认的事情理清楚。", "client-turn-network-retry")
 
-    assert failed.status_code == 500
-    event = parse_events(failed)[0]
+    assert failed.status_code == 200
+    event = parse_events(failed)[-1]
     assert event["code"] == "model_connection_interrupted"
     assert event["message"] == "与访谈模型的连接暂时中断，已保存你的回答。请重试。"
 
@@ -831,7 +924,8 @@ def test_fortieth_saved_turn_can_recover_with_the_same_id_after_model_failure(
 
     monkeypatch.setattr(gateway, "generate_interviewer", fail_once)
     failed = send(client, session_uuid, "我还需要一点时间，也想继续把目前犹豫的原因整理得更清楚。", "client-turn-fortieth")
-    assert failed.status_code == 500
+    assert failed.status_code == 200
+    assert parse_events(failed)[-1]["event"] == "error"
     assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 40
 
     replay = send(client, session_uuid, "我还需要一点时间，也想继续把目前犹豫的原因整理得更清楚。", "client-turn-fortieth")
@@ -857,7 +951,8 @@ def test_persisted_assistant_turn_replays_after_event_rendering_interruption(
 
     monkeypatch.setattr(service, "_completed_events", fail_after_persist)
     failed = send(client, session_uuid, "我还在考虑这件事，也想把真正影响决定的条件逐一理清楚。", "client-turn-event-replay")
-    assert failed.status_code == 500
+    assert failed.status_code == 200
+    assert parse_events(failed)[-1]["event"] == "error"
     persisted = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert [turn["role"] for turn in persisted["turns"]] == ["assistant", "user", "assistant"]
 
@@ -899,7 +994,8 @@ def test_harmful_interviewer_output_is_not_persisted_or_shown(client, monkeypatc
 
     monkeypatch.setattr(gateway, "generate_interviewer", unsafe_reply)
     response = send(client, session_uuid, "我和同事发生了激烈争执，现在仍然很生气，也不知道怎么继续处理。", "client-turn-harmful-output")
-    assert response.status_code == 500
+    assert response.status_code == 200
+    assert parse_events(response)[-1]["event"] == "error"
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert "你可以去伤害他。" not in [turn["content"] for turn in snapshot["turns"]]
     assert [turn["role"] for turn in snapshot["turns"]] == ["assistant", "user"]

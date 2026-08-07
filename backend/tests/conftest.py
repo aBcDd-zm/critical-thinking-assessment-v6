@@ -30,7 +30,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.database import Base, get_db
+from app.core.database import Base, get_db, get_session_factory
 from app.main import app
 
 
@@ -48,6 +48,7 @@ def override_db() -> Generator[Session, None, None]:
 
 
 app.dependency_overrides[get_db] = override_db
+app.dependency_overrides[get_session_factory] = lambda: TestSession
 
 
 @pytest.fixture(autouse=True)

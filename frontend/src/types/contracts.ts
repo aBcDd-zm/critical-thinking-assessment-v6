@@ -75,6 +75,7 @@ export interface TurnRequest {
 export type StreamEventType =
   | "user_turn_saved"
   | "agent_started"
+  | "heartbeat"
   | "agent_delta"
   | "agent_completed"
   | "session_finalizing"

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
 import secrets
 import zipfile
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -25,7 +27,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import get_db, get_session_factory
 from app.domain.catalog import DIMENSION_BY_KEY
 from app.models import (
     AgentTrace,
@@ -304,45 +306,132 @@ def get_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
         return _service_error(exc)
 
 
-def _ndjson(events: list[dict[str, Any]]):
-    for event in events:
-        yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+TURN_STREAM_HEARTBEAT_SECONDS = 10.0
+_turn_stream_tasks: set[asyncio.Task[None]] = set()
+
+
+def _turn_stream_error(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, ServiceError):
+        return {
+            "event": "error",
+            "code": exc.code,
+            "message": exc.message,
+            "data": {"exception_type": type(exc).__name__},
+        }
+    model_connection_interrupted = isinstance(exc, ModelGatewayError) and exc.transient
+    return {
+        "event": "error",
+        "code": (
+            "model_connection_interrupted"
+            if model_connection_interrupted
+            else "turn_processing_failed"
+        ),
+        "message": (
+            "与访谈模型的连接暂时中断，已保存你的回答。请重试。"
+            if model_connection_interrupted
+            else "本轮处理中断，已保留可恢复状态。"
+        ),
+        "data": {"exception_type": type(exc).__name__},
+    }
+
+
+def _run_turn_submission(
+    session_factory: Callable[[], Session],
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue[tuple[str, Any]],
+    session_uuid: str,
+    request: SubmitTurnRequest,
+) -> None:
+    def publish(kind: str, payload: Any) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
+        except RuntimeError:
+            # The server may be shutting down after the browser disconnected.
+            # Delivery can stop, but the worker must still finish persistence.
+            pass
+
+    try:
+        with session_factory() as worker_db:
+            sessions.submit(
+                worker_db,
+                session_uuid,
+                request,
+                emit=lambda event: publish("event", event),
+            )
+    except ServiceError as exc:
+        publish("service_error", exc)
+    except Exception as exc:
+        publish("exception", exc)
+    finally:
+        publish("done", None)
+
+
+async def _turn_event_stream(
+    first_item: tuple[str, Any],
+    queue: asyncio.Queue[tuple[str, Any]],
+) -> AsyncIterator[str]:
+    item = first_item
+    while True:
+        kind, payload = item
+        if kind == "done":
+            return
+        if kind == "event":
+            yield json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        elif kind in {"service_error", "exception"}:
+            yield json.dumps(
+                _turn_stream_error(payload),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ) + "\n"
+            return
+
+        try:
+            item = await asyncio.wait_for(
+                queue.get(), timeout=TURN_STREAM_HEARTBEAT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            item = ("event", {"event": "heartbeat"})
 
 
 @router.post("/sessions/{session_uuid}/turns:stream")
-def submit_turn_stream(
+async def submit_turn_stream(
     session_uuid: str,
     request: SubmitTurnRequest,
-    db: Session = Depends(get_db),
+    worker_session_factory: Callable[[], Session] = Depends(get_session_factory),
 ) -> Any:
-    try:
-        return StreamingResponse(
-            _ndjson(sessions.submit(db, session_uuid, request)),
-            media_type="application/x-ndjson",
+    # The background model call owns its Session, so no SQLAlchemy state crosses
+    # request/event-loop/thread boundaries.
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _run_turn_submission,
+            worker_session_factory,
+            loop,
+            queue,
+            session_uuid,
+            request,
         )
-    except ServiceError as exc:
-        return _service_error(exc)
-    except Exception as exc:
-        model_connection_interrupted = isinstance(exc, ModelGatewayError) and exc.transient
-        event = {
-            "event": "error",
-            "code": (
-                "model_connection_interrupted"
-                if model_connection_interrupted
-                else "turn_processing_failed"
-            ),
-            "message": (
-                "与访谈模型的连接暂时中断，已保存你的回答。请重试。"
-                if model_connection_interrupted
-                else "本轮处理中断，已保留可恢复状态。"
-            ),
-            "data": {"exception_type": type(exc).__name__},
-        }
-        return StreamingResponse(
-            _ndjson([event]),
-            media_type="application/x-ndjson",
-            status_code=500,
-        )
+    )
+    # Keep the worker alive when the browser disconnects. The persisted
+    # submission remains recoverable through its original client_turn_id.
+    _turn_stream_tasks.add(task)
+    task.add_done_callback(_turn_stream_tasks.discard)
+
+    first_item = await queue.get()
+    kind, payload = first_item
+    if kind == "service_error":
+        return _service_error(payload)
+    status_code = 500 if kind == "exception" else 200
+    return StreamingResponse(
+        _turn_event_stream(first_item, queue),
+        media_type="application/x-ndjson",
+        status_code=status_code,
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/sessions/{session_uuid}/finalize")

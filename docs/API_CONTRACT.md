@@ -43,15 +43,15 @@
 
 1. `user_turn_saved`
 2. `agent_started`
-3. 零或多个 `agent_delta`
+3. 等待模型时每 10 秒可出现 `heartbeat`，并有零或多个 `agent_delta`
 4. 可选 `session_finalizing`（仅访谈官自然选择 `finish` 时）
 5. `agent_completed` 或 `error`
 
-`session_finalizing` 只提示 UI 停止继续输入并显示收束状态；真正的最终 session 快照仍以 `agent_completed` 为准。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。访谈官只允许输出 `interviewer_message`、`session_action` 和 `finish_reason`；当 `session_action=finish` 时，服务端转入 `finalizing`，而非要求客户端补任何特定题目。除用户主动结束外，版本化访谈 Prompt 要求在看似完整的方案后先自然探查一到两层关键不确定性、条件或反例；该行为仍由模型根据逐字稿决定，不由 API 传入轮次或维度控制字段。
+`heartbeat` 只用于保持 HTTP 连接，客户端不将它渲染为对话。`session_finalizing` 提示 UI 停止继续输入并单独调用 `/finalize`；转入 `finalizing` 的本轮不再同步等待最终评分。真正的本轮 session 快照仍以 `agent_completed` 为准。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。访谈官只允许输出 `interviewer_message`、`session_action` 和 `finish_reason`；当 `session_action=finish` 时，服务端转入 `finalizing`，而非要求客户端补任何特定题目。除用户主动结束外，版本化访谈 Prompt 要求在看似完整的方案后先自然探查一到两层关键不确定性、条件或反例；该行为仍由模型根据逐字稿决定，不由 API 传入轮次或维度控制字段。
 
 `content` 去除空白后的可见字符数必须至少为 20。客户端在输入框中即时显示剩余字数；普通 `Enter` 提交有效回答，`Shift+Enter` 保留换行，中文输入法选词期间不得误提交。服务端也会再次校验该限制。
 
-同一 `client_turn_id` 与相同载荷必须回放同一已持久化结果；不同载荷返回 `409 idempotency_payload_mismatch`。模型/JSON 修复用尽时以 `error` 收束流，但用户回答已经保存；客户端应保留同一键并允许刷新恢复，不能伪造一条固定 AI 问题。
+同一 `client_turn_id` 与相同载荷必须回放同一已持久化结果；不同载荷返回 `409 idempotency_payload_mismatch`。在第一个流事件之前发现的输入或幂等错误仍使用 HTTP 4xx；流已开始后的模型/JSON 错误使用 HTTP 200 中的终止 `error` 事件。此时用户回答已经保存，客户端应保留同一键并允许刷新恢复，不能伪造一条固定 AI 问题。
 
 ## 结束、报告与语音
 
