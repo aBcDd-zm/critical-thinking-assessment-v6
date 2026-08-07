@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { completedData, createSession, finalizingSession, finalizeSession, submitTurnStream } from "./session";
+import {
+  checkReportReadiness,
+  completedData,
+  createSession,
+  finalizingSession,
+  finalizeSession,
+  submitTurnStream,
+} from "./session";
 import type { TurnRequest, TurnStreamEvent } from "@/types/contracts";
 
 describe("V6 natural interview NDJSON client", () => {
@@ -37,6 +44,30 @@ describe("V6 natural interview NDJSON client", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toContain("/sessions/session-v6/finalize");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
     expect(result.session.phase).toBe("completed");
+  });
+
+  it("requests only the participant-safe aggregate report readiness result", async () => {
+    const response = {
+      status: "insufficient",
+      ready: false,
+      cached: true,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await checkReportReadiness("session-v6");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toContain("/sessions/session-v6/report-readiness");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
+    expect(result).toEqual(response);
+    expect(result).not.toHaveProperty("dimensions");
+    expect(result).not.toHaveProperty("scores");
+    expect(result).not.toHaveProperty("quotes");
+    expect(result).not.toHaveProperty("transcript_fingerprint");
   });
 
   it("keeps the exact idempotency payload and consumes a natural-close stream", async () => {

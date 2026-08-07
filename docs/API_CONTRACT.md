@@ -4,7 +4,7 @@
 
 `interviewing | finalizing | completed | exited | safety_stopped`
 
-`interviewing` 不包含阶段、coverage、目标维度或测量轮次。恢复快照会带 `user_answer_count`；客户端可将其如实显示为“已进行 N 轮问答”，但不得渲染为阶段、目标进度、必答数量或技术上限。40 次技术保护上限不在公开快照中，只会在命中时返回专用错误。快照还带 transcript 指纹以支持审计，但不带实时评分或路由结论。
+`interviewing` 不包含阶段、coverage、目标维度或测量轮次。恢复快照会带 `user_answer_count`；客户端可将其如实显示为“已进行 N 轮问答”，但不得渲染为阶段、目标进度或必答数量。快照同时带 `technical_turn_cap` 与 `technical_turn_cap_reached`，它们只表示 40 次的稳定性保护上限，不是测量完成条件。快照还带 transcript 指纹以支持审计，但不带实时评分或路由结论。
 
 ## 会话与同意
 
@@ -55,6 +55,7 @@
 
 ## 结束、报告与语音
 
+- `POST /sessions/{uuid}/report-readiness`：在用户主动结束前，对当前未冻结逐字稿执行可选的六维证据准备度预检。预检复用正式终评的证据验证规则，并以会话、精确逐字稿指纹和评分资产指纹作为幂等键。公开响应只含 `status: ready|insufficient|checking`、`ready: boolean|null` 和 `cached: boolean`；不返回缺失维度、分数、引文、理由或逐字稿指纹。预检不冻结会话，不写入正式 `ScoringRun`、`EvidenceItem` 或报告，也不作为生成报告的强制前置条件。
 - `POST /sessions/{uuid}/finalize`：用户主动结束访谈，或对已经冻结且评分失败的会话作幂等评分重试。它不检查阶段、coverage、题库或固定轮次。
 - `POST /sessions/{uuid}/exit`：明确退出且不生成报告。
 - `GET /sessions/{uuid}/report`：获取唯一的结构化报告；未完成时返回相应状态错误。
@@ -62,6 +63,8 @@
 - `GET /sessions/{uuid}/turns/{turn_index}/speech`：只合成已持久化 AI turn；不接受任意正文。
 
 报告不包含数字置信度、人格判断、职业/留学排序或跨议题比较。每一维只公开 `sufficient`、`limited` 或 `unmeasured` 之一；只有充分且有可核验用户原话时接口才可带原始 1–5 分。参与者网页和 PDF 将该固定等级换算为 20–100 分的百分制呈现，并显示综合总分：它是证据充分维度的等权平均换算，证据不足维度不显示为 0 分也不计入平均；管理端仍以原始五级分复核。
+
+`ready` 只表示当前逐字稿在现有终评规则下，六个维度当下均有充分且可核验的用户原话证据；`insufficient` 只用于建议继续访谈，不向用户暴露具体维度，也不阻止用户仍按已有回答生成报告。`checking` 或预检失败同样 fail-open。检查期间若逐字稿或会话状态已改变，旧结果不会展示为当前准备度；异常留下的处理中任务也只能在安全租约超时后被重新执行。正式 `finalize` 会冻结当时逐字稿并重新独立评分；不复用预检的临时结果。
 
 ## 管理员认证、复核与导出
 
@@ -82,7 +85,8 @@
 
 - `409 session_not_accepting_turns`：状态不是 `interviewing`。
 - `409 idempotency_payload_mismatch`：同一键采用不同提交内容。
-- `409 technical_turn_cap_reached`：已达 40 次不可见技术上限。
+- 会话快照通过 `technical_turn_cap` 与 `technical_turn_cap_reached` 显式告知前端技术保护上限状态；当前上限为 40 次已保存回答。达到上限不代表证据已充分。
+- `409 technical_turn_cap_reached`：已达 40 次技术保护上限，不再接收新回答；同一 `client_turn_id` 的已保存失败提交仍可恢复。
 - `422 answer_too_short`：从第二个回答起，普通回答少于 20 个可见字符。首个非空回答及完整匹配“不知道／不清楚／不确定／没想好”等明确不确定表达的后续短答例外；请求、同意或模型结构合同无效仍使用其各自的 `422` 语义。
 - `500 turn_processing_failed`：一次修复后访谈官仍失败；用户 turn 已保留。
 - `503 scoring_failed`：评分失败，会话保持 `finalizing`，可幂等重试。

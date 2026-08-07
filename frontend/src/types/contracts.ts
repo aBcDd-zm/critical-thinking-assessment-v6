@@ -39,6 +39,8 @@ export interface SessionSnapshot {
   participant?: ParticipantProfile;
   turns: DialogueTurn[];
   user_answer_count?: number;
+  technical_turn_cap?: number;
+  technical_turn_cap_reached?: boolean;
   transcript_fingerprint?: string | null;
   finalization_state?: string | null;
   report_available?: boolean;
@@ -127,6 +129,21 @@ export interface AssessmentReport {
 export interface FinalizeResponse {
   session: SessionSnapshot;
   report?: AssessmentReport | null;
+}
+
+export type ReportReadinessStatus = "ready" | "insufficient" | "checking";
+
+/**
+ * Participant-safe report readiness result.
+ *
+ * Dimension names, scores, quotes, and internal scoring details deliberately
+ * stay out of this contract: the check only supports an optional soft gate
+ * before a participant manually ends the interview.
+ */
+export interface ReportReadinessResponse {
+  status: ReportReadinessStatus;
+  ready: boolean | null;
+  cached: boolean;
 }
 
 /** Administrative contracts stay intentionally separate from participant UI. */

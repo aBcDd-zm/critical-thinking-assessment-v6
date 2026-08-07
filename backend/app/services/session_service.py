@@ -6,9 +6,11 @@ import hashlib
 import json
 import threading
 from collections import defaultdict
+from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -16,6 +18,7 @@ from app.models import (
     AgentTrace,
     AssessmentSession,
     DialogueTurn,
+    EvidenceReadinessCheck,
     HumanReview,
     TechnicalAnomaly,
     TurnSubmission,
@@ -29,6 +32,8 @@ from app.schemas import (
     visible_character_count,
 )
 from app.services.model_gateway import (
+    NATURAL_FINAL_SCORER_PROMPT_ID,
+    NATURAL_FINAL_SCORER_PROMPT_VERSION,
     NATURAL_INTERVIEWER_PROMPT_ID,
     NATURAL_INTERVIEWER_PROMPT_VERSION,
     ModelGatewayError,
@@ -37,6 +42,7 @@ from app.services.orchestrator import (
     FinalizationError,
     InterviewContractError,
     InterviewOrchestrator,
+    transcript_fingerprint,
 )
 
 
@@ -50,6 +56,37 @@ class ServiceError(Exception):
 
 _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 TECHNICAL_USER_TURN_CAP = 40
+REPORT_READINESS_RULE_VERSION = "final-output-evidence-v1"
+REPORT_READINESS_LEASE_SECONDS = 15 * 60
+
+
+def _report_readiness_asset_fingerprint() -> str:
+    canonical = json.dumps(
+        {
+            "gateway_mode": settings.model_gateway_mode,
+            "model": settings.deepseek_model,
+            "prompt_template_id": NATURAL_FINAL_SCORER_PROMPT_ID,
+            "prompt_version": NATURAL_FINAL_SCORER_PROMPT_VERSION,
+            "readiness_rule_version": REPORT_READINESS_RULE_VERSION,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def serialize_report_readiness(
+    check: EvidenceReadinessCheck, *, cached: bool
+) -> dict[str, Any]:
+    """Return only participant-safe aggregate readiness information."""
+
+    status = check.status if check.status in {"ready", "insufficient"} else "checking"
+    return {
+        "status": status,
+        "ready": check.ready if status in {"ready", "insufficient"} else None,
+        "cached": cached,
+    }
 
 
 def serialize_turn(turn: DialogueTurn) -> dict[str, Any]:
@@ -96,6 +133,10 @@ def session_snapshot(session: AssessmentSession) -> dict[str, Any]:
             "collaboration_role": session.collaboration_role or "",
         },
         "user_answer_count": session.user_answer_count,
+        "technical_turn_cap": TECHNICAL_USER_TURN_CAP,
+        "technical_turn_cap_reached": (
+            (session.user_answer_count or 0) >= TECHNICAL_USER_TURN_CAP
+        ),
         "transcript_fingerprint": session.transcript_fingerprint,
         "transcript_frozen_at": (
             session.transcript_frozen_at.isoformat()
@@ -523,6 +564,162 @@ class SessionService:
                         )
                     db.commit()
                 raise
+
+    def report_readiness(
+        self, db: Session, session_uuid: str
+    ) -> dict[str, Any]:
+        """Run or reuse a non-blocking evidence-readiness preflight.
+
+        The database uniqueness constraint is the cross-worker idempotency
+        boundary.  A preflight never freezes the transcript and never writes
+        a ``ScoringRun``, ``EvidenceItem``, or ``AssessmentReport``.
+        """
+
+        with _locks[session_uuid]:
+            session = self.get(db, session_uuid)
+            if session.phase != "interviewing":
+                raise ServiceError(
+                    409,
+                    "session_not_open_for_readiness_check",
+                    "当前会话不需要再次检查报告准备度。",
+                )
+
+            current_transcript_fingerprint = transcript_fingerprint(session)
+            asset_fingerprint = _report_readiness_asset_fingerprint()
+            key_filter = (
+                EvidenceReadinessCheck.session_id == session.id,
+                EvidenceReadinessCheck.transcript_fingerprint
+                == current_transcript_fingerprint,
+                EvidenceReadinessCheck.asset_fingerprint == asset_fingerprint,
+            )
+            existing = db.scalar(select(EvidenceReadinessCheck).where(*key_filter))
+            check: EvidenceReadinessCheck | None = None
+            if existing:
+                if existing.status == "failed":
+                    raise ServiceError(
+                        503,
+                        "readiness_check_failed",
+                        "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
+                    )
+                if existing.status != "processing":
+                    return serialize_report_readiness(existing, cached=True)
+
+                # A worker may have stopped after atomically claiming a check.
+                # Reclaim only leases older than the scorer's bounded retry
+                # window; the conditional update keeps concurrent workers from
+                # issuing duplicate calls for the same transcript.
+                now = utcnow()
+                reclaimed = db.execute(
+                    update(EvidenceReadinessCheck)
+                    .where(
+                        EvidenceReadinessCheck.id == existing.id,
+                        EvidenceReadinessCheck.status == "processing",
+                        EvidenceReadinessCheck.created_at
+                        < now - timedelta(seconds=REPORT_READINESS_LEASE_SECONDS),
+                    )
+                    .values(
+                        created_at=now,
+                        completed_at=None,
+                        error=None,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                db.commit()
+                if reclaimed.rowcount != 1:
+                    return serialize_report_readiness(existing, cached=True)
+                db.refresh(existing)
+                check = existing
+
+            if check is None:
+                check = EvidenceReadinessCheck(
+                    session_id=session.id,
+                    transcript_fingerprint=current_transcript_fingerprint,
+                    asset_fingerprint=asset_fingerprint,
+                    status="processing",
+                    prompt_template_id=NATURAL_FINAL_SCORER_PROMPT_ID,
+                    prompt_version=NATURAL_FINAL_SCORER_PROMPT_VERSION,
+                )
+                db.add(check)
+                try:
+                    db.commit()
+                except IntegrityError:
+                    # Another worker atomically claimed this exact transcript
+                    # and asset set. Reuse its result instead of issuing a
+                    # second model call.
+                    db.rollback()
+                    existing = db.scalar(
+                        select(EvidenceReadinessCheck).where(*key_filter)
+                    )
+                    if existing is None:
+                        raise ServiceError(
+                            503,
+                            "readiness_check_failed",
+                            "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
+                        )
+                    if existing.status == "failed":
+                        raise ServiceError(
+                            503,
+                            "readiness_check_failed",
+                            "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
+                        )
+                    return serialize_report_readiness(existing, cached=True)
+
+            check_id = check.id
+            try:
+                assessment = self.orchestrator.assess_report_readiness(session)
+                # The model call can outlive a concurrent request handled by
+                # another worker. End the read transaction and re-check the
+                # open transcript before presenting its aggregate result.
+                db.rollback()
+                current_session = self.get(db, session_uuid)
+                if (
+                    current_session.phase != "interviewing"
+                    or transcript_fingerprint(current_session)
+                    != current_transcript_fingerprint
+                ):
+                    stale = db.get(EvidenceReadinessCheck, check_id)
+                    if stale is not None:
+                        stale.status = "failed"
+                        stale.ready = None
+                        stale.error = "TranscriptChanged"
+                        stale.completed_at = utcnow()
+                        db.commit()
+                    return {
+                        "status": "checking",
+                        "ready": None,
+                        "cached": False,
+                    }
+                persisted = db.get(EvidenceReadinessCheck, check_id)
+                if persisted is None:
+                    raise RuntimeError("readiness_claim_missing")
+                persisted.status = "ready" if assessment.ready else "insufficient"
+                persisted.ready = assessment.ready
+                persisted.sufficient_dimension_count = (
+                    assessment.sufficient_dimension_count
+                )
+                persisted.model_provider = assessment.provider
+                persisted.model_name = assessment.model
+                persisted.prompt_template_id = assessment.prompt_template_id
+                persisted.prompt_version = assessment.prompt_version
+                persisted.repair_used = assessment.repair_used
+                persisted.latency_ms = assessment.latency_ms
+                persisted.completed_at = utcnow()
+                db.commit()
+                return serialize_report_readiness(persisted, cached=False)
+            except Exception as exc:
+                db.rollback()
+                failed = db.get(EvidenceReadinessCheck, check_id)
+                if failed is not None:
+                    failed.status = "failed"
+                    failed.ready = None
+                    failed.error = type(exc).__name__
+                    failed.completed_at = utcnow()
+                    db.commit()
+                raise ServiceError(
+                    503,
+                    "readiness_check_failed",
+                    "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
+                ) from exc
 
     def finalize(self, db: Session, session_uuid: str) -> AssessmentSession:
         with _locks[session_uuid]:

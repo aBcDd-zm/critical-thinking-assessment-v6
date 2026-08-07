@@ -4,6 +4,7 @@ import InterviewView from "./InterviewView.vue";
 
 const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
+  checkReportReadiness: vi.fn(),
   finalizeSession: vi.fn(),
   exitSession: vi.fn(),
   submitTurnStream: vi.fn(),
@@ -16,6 +17,7 @@ vi.mock("@/api/session", async (importOriginal) => {
   return {
     ...actual,
     getSession: mocks.getSession,
+    checkReportReadiness: mocks.checkReportReadiness,
     finalizeSession: mocks.finalizeSession,
     exitSession: mocks.exitSession,
     submitTurnStream: mocks.submitTurnStream,
@@ -46,6 +48,11 @@ describe("InterviewView", () => {
       user_answer_count: 0,
       turns: [openingTurn],
     });
+    mocks.checkReportReadiness.mockResolvedValue({
+      status: "ready",
+      ready: true,
+      cached: false,
+    });
     mocks.finalizeSession.mockResolvedValue({
       session: { uuid: "session-v6", phase: "completed", turns: [], report_available: true },
     });
@@ -75,8 +82,84 @@ describe("InterviewView", () => {
     await wrapper.get("button.compact-action").trigger("click");
     await flushPromises();
 
+    expect(mocks.checkReportReadiness).toHaveBeenCalledWith("session-v6");
     expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
+  it("recommends continuing when evidence is insufficient without exposing scoring details", async () => {
+    mocks.checkReportReadiness.mockResolvedValueOnce({
+      status: "insufficient",
+      ready: false,
+      cached: false,
+    });
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("button.compact-action").trigger("click");
+    await flushPromises();
+
+    expect(mocks.checkReportReadiness).toHaveBeenCalledWith("session-v6");
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("建议继续访谈");
+    expect(wrapper.text()).not.toContain("问题界定");
+    expect(wrapper.text()).not.toContain("证据评估");
+    expect(wrapper.text()).not.toContain("引文");
+  });
+
+  it("allows a participant to generate a report despite insufficient evidence", async () => {
+    mocks.checkReportReadiness.mockResolvedValueOnce({
+      status: "insufficient",
+      ready: false,
+      cached: true,
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("button.compact-action").trigger("click");
+    await flushPromises();
+
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
+  it("fails open when readiness cannot be checked and the participant confirms", async () => {
+    mocks.checkReportReadiness.mockRejectedValueOnce(new Error("readiness unavailable"));
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("button.compact-action").trigger("click");
+    await flushPromises();
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("仍然按现有回答生成报告"));
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+  });
+
+  it("does not misdescribe an in-progress check as insufficient evidence", async () => {
+    mocks.checkReportReadiness.mockResolvedValueOnce({
+      status: "checking",
+      ready: null,
+      cached: true,
+    });
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("button.compact-action").trigger("click");
+    await flushPromises();
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("仍在检查中"));
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+    expect(wrapper.text()).not.toContain("证据不足");
   });
 
   it("shows the editable voice-input controls only when the build flag is explicitly enabled", async () => {
@@ -156,6 +239,7 @@ describe("InterviewView", () => {
 
     expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
   });
 
   it("rechecks the session when finalization times out before routing to the report", async () => {
@@ -320,6 +404,33 @@ describe("InterviewView", () => {
 
     expect(wrapper.get(".round-count").text()).toBe("已进行 2 轮问答");
     expect(wrapper.text()).not.toContain("最多 2");
+  });
+
+  it("replaces the composer with a clear technical-limit handoff after 40 saved answers", async () => {
+    mocks.getSession.mockResolvedValue({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 40,
+      technical_turn_cap: 40,
+      technical_turn_cap_reached: true,
+      turns: [openingTurn],
+    });
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.get(".technical-limit-card").text()).toContain("技术保护上限");
+    expect(wrapper.get(".technical-limit-card").text()).toContain("回答均已保存");
+    expect(wrapper.get(".technical-limit-card").text()).toContain("不代表系统在判定证据已充分");
+    expect(wrapper.find("textarea").exists()).toBe(false);
+    expect(wrapper.find("button.send-button").exists()).toBe(false);
+
+    await wrapper.get(".technical-limit-card button").trigger("click");
+    await flushPromises();
+
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
   });
 
   it("drops an expired local recovery answer instead of submitting it", async () => {

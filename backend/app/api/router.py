@@ -354,6 +354,20 @@ def finalize_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
         return _service_error(exc)
 
 
+@router.post("/sessions/{session_uuid}/report-readiness")
+def report_readiness(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+    """Check aggregate evidence readiness without freezing or scoring a session."""
+
+    try:
+        result = sessions.report_readiness(db, session_uuid)
+        return JSONResponse(
+            status_code=202 if result["status"] == "checking" else 200,
+            content=result,
+        )
+    except ServiceError as exc:
+        return _service_error(exc)
+
+
 @router.post(
     "/admin/sessions/{session_uuid}/finalize",
     dependencies=[Depends(_require_admin), Depends(_require_csrf)],
