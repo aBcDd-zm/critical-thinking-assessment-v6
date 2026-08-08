@@ -273,3 +273,45 @@ def test_final_scorer_bounds_overlong_summary_lists() -> None:
 
     assert output.strengths == ["一", "二"]
     assert output.priorities == ["甲", "乙"]
+
+
+def test_interviewer_normalizes_provider_json_null_string() -> None:
+    output = NaturalInterviewerOutput.model_validate(
+        {
+            "interviewer_message": "当时哪条信息最影响你的判断？",
+            "session_action": "continue",
+            "finish_reason": "null",
+        }
+    )
+
+    assert output.finish_reason is None
+
+
+def test_final_scorer_normalizes_dimension_keyed_object() -> None:
+    dimension_map = {
+        key: {
+            "score": None,
+            "quotes": [],
+            "reason": "证据有限，未充分测得该视角。",
+            "confidence": 0.0,
+            "sufficient": False,
+        }
+        for key in (
+            "problem_definition",
+            "evidence_evaluation",
+            "reasoning_argumentation",
+            "multiple_perspectives",
+            "integrative_decision",
+            "dynamic_adjustment",
+        )
+    }
+
+    output = FinalScorerOutput.model_validate(
+        {
+            "dimensions": dimension_map,
+            "strengths": [],
+            "priorities": [],
+        }
+    )
+
+    assert [item.dimension_key for item in output.dimensions] == list(dimension_map)

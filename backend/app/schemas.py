@@ -76,6 +76,25 @@ class NaturalInterviewerOutput(StrictModelOutput):
     session_action: Literal["continue", "finish"]
     finish_reason: Optional[Literal["enough_understanding", "natural_closure", "user_requested"]] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_json_null_string(cls, value: Any) -> Any:
+        """Accept the provider's occasional JSON-string spelling of null.
+
+        DeepSeek sometimes emits ``"finish_reason": "null"`` even while using
+        JSON mode.  It is unambiguous only for this nullable protocol field, so
+        normalize that exact representation before applying the strict action
+        and finish-reason contract below.
+        """
+
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        finish_reason = normalized.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason.strip().casefold() == "null":
+            normalized["finish_reason"] = None
+        return normalized
+
     @model_validator(mode="after")
     def finish_reason_matches_action(self) -> "NaturalInterviewerOutput":
         if self.session_action == "continue" and self.finish_reason is not None:
@@ -115,11 +134,38 @@ class FinalScorerOutput(StrictModelOutput):
     @model_validator(mode="before")
     @classmethod
     def bound_public_summary_lists(cls, value: Any) -> Any:
-        """Keep an overlong provider summary from blocking the whole report."""
+        """Normalize bounded, equivalent JSON shapes from the provider.
+
+        The public contract remains a six-item list.  JSON-mode providers may
+        instead key that list by the six dimension names; converting that
+        mechanically preserves every score and quote while still letting the
+        post-validator reject missing, duplicated, or unknown dimensions.
+        """
 
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
+        dimension_keys = (
+            "problem_definition",
+            "evidence_evaluation",
+            "reasoning_argumentation",
+            "multiple_perspectives",
+            "integrative_decision",
+            "dynamic_adjustment",
+        )
+        dimensions = normalized.get("dimensions")
+        if dimensions is None and any(key in normalized for key in dimension_keys):
+            dimensions = {key: normalized.pop(key) for key in dimension_keys if key in normalized}
+        if isinstance(dimensions, dict):
+            normalized_dimensions: list[Any] = []
+            for key in dimension_keys:
+                item = dimensions.get(key)
+                if not isinstance(item, dict):
+                    continue
+                normalized_item = dict(item)
+                normalized_item.setdefault("dimension_key", key)
+                normalized_dimensions.append(normalized_item)
+            normalized["dimensions"] = normalized_dimensions
         for field_name in ("strengths", "priorities"):
             items = normalized.get(field_name)
             if isinstance(items, list) and len(items) > 2:
