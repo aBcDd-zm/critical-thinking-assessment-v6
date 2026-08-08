@@ -186,6 +186,9 @@ class FinalScorerOutput(StrictModelOutput):
                         normalized_item.pop(alias, None)
                     elif provider_key == dimension_key:
                         normalized_item.pop(alias, None)
+                observation = normalized_item.pop("observation", None)
+                if "reason" not in normalized_item and isinstance(observation, str):
+                    normalized_item["reason"] = observation
                 normalized_dimensions.append(normalized_item)
             normalized["dimensions"] = normalized_dimensions
         for field_name in ("strengths", "priorities"):

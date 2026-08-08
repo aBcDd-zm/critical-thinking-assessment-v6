@@ -344,3 +344,30 @@ def test_final_scorer_normalizes_provider_dimension_alias(alias: str) -> None:
     )
 
     assert [item.dimension_key for item in output.dimensions] == list(dimension_keys)
+
+
+def test_final_scorer_normalizes_provider_observation_alias() -> None:
+    dimensions = [
+        {
+            "dimension_key": key,
+            "score": None,
+            "quotes": [],
+            "observation": "证据有限，未充分测得该视角。",
+            "confidence": 0.0,
+            "sufficient": False,
+        }
+        for key in (
+            "problem_definition",
+            "evidence_evaluation",
+            "reasoning_argumentation",
+            "multiple_perspectives",
+            "integrative_decision",
+            "dynamic_adjustment",
+        )
+    ]
+
+    output = FinalScorerOutput.model_validate(
+        {"dimensions": dimensions, "strengths": [], "priorities": []}
+    )
+
+    assert all(item.reason == "证据有限，未充分测得该视角。" for item in output.dimensions)
