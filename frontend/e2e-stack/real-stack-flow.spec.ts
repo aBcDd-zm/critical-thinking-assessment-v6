@@ -92,6 +92,20 @@ test("真实 Vue + FastAPI Mock 模型栈：事件开场、幂等恢复、证据
     page,
     "核心问题是是否值得投入；我会核实来源和数据，因为假设可能有反例；也会听导师和团队的角度，比较方案、风险并权衡决定；如果反馈改变，我会调整。",
   );
+  await submitThroughUi(
+    page,
+    "我还会把时间、资金和指导稳定性分别列出来，避免只凭当前情绪作出选择。",
+  );
+  await submitThroughUi(
+    page,
+    "我也想确认最坏情况是否能承受，并把退出条件提前写清楚，再继续核对现实限制。",
+  );
+  await expect(page.getByText("已进行 7 轮问答", { exact: true })).toBeVisible();
+  await expect(page.getByText("现有回答已足够生成完整报告", { exact: true })).toHaveCount(0);
+  await submitThroughUi(
+    page,
+    "我先界定核心问题和问题边界；我会核实数据来源，因为现有假设可能有反例；我会考虑导师和团队的不同角度；我会比较方案，权衡后我决定优先试行两周；新反馈出现时我会调整并重新判断。",
+  );
   await expect(page.getByText("现有回答已足够生成完整报告", { exact: true })).toBeVisible();
   await expect(page.getByText("这段对话可以在这里收束", { exact: true })).toHaveCount(0);
   page.once("dialog", (dialog) => dialog.accept());

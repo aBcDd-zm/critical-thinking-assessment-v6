@@ -38,6 +38,8 @@ const insufficientReadiness = {
   cached: true,
   check_id: 7,
   transcript_fingerprint: transcriptFingerprint,
+  minimum_turns_required: 8,
+  minimum_turns_met: false,
 };
 const readyReadiness = {
   status: "ready" as const,
@@ -45,6 +47,8 @@ const readyReadiness = {
   cached: true,
   check_id: 8,
   transcript_fingerprint: transcriptFingerprint,
+  minimum_turns_required: 8,
+  minimum_turns_met: true,
 };
 
 describe("InterviewView", () => {
@@ -323,7 +327,7 @@ describe("InterviewView", () => {
     mocks.getSession.mockResolvedValueOnce({
       uuid: "session-v6",
       phase: "interviewing",
-      user_answer_count: 1,
+      user_answer_count: 8,
       turns: [openingTurn, { id: 2, turn_index: 1, role: "user", content: validAnswer }],
     });
     mocks.checkReportReadiness.mockResolvedValueOnce(readyReadiness);
@@ -341,6 +345,29 @@ describe("InterviewView", () => {
     await flushPromises();
     expect(wrapper.find(".evidence-ready-card").exists()).toBe(false);
     expect(wrapper.find("textarea").exists()).toBe(true);
+  });
+
+  it("does not show the end card before eight saved answers even if evidence is broad", async () => {
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 7,
+      turns: [openingTurn, { id: 2, turn_index: 1, role: "user", content: validAnswer }],
+    });
+    mocks.checkReportReadiness.mockResolvedValueOnce({
+      ...insufficientReadiness,
+      minimum_turns_met: false,
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.find(".evidence-ready-card").exists()).toBe(false);
+    expect(wrapper.find("textarea").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("至少 8 轮");
+    expect(wrapper.text()).not.toContain("六维");
   });
 
   it("keeps the composer available while the background evidence task is checking", async () => {

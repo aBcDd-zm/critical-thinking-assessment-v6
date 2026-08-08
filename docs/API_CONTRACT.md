@@ -55,9 +55,9 @@
 
 ## 结束、报告与语音
 
-- `POST /sessions/{uuid}/report-readiness`：非阻塞查询当前精确逐字稿的增量证据任务，返回 `status: checking|ready|insufficient|failed`、`ready: boolean|null`、`check_id`、`transcript_fingerprint` 与 `cached`。它不返回维度、分数、引文、理由或缺失项。`retry_failed=true` 只在用户明确重试时重新领取当前失败任务；普通轮询不会形成无限重试。
+- `POST /sessions/{uuid}/report-readiness`：非阻塞查询当前精确逐字稿的增量证据任务，返回 `status: checking|ready|insufficient|failed`、`ready: boolean|null`、`check_id`、`transcript_fingerprint`、`cached`，以及仅供逻辑和审计使用的 `minimum_turns_required`、`minimum_turns_met`。它不返回维度、分数、引文、理由或缺失项；前端不展示最低轮数。`ready=true` 必须同时满足至少 8 个已保存非重复用户回答和六维证据全部充分。`retry_failed=true` 只在用户明确重试时重新领取当前失败任务；普通轮询不会形成无限重试。
 - `POST /sessions/{uuid}/closure-suggestions/{closure_turn_id}/accept`：仅为绑定旧 Prompt 的既有会话保留的回滚兼容接口；V6.2 前端不渲染其自然停点入口。
-- `POST /sessions/{uuid}/finalize`：请求体为 `{ "evidence_check_id": 12, "expected_transcript_fingerprint": "...", "allow_incomplete": false }`。服务端校验检查属于当前会话、逐字稿和评分资产。`ready` 可直接生成完整报告；`insufficient` 只有在 `allow_incomplete=true` 时生成证据有限报告。`checking`、`failed`、陈旧 ID 或指纹不一致均拒绝冻结。
+- `POST /sessions/{uuid}/finalize`：请求体为 `{ "evidence_check_id": 12, "expected_transcript_fingerprint": "...", "allow_incomplete": false }`。服务端校验检查属于当前会话、逐字稿和评分资产。`ready` 可直接生成完整报告；`insufficient` 只有在 `allow_incomplete=true` 时生成证据有限报告。八轮前主动生成时会话标记 `ended_early=true`，仍复用同一快照且不重新评分。`checking`、`failed`、陈旧 ID 或指纹不一致均拒绝冻结。
 - `POST /sessions/{uuid}/exit`：明确退出且不生成报告。
 - `GET /sessions/{uuid}/report`：获取唯一的结构化报告；未完成时返回相应状态错误。
 - `GET /sessions/{uuid}/report.pdf`：下载服务端生成的报告 PDF。

@@ -170,6 +170,8 @@ export interface ReportReadinessResponse {
   cached: boolean;
   check_id: number;
   transcript_fingerprint: string;
+  minimum_turns_required?: number;
+  minimum_turns_met?: boolean;
 }
 
 /** Administrative contracts stay intentionally separate from participant UI. */

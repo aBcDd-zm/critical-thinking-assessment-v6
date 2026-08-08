@@ -111,6 +111,24 @@ def send(client, session_uuid: str, content: str, client_turn_id: str = "client-
     )
 
 
+def send_distinct_answers(
+    client,
+    session_uuid: str,
+    count: int,
+    content: str = DENSE_ANSWER,
+    *,
+    prefix: str = "minimum-turn",
+) -> None:
+    for index in range(1, count + 1):
+        response = send(
+            client,
+            session_uuid,
+            content,
+            f"{prefix}-{index}",
+        )
+        assert response.status_code == 200, response.text
+
+
 def activate_v6_1_1_candidate(monkeypatch) -> None:
     monkeypatch.setattr(
         settings,
@@ -757,7 +775,7 @@ def test_prompt_injection_remains_untrusted_transcript_not_a_controller_instruct
 
 def test_user_finalize_scores_only_exact_user_quotes_and_hides_confidence(client) -> None:
     session_uuid = create_session(client)
-    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
+    send_distinct_answers(client, session_uuid, 8)
     finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
     assert finalized.status_code == 200, finalized.text
     payload = finalized.json()
@@ -794,9 +812,11 @@ def test_report_readiness_is_aggregate_idempotent_and_not_formal_scoring(
         calls += 1
         return original(payload)
 
-    monkeypatch.setattr(gateway, "generate_incremental_evidence", counted)
     session_uuid = create_session(client)
-    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
+    monkeypatch.setattr(settings, "evidence_observer_enabled", False)
+    send_distinct_answers(client, session_uuid, 8)
+    monkeypatch.setattr(settings, "evidence_observer_enabled", True)
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", counted)
     first = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
     second = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
 
@@ -805,6 +825,8 @@ def test_report_readiness_is_aggregate_idempotent_and_not_formal_scoring(
     assert first_payload["status"] == "ready"
     assert first_payload["ready"] is True
     assert first_payload["cached"] is True
+    assert first_payload["minimum_turns_required"] == 8
+    assert first_payload["minimum_turns_met"] is True
     assert isinstance(first_payload["check_id"], int)
     assert len(first_payload["transcript_fingerprint"]) == 64
     assert second.status_code == 200, second.text
@@ -816,6 +838,8 @@ def test_report_readiness_is_aggregate_idempotent_and_not_formal_scoring(
         "cached",
         "check_id",
         "transcript_fingerprint",
+        "minimum_turns_required",
+        "minimum_turns_met",
     }
 
     with TestSession() as db:
@@ -877,6 +901,115 @@ def test_incremental_snapshot_carries_forward_only_validated_prior_evidence(
         assert all(check.result_data is not None for check in checks)
 
 
+def test_minimum_eight_saved_answers_gate_active_closure(client) -> None:
+    session_uuid = create_session(client)
+
+    for index in range(1, 8):
+        assert send(
+            client,
+            session_uuid,
+            DENSE_ANSWER,
+            f"seven-turn-gate-{index}",
+        ).status_code == 200
+        readiness = client.post(
+            f"/api/v1/sessions/{session_uuid}/report-readiness"
+        ).json()
+        assert readiness["status"] == "insufficient"
+        assert readiness["ready"] is False
+        assert readiness["minimum_turns_required"] == 8
+        assert readiness["minimum_turns_met"] is False
+
+    assert send(
+        client,
+        session_uuid,
+        DENSE_ANSWER,
+        "seven-turn-gate-8",
+    ).status_code == 200
+    eighth = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    ).json()
+    assert eighth["status"] == "ready"
+    assert eighth["ready"] is True
+    assert eighth["minimum_turns_met"] is True
+
+
+def test_eight_answers_do_not_force_closure_when_one_dimension_is_ie(client) -> None:
+    session_uuid = create_session(client)
+    five_dimension_answer = (
+        "我先界定核心问题和问题边界，核实数据来源，因为现有样本可能偏差，也寻找反例；"
+        "我会考虑团队和导师的不同角度，再比较方案、权衡后决定优先处理资料核验。"
+    )
+    send_distinct_answers(
+        client,
+        session_uuid,
+        8,
+        five_dimension_answer,
+        prefix="five-dimension-turn",
+    )
+
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    ).json()
+    assert readiness["status"] == "insufficient"
+    assert readiness["ready"] is False
+    assert readiness["minimum_turns_met"] is True
+    with TestSession() as db:
+        check = db.get(EvidenceReadinessCheck, readiness["check_id"])
+        assert check is not None
+        assert check.sufficient_dimension_count == 5
+
+
+def test_duplicate_recovery_and_uncertainty_count_only_saved_answers(client) -> None:
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, "不知道", "uncertainty-turn").status_code == 200
+    assert send(client, session_uuid, "不知道", "uncertainty-turn").status_code == 200
+    snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
+    assert snapshot["user_answer_count"] == 1
+
+    send_distinct_answers(
+        client,
+        session_uuid,
+        7,
+        prefix="after-uncertainty-turn",
+    )
+    snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
+    assert snapshot["user_answer_count"] == 8
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    ).json()
+    assert readiness["minimum_turns_met"] is True
+    assert readiness["ready"] is True
+
+
+def test_three_turn_transcript_does_not_infer_unshown_decision_or_adjustment(client) -> None:
+    session_uuid = create_session(client)
+    answers = [
+        "我在项目中需要判断是否继续做当前选题，核心问题是时间有限而资料还不完整。",
+        "我查了三份公开资料，也考虑导师和团队的不同角度，发现样本来源并不一致。",
+        "这些情况让我意识到风险存在，但我还没有决定采取什么行动。",
+    ]
+    for index, answer in enumerate(answers, start=1):
+        assert send(
+            client,
+            session_uuid,
+            answer,
+            f"three-turn-regression-{index}",
+        ).status_code == 200
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    ).json()
+    assert readiness["ready"] is False
+    with TestSession() as db:
+        check = db.get(EvidenceReadinessCheck, readiness["check_id"])
+        assert check is not None and check.result_data is not None
+        by_key = {
+            item["dimension_key"]: item
+            for item in check.result_data["dimensions"]
+        }
+        assert by_key["integrative_decision"]["score"] is None
+        assert by_key["dynamic_adjustment"]["score"] is None
+
+
 def test_background_snapshot_does_not_wait_and_processing_cannot_freeze(
     client, monkeypatch
 ) -> None:
@@ -918,7 +1051,7 @@ def test_v6_2_finalization_promotes_the_exact_snapshot_without_a_model_call(
     client, monkeypatch
 ) -> None:
     session_uuid = create_session(client)
-    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
+    send_distinct_answers(client, session_uuid, 8)
     readiness = client.post(
         f"/api/v1/sessions/{session_uuid}/report-readiness"
     ).json()
@@ -951,7 +1084,9 @@ def test_v6_2_finalization_promotes_the_exact_snapshot_without_a_model_call(
         assert report.version == "v6.2"
 
 
-def test_insufficient_readiness_is_advisory_and_still_allows_finalization(client) -> None:
+def test_insufficient_readiness_is_advisory_and_still_allows_finalization(
+    client, monkeypatch
+) -> None:
     session_uuid = create_session(client)
     answer = "这件事情我还没有完全想清楚，今天只想先把现在的感受说出来。"
     assert send(client, session_uuid, answer).status_code == 200
@@ -962,6 +1097,17 @@ def test_insufficient_readiness_is_advisory_and_still_allows_finalization(client
     assert readiness_payload["status"] == "insufficient"
     assert readiness_payload["ready"] is False
     assert readiness_payload["cached"] is True
+    assert readiness_payload["minimum_turns_required"] == 8
+    assert readiness_payload["minimum_turns_met"] is False
+
+    def forbidden_final_score(_payload):
+        raise AssertionError("early V6.2.1 report must reuse the evidence snapshot")
+
+    monkeypatch.setattr(
+        api_router.sessions.orchestrator.gateway,
+        "generate_final_scorer",
+        forbidden_final_score,
+    )
 
     finalized = client.post(
         f"/api/v1/sessions/{session_uuid}/finalize",
@@ -975,10 +1121,21 @@ def test_insufficient_readiness_is_advisory_and_still_allows_finalization(client
     )
     assert finalized.status_code == 200, finalized.text
     assert finalized.json()["session"]["phase"] == "completed"
+    assert finalized.json()["session"]["ended_early"] is True
+    assert "提前结束" in finalized.json()["report"]["summary"]
+    assert "证据有限" in finalized.json()["report"]["experimental_notice"]
+    assert finalized.json()["report"]["manual_review_recommended"] is True
     assert all(
         dimension["score"] is None
         for dimension in finalized.json()["report"]["dimensions"]
     )
+
+
+def test_readiness_asset_fingerprint_includes_minimum_turn_rule(monkeypatch) -> None:
+    original = session_service_module._report_readiness_asset_fingerprint()
+    monkeypatch.setattr(settings, "natural_interview_min_user_turns", 7)
+    changed = session_service_module._report_readiness_asset_fingerprint()
+    assert changed != original
 
 
 def test_readiness_failure_keeps_session_open_and_can_be_retried(
@@ -1020,7 +1177,8 @@ def test_readiness_failure_keeps_session_open_and_can_be_retried(
         f"/api/v1/sessions/{session_uuid}/report-readiness?retry_failed=true"
     )
     assert recovered.status_code == 200, recovered.text
-    assert recovered.json()["status"] == "ready"
+    assert recovered.json()["status"] == "insufficient"
+    assert recovered.json()["ready"] is False
     finalized = client.post(
         f"/api/v1/sessions/{session_uuid}/finalize",
         json={
@@ -1028,7 +1186,7 @@ def test_readiness_failure_keeps_session_open_and_can_be_retried(
             "expected_transcript_fingerprint": recovered.json()[
                 "transcript_fingerprint"
             ],
-            "allow_incomplete": False,
+            "allow_incomplete": True,
         },
     )
     assert finalized.status_code == 200, finalized.text
@@ -1093,14 +1251,14 @@ def test_stale_processing_readiness_lease_can_be_reclaimed(client, monkeypatch) 
     readiness = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
 
     assert readiness.status_code == 200, readiness.text
-    assert readiness.json()["status"] == "ready"
-    assert readiness.json()["ready"] is True
+    assert readiness.json()["status"] == "insufficient"
+    assert readiness.json()["ready"] is False
     assert calls == 1
     with TestSession() as db:
         checks = db.scalars(select(EvidenceReadinessCheck)).all()
         assert len(checks) == 1
         assert checks[0].id == stale_id
-        assert checks[0].status == "ready"
+        assert checks[0].status == "insufficient"
 
 
 def test_public_pdf_score_label_uses_a_hundred_point_presentation() -> None:
@@ -2052,7 +2210,7 @@ def test_invalid_scorer_quote_fails_then_finalize_retries(client, monkeypatch) -
             "expected_transcript_fingerprint": readiness[
                 "transcript_fingerprint"
             ],
-            "allow_incomplete": False,
+            "allow_incomplete": True,
         },
     )
     assert recovered.status_code == 200
@@ -2107,7 +2265,19 @@ def test_public_report_strips_personality_and_advice_text_from_final_scorer(
     monkeypatch.setattr(gateway, "generate_incremental_evidence", unsafe_public_language)
     session_uuid = create_session(client)
     assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
-    finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    ).json()
+    finalized = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness["check_id"],
+            "expected_transcript_fingerprint": readiness[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": True,
+        },
+    )
     assert finalized.status_code == 200, finalized.text
     report = finalized.json()["report"]
     rendered = json.dumps(report, ensure_ascii=False)

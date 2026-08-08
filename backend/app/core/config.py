@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     deepseek_evidence_max_tokens: int = 2000
     deepseek_evidence_primary_timeout_seconds: float = 8.0
     deepseek_evidence_total_timeout_seconds: float = 15.0
+    # Active closure is allowed only after this many distinct, persisted user
+    # answers. This is a lower guardrail rather than a forced stopping point.
+    natural_interview_min_user_turns: int = Field(default=8, ge=1, le=40)
     tts_mode: Literal["fake", "doubao", "disabled"] = "fake"
     doubao_tts_api_key: str = ""
     doubao_tts_resource_id: str = "seed-tts-2.0"

@@ -89,6 +89,18 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
         )
 
 
+def test_minimum_user_turn_guard_defaults_to_eight_and_stays_within_cap() -> None:
+    assert Settings(_env_file=None).natural_interview_min_user_turns == 8
+    assert Settings(
+        _env_file=None,
+        natural_interview_min_user_turns=40,
+    ).natural_interview_min_user_turns == 40
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, natural_interview_min_user_turns=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, natural_interview_min_user_turns=41)
+
+
 def test_v6_0_3_rollback_selects_the_preserved_prompt_in_a_fresh_process() -> None:
     env = os.environ.copy()
     env.update(

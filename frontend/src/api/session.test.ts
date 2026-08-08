@@ -65,6 +65,8 @@ describe("V6 natural interview NDJSON client", () => {
       cached: true,
       check_id: 12,
       transcript_fingerprint: "e".repeat(64),
+      minimum_turns_required: 8,
+      minimum_turns_met: false,
     };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify(response), {
@@ -83,6 +85,8 @@ describe("V6 natural interview NDJSON client", () => {
     expect(result).not.toHaveProperty("quotes");
     expect(result).toHaveProperty("transcript_fingerprint", "e".repeat(64));
     expect(result).toHaveProperty("check_id", 12);
+    expect(result).toHaveProperty("minimum_turns_required", 8);
+    expect(result).toHaveProperty("minimum_turns_met", false);
   });
 
   it("retries a failed exact evidence snapshot only when explicitly requested", async () => {

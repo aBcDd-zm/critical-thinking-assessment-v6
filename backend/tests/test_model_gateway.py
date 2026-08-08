@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import httpx
@@ -7,7 +8,14 @@ import pytest
 
 from app.core.config import settings
 from app.schemas import FinalScorerOutput, NaturalInterviewerOutput
-from app.services.model_gateway import ModelGatewayError, ModelGatewayService
+from app.services.model_gateway import (
+    INCREMENTAL_EVIDENCE_PROMPT_ID,
+    INCREMENTAL_EVIDENCE_PROMPT_VERSION,
+    INCREMENTAL_EVIDENCE_SYSTEM_PROMPT,
+    INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0,
+    ModelGatewayError,
+    ModelGatewayService,
+)
 
 
 class EmptyModelResponse:
@@ -166,6 +174,25 @@ def test_incremental_evidence_uses_its_own_bounded_non_thinking_profile(
     assert captured["thinking"] == "disabled"
     assert captured["primary_timeout_seconds"] == 8.0
     assert captured["total_timeout_seconds"] == 15.0
+
+
+def test_v6_2_1_incremental_prompt_preserves_old_text_and_requires_direct_behavior() -> None:
+    assert INCREMENTAL_EVIDENCE_PROMPT_ID == "natural_incremental_evidence_v6.2.1"
+    assert INCREMENTAL_EVIDENCE_PROMPT_VERSION == "v6.2.1"
+    assert INCREMENTAL_EVIDENCE_SYSTEM_PROMPT.startswith(
+        INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0
+    )
+    assert hashlib.sha256(
+        INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0.encode("utf-8")
+    ).hexdigest() == "057a11c05588bfd5d430f11591bd2a691b89b28ea573df8a81ddd0e61e55ba51"
+    compact = "".join(INCREMENTAL_EVIDENCE_SYSTEM_PROMPT.split())
+    assert "没有展示机会、没有谈到、没有说明行动或没有说明调整" in compact
+    assert "不能把这些缺失当成低水平行为并给1分" in compact
+    assert "数字分数只能由用户直接表达的具体行为支持" in compact
+    assert "不能同时使多个维度sufficient=true" in compact
+    assert "综合决策必须至少直接呈现实际选择" in compact
+    assert "动态调整必须直接呈现已经如何调整" in compact
+    assert "证据缺失永远不等于低能力" in compact
 
 
 def test_two_empty_model_outputs_raise_distinct_terminal_error(

@@ -120,13 +120,15 @@ async function installMockBackend(page: Page) {
       return;
     }
     if (path === `/sessions/${UUID}/report-readiness` && request.method() === "POST") {
-      const ready = state.answers >= 2;
+      const ready = state.answers >= 8;
       await fulfillJson(route, {
         status: ready ? "ready" : "insufficient",
         ready,
         cached: true,
         check_id: state.answers,
         transcript_fingerprint: transcriptFingerprint(state),
+        minimum_turns_required: 8,
+        minimum_turns_met: state.answers >= 8,
       });
       return;
     }
@@ -169,8 +171,8 @@ async function installMockBackend(page: Page) {
 
 async function startInterview(page: Page) {
   await page.goto("/assessment");
-  await expect(page.getByText("这不是与 AI 随意聊天", { exact: false })).toBeVisible();
-  await expect(page.getByText("没有固定题单或轮数", { exact: false })).toBeVisible();
+  await expect(page.getByText("在访谈对话中展现你的思维", { exact: true })).toBeVisible();
+  await expect(page.getByText("请从一件真实、具体、需要判断的经历说起", { exact: true })).toBeVisible();
   await page.getByLabel("参与编号或昵称").fill("本地流程验收");
   await page.getByLabel(/我已阅读并理解/).check();
   await page.getByRole("button", { name: /开始访谈/ }).click();
@@ -196,7 +198,13 @@ test("consent → natural conversation → evidence-ready snapshot → report", 
   await page.getByLabel("你的回答").fill("我再想想。");
   await expect(page.getByRole("button", { name: /提交回答/ })).toBeDisabled();
   await expect(page.getByText(/还差 \d+ 字/)).toBeVisible();
-  await page.getByLabel("你的回答").fill("我想先确认自己真正重视什么，也想弄清楚这个选择会带来的变化。");
+  for (let answer = 2; answer <= 7; answer += 1) {
+    await page.getByLabel("你的回答").fill(`第${answer}次回答：我想继续核对资料来源、不同人的考虑和可能改变判断的条件。`);
+    await page.getByLabel("你的回答").press("Enter");
+    await expect(page.getByText(`已进行 ${answer} 轮问答`, { exact: true })).toBeVisible();
+    await expect(page.getByText("现有回答已足够生成完整报告", { exact: true })).toHaveCount(0);
+  }
+  await page.getByLabel("你的回答").fill("第8次回答：我会比较各个方案，说明优先级，并在新反馈出现时调整行动。");
   await page.getByLabel("你的回答").press("Enter");
   await expect(page.getByText("现有回答已足够生成完整报告", { exact: true })).toBeVisible();
   await expect(page.getByText("这段对话可以在这里收束", { exact: true })).toHaveCount(0);
@@ -206,8 +214,8 @@ test("consent → natural conversation → evidence-ready snapshot → report", 
   await expect(page.getByRole("heading", { name: "访谈结果" })).toBeVisible();
   await expect(page.locator(".radar-chart")).toBeVisible();
   await expect(page.getByText("综合总分", { exact: true })).toBeVisible();
-  expect(state.answers).toBe(2);
-  expect(state.payloads).toHaveLength(2);
+  expect(state.answers).toBe(8);
+  expect(state.payloads).toHaveLength(8);
   expect(state.payloads.every((payload) => !JSON.stringify(payload).includes("coverage"))).toBe(true);
 });
 

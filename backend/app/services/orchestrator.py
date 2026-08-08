@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.domain.catalog import DIMENSIONS, DIMENSION_BY_KEY
 from app.models import (
     AssessmentReport,
@@ -214,7 +215,10 @@ class ReportReadinessAssessment:
     """
 
     ready: bool
+    evidence_ready: bool
     sufficient_dimension_count: int
+    minimum_turns_required: int
+    minimum_turns_met: bool
     provider: str
     model: str
     prompt_template_id: str
@@ -554,9 +558,15 @@ class InterviewOrchestrator:
             and dimension.sufficient
             and bool(dimension.quotes)
         )
+        minimum_turns_required = settings.natural_interview_min_user_turns
+        minimum_turns_met = session.user_answer_count >= minimum_turns_required
+        evidence_ready = sufficient_dimension_count == len(DIMENSIONS)
         return ReportReadinessAssessment(
-            ready=sufficient_dimension_count == len(DIMENSIONS),
+            ready=evidence_ready and minimum_turns_met,
+            evidence_ready=evidence_ready,
             sufficient_dimension_count=sufficient_dimension_count,
+            minimum_turns_required=minimum_turns_required,
+            minimum_turns_met=minimum_turns_met,
             provider=call.provider,
             model=call.model,
             prompt_template_id=NATURAL_FINAL_SCORER_PROMPT_ID,
@@ -588,9 +598,18 @@ class InterviewOrchestrator:
             and dimension.sufficient
             and bool(dimension.quotes)
         )
+        minimum_turns_required = settings.natural_interview_min_user_turns
+        saved_user_answer_count = sum(
+            1 for item in transcript if item.get("role") == "user"
+        )
+        minimum_turns_met = saved_user_answer_count >= minimum_turns_required
+        evidence_ready = sufficient_dimension_count == len(DIMENSIONS)
         return ReportReadinessAssessment(
-            ready=sufficient_dimension_count == len(DIMENSIONS),
+            ready=evidence_ready and minimum_turns_met,
+            evidence_ready=evidence_ready,
             sufficient_dimension_count=sufficient_dimension_count,
+            minimum_turns_required=minimum_turns_required,
+            minimum_turns_met=minimum_turns_met,
             provider=call.provider,
             model=call.model,
             prompt_template_id=INCREMENTAL_EVIDENCE_PROMPT_ID,
@@ -667,7 +686,7 @@ class InterviewOrchestrator:
             session.phase = "completed"
             session.finalization_state = "completed"
             session.completed_at = utcnow()
-            requires_manual_review = any(
+            requires_manual_review = session.ended_early or any(
                 dimension.score is None for dimension in validated.dimensions
             )
             run.manual_review_recommended = requires_manual_review
@@ -874,14 +893,33 @@ class InterviewOrchestrator:
                     "observable_behaviors": list(dimension.observable_behaviors),
                 }
             )
+        ended_early_notice = (
+            "本次访谈由用户在达到完整报告准备条件前结束；报告仅依据当时已保存的回答，"
+            "证据有限部分会如实标注。"
+            if session.ended_early
+            else None
+        )
         return {
             "session_uuid": session.uuid,
-            "experimental_notice": "思衡 V6 是探索性、非标准化的自然访谈演示，不支持跨用户比较或正式效度结论。",
-            "summary": "报告只整理本次访谈中可核对的用户原话；缺少证据的视角不会被补问或强行评分。",
+            "experimental_notice": " ".join(
+                item
+                for item in (
+                    ended_early_notice,
+                    "思衡 V6 是探索性、非标准化的自然访谈演示，不支持跨用户比较或正式效度结论。",
+                )
+                if item
+            ),
+            "summary": (
+                "本次为提前结束报告。报告只整理当时已保存且可核对的用户原话；"
+                "缺少证据的视角不会被补问或强行评分。"
+                if session.ended_early
+                else "报告只整理本次访谈中可核对的用户原话；缺少证据的视角不会被补问或强行评分。"
+            ),
             "dimensions": entries,
             "strengths": output.strengths,
             "priorities": output.priorities,
-            "manual_review_recommended": any(item.score is None for item in output.dimensions),
+            "manual_review_recommended": session.ended_early
+            or any(item.score is None for item in output.dimensions),
             "disclaimer": "数字结果不是人格判断、职业建议或综合排名；请结合具体情境谨慎理解。",
         }
 

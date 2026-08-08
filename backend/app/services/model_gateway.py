@@ -27,8 +27,8 @@ from app.schemas import (
 
 NATURAL_FINAL_SCORER_PROMPT_ID = "natural_final_scorer_v6.1.0"
 NATURAL_FINAL_SCORER_PROMPT_VERSION = "v6.1.0"
-INCREMENTAL_EVIDENCE_PROMPT_ID = "natural_incremental_evidence_v6.2.0"
-INCREMENTAL_EVIDENCE_PROMPT_VERSION = "v6.2.0"
+INCREMENTAL_EVIDENCE_PROMPT_ID = "natural_incremental_evidence_v6.2.1"
+INCREMENTAL_EVIDENCE_PROMPT_VERSION = "v6.2.1"
 
 T = TypeVar("T")
 
@@ -434,7 +434,7 @@ score=null、sufficient=false、quotes=[]，理由使用“证据有限”或“
 必须恰好包含六个维度。"""
 
 
-INCREMENTAL_EVIDENCE_SYSTEM_PROMPT = f"""你是 V6.2 后台增量证据整理器。你不与用户对话，
+INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0 = f"""你是 V6.2 后台增量证据整理器。你不与用户对话，
 不提问，不决定访谈语气。你只依据用户逐字原话，把上一份已验证快照与新增用户回答
 合并为当前完整的六维证据快照。不得累加每轮分数；应依据累计证据重新选择当前最保守的行为等级。
 
@@ -451,6 +451,25 @@ score=null、sufficient=false、quotes=[]。回答长度、语言流畅、自信
 
 strengths 和 priorities 只整理已有原话支持的简短观察。仅返回与 FinalScorerOutput 完全相同的 JSON，
 必须恰好包含六个维度，不得返回对话文案。"""
+
+
+INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_1 = INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0 + """
+
+V6.2.1 严格取证规则：
+1. 先判断该维度是否被询问，或用户是否在自然叙述中获得了基本展示机会。没有展示机会、没有谈到、
+   没有说明行动或没有说明调整，都表示尚未测得，必须返回 null/IE；不能把这些缺失当成低水平行为并给 1 分。
+2. 数字分数只能由用户直接表达的具体行为支持。仅仅提到某个主题、风险、数据、他人或条件，或者评分者
+   从上下文推测用户“可能会”怎样做，都不构成相应行为证据。
+3. 一条只与多个维度话题相关、但没有分别直接体现各维度行为的原话，不能同时使多个维度 sufficient=true。
+   同一较长原话只有在其中分别清楚陈述了不同的具体行为时，才可为多个维度提供各自可核验的直接证据。
+4. 综合决策必须至少直接呈现实际选择、行动、优先级、权衡条件或风险控制之一；只说事情很重要、存在风险
+   或需要权衡，必须为 IE。动态调整必须直接呈现已经如何调整，或明确的新信息触发器及对应调整动作；
+   只承认信息会变化、方案可能失败或需要再看，必须为 IE。
+5. 低分表示用户已经获得展示机会且原话直接呈现了较低层级行为；证据缺失永远不等于低能力。
+"""
+
+
+INCREMENTAL_EVIDENCE_SYSTEM_PROMPT = INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_1
 
 
 class ModelGatewayService:
@@ -995,14 +1014,29 @@ class ModelGatewayService:
             {"turn_index": int(item["turn_index"]), "content": str(item["content"])}
             for item in payload.get("new_user_turns") or []
         ]
-        keywords: dict[str, tuple[str, ...]] = {
-            "problem_definition": ("问题", "边界", "核心", "目标", "界定"),
-            "evidence_evaluation": ("证据", "数据", "核实", "来源", "信息"),
-            "reasoning_argumentation": ("假设", "原因", "推理", "反例", "因为"),
-            "multiple_perspectives": ("家人", "导师", "团队", "他人", "角度"),
-            "integrative_decision": ("比较", "权衡", "方案", "决定", "风险"),
-            "dynamic_adjustment": ("如果", "调整", "复盘", "条件", "反馈"),
+        behavior_markers: dict[str, tuple[str, ...]] = {
+            "problem_definition": ("界定", "核心问题", "问题边界", "真正需要"),
+            "evidence_evaluation": ("核实", "查了", "对比信息", "数据来源", "信息来源", "证据评估"),
+            "reasoning_argumentation": ("假设", "因为", "反例", "推理"),
+            "multiple_perspectives": ("考虑家人", "考虑导师", "考虑团队", "不同角度", "不同立场"),
+            "integrative_decision": ("我会比较", "权衡后", "我决定", "我选择", "优先", "采取方案"),
+            "dynamic_adjustment": ("我会调整", "我调整了", "就调整", "重新判断", "重新决定", "复盘后"),
         }
+
+        def directly_exhibits_behavior(dimension_key: str, content: str) -> bool:
+            if dimension_key == "integrative_decision" and any(
+                marker in content
+                for marker in ("还没有决定", "没有决定", "尚未决定", "未决定")
+            ):
+                return False
+            if dimension_key == "dynamic_adjustment" and any(
+                marker in content
+                for marker in ("没有调整", "尚未调整", "未调整")
+            ):
+                return False
+            return any(
+                marker in content for marker in behavior_markers[dimension_key]
+            )
         previous_by_key = (
             {item.dimension_key: item for item in previous.dimensions}
             if previous
@@ -1016,9 +1050,8 @@ class ModelGatewayService:
                     turn
                     for turn in new_turns
                     if len(turn["content"].strip()) >= 12
-                    and any(
-                        keyword in turn["content"]
-                        for keyword in keywords[dimension.key]
+                    and directly_exhibits_behavior(
+                        dimension.key, turn["content"]
                     )
                 ),
                 None,

@@ -63,7 +63,7 @@ class ServiceError(Exception):
 
 _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 TECHNICAL_USER_TURN_CAP = 40
-REPORT_READINESS_RULE_VERSION = "incremental-evidence-v2"
+REPORT_READINESS_RULE_VERSION = "incremental-evidence-v3-min8-strict"
 # Evidence calls have a hard 15-second wall-clock budget. A short grace period
 # lets a worker commit its result before another process reclaims an orphaned
 # lease after a restart.
@@ -86,6 +86,7 @@ def _report_readiness_asset_fingerprint() -> str:
                 INCREMENTAL_EVIDENCE_SYSTEM_PROMPT.encode("utf-8")
             ).hexdigest(),
             "readiness_rule_version": REPORT_READINESS_RULE_VERSION,
+            "minimum_user_turns": settings.natural_interview_min_user_turns,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -95,7 +96,7 @@ def _report_readiness_asset_fingerprint() -> str:
 
 
 def serialize_report_readiness(
-    check: EvidenceReadinessCheck, *, cached: bool
+    check: EvidenceReadinessCheck, *, cached: bool, saved_user_answer_count: int
 ) -> dict[str, Any]:
     """Return only participant-safe aggregate readiness information."""
 
@@ -110,6 +111,10 @@ def serialize_report_readiness(
         "cached": cached,
         "check_id": check.id,
         "transcript_fingerprint": check.transcript_fingerprint,
+        "minimum_turns_required": settings.natural_interview_min_user_turns,
+        "minimum_turns_met": (
+            saved_user_answer_count >= settings.natural_interview_min_user_turns
+        ),
     }
 
 
@@ -878,7 +883,10 @@ class SessionService:
                         output_contract={
                             "status": check.status,
                             "ready": assessment.ready,
+                            "evidence_ready": assessment.evidence_ready,
                             "sufficient_dimension_count": assessment.sufficient_dimension_count,
+                            "minimum_turns_required": assessment.minimum_turns_required,
+                            "minimum_turns_met": assessment.minimum_turns_met,
                             "last_user_turn_index": check.last_user_turn_index,
                             "attempt_count": assessment.attempt_count,
                         },
@@ -1012,6 +1020,7 @@ class SessionService:
         return serialize_report_readiness(
             check,
             cached=check.status in {"ready", "insufficient"},
+            saved_user_answer_count=session.user_answer_count,
         )
 
     def _run_finalization(
@@ -1210,6 +1219,10 @@ class SessionService:
                         "evidence_insufficient",
                         "现有回答尚不足以支持完整报告；确认后可生成证据有限的报告。",
                     )
+                session.ended_early = (
+                    session.user_answer_count
+                    < settings.natural_interview_min_user_turns
+                )
                 session.phase = "finalizing"
                 session.finalization_state = "user_requested"
                 frozen_fingerprint = self.orchestrator.freeze_transcript(session)
@@ -1229,6 +1242,9 @@ class SessionService:
                             "evidence_check_id": check.id,
                             "evidence_status": check.status,
                             "allow_incomplete": request.allow_incomplete,
+                            "ended_early": session.ended_early,
+                            "saved_user_answer_count": session.user_answer_count,
+                            "minimum_turns_required": settings.natural_interview_min_user_turns,
                             "transcript_fingerprint": frozen_fingerprint,
                         },
                         renderer_status="accepted",
