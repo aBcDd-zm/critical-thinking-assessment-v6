@@ -166,6 +166,22 @@ class FinalScorerOutput(StrictModelOutput):
                 normalized_item.setdefault("dimension_key", key)
                 normalized_dimensions.append(normalized_item)
             normalized["dimensions"] = normalized_dimensions
+        elif isinstance(dimensions, list):
+            normalized_dimensions = []
+            for item in dimensions:
+                if not isinstance(item, dict):
+                    normalized_dimensions.append(item)
+                    continue
+                normalized_item = dict(item)
+                provider_name = normalized_item.get("name")
+                dimension_key = normalized_item.get("dimension_key")
+                if dimension_key is None and isinstance(provider_name, str):
+                    normalized_item["dimension_key"] = provider_name
+                    normalized_item.pop("name", None)
+                elif provider_name == dimension_key:
+                    normalized_item.pop("name", None)
+                normalized_dimensions.append(normalized_item)
+            normalized["dimensions"] = normalized_dimensions
         for field_name in ("strengths", "priorities"):
             items = normalized.get(field_name)
             if isinstance(items, list) and len(items) > 2:
