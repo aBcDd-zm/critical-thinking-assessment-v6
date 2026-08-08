@@ -37,9 +37,8 @@ async function startInterview() {
     <section class="consent-card" aria-labelledby="consent-title">
       <a class="brand" href="/assessment" aria-label="思衡首页"><span>思衡</span></a>
       <header class="consent-intro">
-        <span class="eyebrow">批判性思维探索访谈</span>
-        <h1 id="consent-title">开始一次具体的思维访谈</h1>
-        <p>感谢你参与「思衡」。这不是与 AI 随意聊天：请从工作、学习、项目或生活中，选择一件亲身经历、需要判断、取舍或行动的具体事情，围绕同一件事说明经过、想法和理由。</p>
+        <h1 id="consent-title">在访谈对话中展现你的思维</h1>
+        <p>请从一件真实、具体、需要判断的经历说起</p>
       </header>
 
       <aside v-if="recentSession" class="resume-banner" aria-labelledby="resume-title">
@@ -49,16 +48,6 @@ async function startInterview() {
         </div>
         <RouterLink class="secondary-button small" :to="`/assessment/session/${recentSession}`">继续上次访谈</RouterLink>
       </aside>
-
-      <section class="assessment-guide" aria-labelledby="guide-title">
-        <h2 id="guide-title">开始前请了解</h2>
-        <ul class="process-facts">
-          <li>没有标准答案，也不需要专业术语；请按真实想法回答。</li>
-          <li>首答可以简短；第二次起，普通回答至少需要 20 个非空白字符。不知道或没想好时可直接说明。</li>
-          <li>没有固定题单或轮数，AI 每次只会询问一个主要问题；内容初步谈清时会建议结束，是否生成报告由你确认。时长因回答而异。</li>
-        </ul>
-        <p class="evidence-boundary">报告只依据可核对原话；证据不足会标注「证据有限」或「未充分测得」，不代表能力不足。本工具是探索性、非标准化访谈，不用于诊断、人格或智力判断、跨人排名或替代专业决定。</p>
-      </section>
 
       <form :aria-busy="submitting" @submit.prevent="startInterview">
         <label for="participant-alias">
