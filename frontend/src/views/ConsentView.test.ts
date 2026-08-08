@@ -21,7 +21,7 @@ describe("ConsentView", () => {
     });
   });
 
-  it("shows only the two-line task guidance and explicit consent", async () => {
+  it("shows concise task guidance, current completion rules, and explicit consent", async () => {
     const wrapper = mount(ConsentView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
     });
@@ -29,9 +29,15 @@ describe("ConsentView", () => {
     expect(wrapper.get("h1").text()).toBe("在访谈对话中展现你的思维");
     expect(wrapper.get(".consent-intro p").text()).toBe("请从一件真实、具体、需要判断的经历说起");
     expect(wrapper.find(".eyebrow").exists()).toBe(false);
-    expect(wrapper.find(".assessment-guide").exists()).toBe(false);
+    expect(wrapper.get(".assessment-guide").text()).toContain("开始前请了解");
+    expect(wrapper.get(".assessment-guide").text()).toContain("没有标准答案");
+    expect(wrapper.get(".assessment-guide").text()).toContain("至少需要 20 个非空白字符");
+    expect(wrapper.get(".assessment-guide").text()).toContain("至少完成 8 轮回答");
+    expect(wrapper.get(".assessment-guide").text()).toContain("现有证据足以支持完整报告");
+    expect(wrapper.get(".assessment-guide").text()).toContain("是否生成报告由你确认");
+    expect(wrapper.get(".assessment-guide").text()).toContain("证据有限");
+    expect(wrapper.get(".assessment-guide").text()).toContain("探索性、非标准化访谈");
     expect(wrapper.text()).not.toContain("这不是与 AI 随意聊天");
-    expect(wrapper.text()).not.toContain("开始前请了解");
     expect(wrapper.text()).not.toContain("内容初步谈清");
     expect(wrapper.text()).toContain("隐私摘要");
     expect(wrapper.text()).toContain("发送给已配置的模型服务");
