@@ -71,10 +71,57 @@ class StrictModelOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class DecisionAnchorOutput(StrictModelOutput):
+    """Exact participant span that anchors the interview's decision thread."""
+
+    turn_index: int = Field(ge=0)
+    quote: str = Field(min_length=1, max_length=12000)
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    text_hash: Optional[str] = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def offsets_bound_the_quote(self) -> "DecisionAnchorOutput":
+        if self.end <= self.start:
+            raise ValueError("decision anchor end must be greater than start")
+        if self.end - self.start != len(self.quote):
+            raise ValueError("decision anchor offsets must exactly bound quote")
+        return self
+
+
+class NaturalInterviewNavigation(StrictModelOutput):
+    """Private audit navigation; never a dimension or scripted-stage controller."""
+
+    decision_anchor: DecisionAnchorOutput
+    focus_kind: Literal[
+        "decision_problem",
+        "basis",
+        "tradeoff",
+        "action",
+        "outcome",
+        "adjustment",
+        "source_ownership",
+        "other",
+    ]
+    mainline_relation: Literal[
+        "core",
+        "branch",
+        "return",
+        "source_clarification",
+        "user_switch",
+    ]
+
+
 class NaturalInterviewerOutput(StrictModelOutput):
     interviewer_message: str = Field(min_length=1, max_length=2000)
     session_action: Literal["continue", "finish"]
     finish_reason: Optional[Literal["enough_understanding", "natural_closure", "user_requested"]] = None
+    navigation: Optional[NaturalInterviewNavigation] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -101,6 +148,71 @@ class NaturalInterviewerOutput(StrictModelOutput):
             raise ValueError("finish_reason must be null when session_action is continue")
         if self.session_action == "finish" and self.finish_reason is None:
             raise ValueError("finish_reason is required when session_action is finish")
+        return self
+
+
+class EvidenceAttributionSpanOutput(StrictModelOutput):
+    """One exact, model-classified span from a participant turn.
+
+    Eligibility is deliberately absent.  The server validates the source turn,
+    offsets, hash, overlap, and asset provenance before applying its own
+    eligibility rules.
+    """
+
+    turn_index: int = Field(ge=0)
+    quote: str = Field(min_length=1, max_length=12000)
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    text_hash: Optional[str] = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    owner: Literal[
+        "participant_owned",
+        "external_quoted",
+        "external_paraphrased",
+        "uncertain",
+    ]
+    relation: Literal[
+        "own_reasoning",
+        "endorses",
+        "critiques",
+        "rejects",
+        "quotes_only",
+        "asks_or_requests",
+    ]
+    elicitation_level: Literal[
+        "spontaneous",
+        "open_probe",
+        "focused_probe",
+        "strong_scaffold",
+    ]
+    source_label: Optional[str] = Field(default=None, max_length=500)
+    confidence: float = Field(ge=0, le=1)
+    reason: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def offsets_bound_the_quote(self) -> "EvidenceAttributionSpanOutput":
+        if self.end <= self.start:
+            raise ValueError("attribution span end must be greater than start")
+        if self.end - self.start != len(self.quote):
+            raise ValueError("attribution span offsets must exactly bound quote")
+        return self
+
+
+class EvidenceAttributionOutput(StrictModelOutput):
+    spans: list[EvidenceAttributionSpanOutput] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def spans_do_not_overlap(self) -> "EvidenceAttributionOutput":
+        previous_end_by_turn: dict[int, int] = {}
+        for span in sorted(self.spans, key=lambda item: (item.turn_index, item.start, item.end)):
+            previous_end = previous_end_by_turn.get(span.turn_index)
+            if previous_end is not None and span.start < previous_end:
+                raise ValueError("attribution spans must not overlap within a turn")
+            previous_end_by_turn[span.turn_index] = span.end
         return self
 
 
@@ -199,6 +311,73 @@ class FinalScorerOutput(StrictModelOutput):
 
     @model_validator(mode="after")
     def dimensions_are_exactly_the_contract(self) -> "FinalScorerOutput":
+        expected = {
+            "problem_definition",
+            "evidence_evaluation",
+            "reasoning_argumentation",
+            "multiple_perspectives",
+            "integrative_decision",
+            "dynamic_adjustment",
+        }
+        seen = {item.dimension_key for item in self.dimensions}
+        if seen != expected or len(seen) != len(self.dimensions):
+            raise ValueError("exactly one result is required for each of the six dimensions")
+        return self
+
+
+class EvidenceReferenceOutput(StrictModelOutput):
+    """Reference to a server-validated, eligible attribution span."""
+
+    attribution_span_id: int = Field(ge=1)
+
+
+class AttributedScoringDimensionOutput(StrictModelOutput):
+    dimension_key: DimensionKey
+    score: Optional[int] = Field(default=None, ge=1, le=5)
+    evidence_refs: list[EvidenceReferenceOutput] = Field(default_factory=list, max_length=5)
+    reason: str = Field(min_length=1, max_length=2000)
+    confidence: float = Field(ge=0, le=1)
+    sufficient: bool
+
+    @model_validator(mode="after")
+    def score_requires_sufficient_attributed_evidence(
+        self,
+    ) -> "AttributedScoringDimensionOutput":
+        if self.score is not None and (not self.sufficient or not self.evidence_refs):
+            raise ValueError(
+                "a numeric score requires sufficient evidence and at least one attribution span"
+            )
+        if self.score is None and self.sufficient:
+            raise ValueError("sufficient evidence must produce a numeric score")
+        reference_ids = [item.attribution_span_id for item in self.evidence_refs]
+        if len(reference_ids) != len(set(reference_ids)):
+            raise ValueError("attribution span references must be unique within a dimension")
+        return self
+
+
+class SummaryWithEvidenceOutput(StrictModelOutput):
+    text: str = Field(min_length=1, max_length=2000)
+    attribution_span_ids: list[int] = Field(min_length=1, max_length=5)
+
+    @field_validator("attribution_span_ids")
+    @classmethod
+    def evidence_ids_are_positive_and_unique(cls, value: list[int]) -> list[int]:
+        if any(item < 1 for item in value):
+            raise ValueError("attribution span ids must be positive")
+        if len(value) != len(set(value)):
+            raise ValueError("attribution span ids must be unique")
+        return value
+
+
+class AttributedFinalScorerOutput(StrictModelOutput):
+    """V6.2.2 scoring contract that cannot introduce free-text evidence."""
+
+    dimensions: list[AttributedScoringDimensionOutput] = Field(min_length=6, max_length=6)
+    strengths: list[SummaryWithEvidenceOutput] = Field(default_factory=list, max_length=2)
+    priorities: list[SummaryWithEvidenceOutput] = Field(default_factory=list, max_length=2)
+
+    @model_validator(mode="after")
+    def dimensions_are_exactly_the_contract(self) -> "AttributedFinalScorerOutput":
         expected = {
             "problem_definition",
             "evidence_evaluation",

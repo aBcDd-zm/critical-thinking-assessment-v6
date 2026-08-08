@@ -47,7 +47,7 @@
 4. 旧版绑定会话可选 `session_closure_suggested` 或 `session_finalizing`；V6.2 正常轮次不以自然停点产生这两种事件
 5. `agent_completed` 或 `error`
 
-`heartbeat` 只用于保持 HTTP 连接，客户端不将它渲染为对话。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。随后服务端为该精确逐字稿异步创建一次增量取证任务；该模型调用不延迟或改变已经交付的访谈回复。每个会话按开场 trace 绑定 Prompt 版本。V6.2 收到模型的自然结束意图时确定性保持 `continue`；用户明确要求结束也不能绕过证据快照与页面确认。API 不向访谈官传入轮次、维度、覆盖率或下一题控制字段。
+`heartbeat` 只用于保持 HTTP 连接，客户端不将它渲染为对话。`agent_completed` 含已持久化的 AI turn、更新后的 session 及可选 `speech_url`。随后服务端为该精确逐字稿异步创建一次证据任务；V6.2.1 enforce 依次执行来源归属、服务端资格判定和仅基于 eligible span ID 的六维评分，shadow 只记录对照且保持旧参与者结果。后台调用不延迟或改变已经交付的访谈回复。每个会话按开场 trace 绑定 Prompt 版本。V6.2 收到模型的自然结束意图时确定性保持 `continue`；用户明确要求结束也不能绕过证据快照与页面确认。API 不向访谈官传入轮次、维度、覆盖率或下一题控制字段。
 
 首个 `content` 只需非空；从第二个回答起，普通回答去除空白后的可见字符数必须至少为 20，完整的明确不确定短答例外。客户端在输入框中即时显示状态或剩余字数；普通 `Enter` 提交有效回答，`Shift+Enter` 保留换行，中文输入法选词期间不得误提交。服务端也会再次校验该限制。
 
@@ -65,7 +65,7 @@
 
 报告不包含数字置信度、人格判断、职业/留学排序或跨议题比较。每一维只公开 `sufficient`、`limited` 或 `unmeasured` 之一；只有充分且有可核验用户原话时接口才可带原始 1–5 分。参与者网页和 PDF 将该固定等级换算为 20–100 分的百分制呈现，并显示综合总分：它是证据充分维度的等权平均换算，证据不足维度不显示为 0 分也不计入平均；管理端仍以原始五级分复核。
 
-`ready` 只表示六个维度全部满足数字分数、`sufficient=true` 和至少一条经角色/轮次/原文子串校验的用户原话；系统仅在此时主动显示完整报告入口。`insufficient` 不阻止用户主动生成证据有限报告。`checking` 或 `failed` 必须保持会话开放；不得遗漏最后一轮或复用旧快照。冻结后把同一 `result_data` 提升为 `ScoringRun`、`EvidenceItem` 和 `AssessmentReport`，报告生成阶段模型调用次数为零。
+`ready` 只表示六个维度全部满足数字分数、`sufficient=true` 和至少一条可核验证据。V6.2.1 enforce 中，每条证据还必须绑定同一 readiness check 下经服务端验证的 `eligible` 归属 span，并再校验会话、轮次、偏移、原文切片、哈希、逐字稿指纹和资产指纹；外部材料、给 AI 的问题、裸引用和 uncertain span 不能满足数字分证据条件。系统仅在此时主动显示完整报告入口。`insufficient` 不阻止用户主动生成证据有限报告。`checking` 或 `failed` 必须保持会话开放；不得遗漏最后一轮或复用旧快照。冻结后把同一 `result_data` 提升为 `ScoringRun`、`EvidenceItem` 和 `AssessmentReport`，报告生成阶段模型调用次数为零。
 
 ## 管理员认证、复核与导出
 
@@ -76,7 +76,7 @@
 - `GET /admin/dashboard/overview`：返回会话状态聚合、复核待办、链路健康计数和最多 8 条会话摘要；绝不返回逐字稿、证据原话、复核备注、模型原始输出或未校准置信度。
 
 - `GET /admin/sessions`：可按状态、人工复核状态、`manual_review_recommended` 与搜索词筛选。
-- `GET /admin/sessions/{uuid}`：完整对话、逐轮时长、模型/Prompt 版本、调用和修复记录、transcript 指纹、评分运行、逐字证据、质量/安全状态、人工复核与专家评分。
+- `GET /admin/sessions/{uuid}`：完整对话、逐轮时长、模型/Prompt 版本、调用和修复记录、transcript 指纹、评分运行、逐字证据、质量/安全状态、人工复核与专家评分；V6.2.1 另返回仅供管理员使用的 `evidence_attributions`，含前一问、彩色 span 所需偏移、owner/relation/elicitation、服务端资格、校验状态与拒绝原因。`final_scoring_dimension_keys` 只表示已冻结报告实际采用，`snapshot_used_dimension_keys` 表示最新 readiness 快照拟采用；兼容字段 `used_dimension_keys` 始终等于前者。`evidence_items` 另保留 `source_type=user`、`status=sufficient`、`active_for_scoring=true` 的管理端兼容语义。参与者 API 不返回这些归属细节。
 - `PUT /admin/sessions/{uuid}/review`：写入人工复核状态、决定与备注。
 - `PUT /admin/sessions/{uuid}/expert-scores`：独立保存专家分数。
 - `POST /admin/expert-scores:import`：导入 CSV，逐行报告成功或失败。

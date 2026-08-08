@@ -97,6 +97,9 @@ class AssessmentSession(Base):
     readiness_checks: Mapped[list[EvidenceReadinessCheck]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+    evidence_attribution_spans: Mapped[list[EvidenceAttributionSpan]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class DialogueTurn(Base):
@@ -124,6 +127,9 @@ class DialogueTurn(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     session: Mapped[AssessmentSession] = relationship(back_populates="turns")
+    evidence_attribution_spans: Mapped[list[EvidenceAttributionSpan]] = relationship(
+        back_populates="user_turn"
+    )
 
 
 class TurnSubmission(Base):
@@ -226,9 +232,109 @@ class ScoringRun(Base):
     session: Mapped[AssessmentSession] = relationship(back_populates="scoring_runs")
 
 
+class EvidenceAttributionSpan(Base):
+    """Versioned attribution for one exact span of participant input.
+
+    ``eligibility`` and both validation fields are server decisions.  They are
+    not copied from the attribution model's output contract.
+    """
+
+    __tablename__ = "evidence_attribution_spans"
+    __table_args__ = (
+        UniqueConstraint(
+            "readiness_check_id",
+            "user_turn_id",
+            "span_start",
+            "span_end",
+            name="uq_attribution_check_turn_span",
+        ),
+        CheckConstraint("turn_index >= 0", name="ck_attribution_turn_index"),
+        CheckConstraint("span_start >= 0", name="ck_attribution_start"),
+        CheckConstraint("span_end > span_start", name="ck_attribution_end"),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_attribution_confidence",
+        ),
+        CheckConstraint(
+            "owner IN ('participant_owned','external_quoted','external_paraphrased','uncertain')",
+            name="ck_attribution_owner",
+        ),
+        CheckConstraint(
+            "relation IN ('own_reasoning','endorses','critiques','rejects','quotes_only','asks_or_requests')",
+            name="ck_attribution_relation",
+        ),
+        CheckConstraint(
+            "elicitation_level IN ('spontaneous','open_probe','focused_probe','strong_scaffold')",
+            name="ck_attribution_elicitation",
+        ),
+        CheckConstraint(
+            "eligibility IN ('eligible','context_only','manual_review')",
+            name="ck_attribution_eligibility",
+        ),
+        CheckConstraint(
+            "validation_status IN ('pending','validated','rejected','manual_review','legacy_unclassified')",
+            name="ck_attribution_validation_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("assessment_sessions.id", ondelete="CASCADE"), index=True
+    )
+    user_turn_id: Mapped[int] = mapped_column(
+        ForeignKey("dialogue_turns.id", ondelete="CASCADE"), index=True
+    )
+    readiness_check_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("evidence_readiness_checks.id", ondelete="CASCADE"), index=True
+    )
+    turn_index: Mapped[int] = mapped_column(Integer)
+    quote: Mapped[str] = mapped_column(Text)
+    start: Mapped[int] = mapped_column("span_start", Integer)
+    end: Mapped[int] = mapped_column("span_end", Integer)
+    text_hash: Mapped[str] = mapped_column(String(64))
+    owner: Mapped[str] = mapped_column(String(32))
+    relation: Mapped[str] = mapped_column(String(32))
+    elicitation_level: Mapped[str] = mapped_column(String(32))
+    source_label: Mapped[Optional[str]] = mapped_column(String(500))
+    confidence: Mapped[float] = mapped_column(Float)
+    reason: Mapped[str] = mapped_column(Text)
+    eligibility: Mapped[str] = mapped_column(String(24))
+    validation_status: Mapped[str] = mapped_column(String(32), default="pending")
+    validation_reason: Mapped[Optional[str]] = mapped_column(Text)
+    transcript_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    asset_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    prompt_template_id: Mapped[str] = mapped_column(String(120))
+    prompt_version: Mapped[str] = mapped_column(String(40))
+    schema_version: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    session: Mapped[AssessmentSession] = relationship(
+        back_populates="evidence_attribution_spans"
+    )
+    user_turn: Mapped[DialogueTurn] = relationship(
+        back_populates="evidence_attribution_spans"
+    )
+    readiness_check: Mapped[Optional[EvidenceReadinessCheck]] = relationship(
+        back_populates="attribution_spans"
+    )
+    evidence_items: Mapped[list[EvidenceItem]] = relationship(
+        back_populates="attribution_span"
+    )
+
+
 class EvidenceItem(Base):
     __tablename__ = "evidence_items"
-    __table_args__ = (Index("ix_evidence_session_dimension", "session_id", "dimension_key"),)
+    __table_args__ = (
+        Index("ix_evidence_session_dimension", "session_id", "dimension_key"),
+        CheckConstraint(
+            "validation_status IN ('pending','validated','rejected','manual_review','legacy_unclassified')",
+            name="ck_evidence_validation_status",
+        ),
+        CheckConstraint(
+            "validation_status != 'validated' OR attribution_span_id IS NOT NULL",
+            name="ck_evidence_validated_attribution",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int] = mapped_column(
@@ -240,14 +346,29 @@ class EvidenceItem(Base):
     user_turn_id: Mapped[int] = mapped_column(
         ForeignKey("dialogue_turns.id", ondelete="CASCADE"), index=True
     )
+    attribution_span_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("evidence_attribution_spans.id", ondelete="RESTRICT"), index=True
+    )
+    readiness_check_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("evidence_readiness_checks.id", ondelete="SET NULL"), index=True
+    )
     dimension_key: Mapped[str] = mapped_column(String(80))
     quote: Mapped[str] = mapped_column(Text)
     quote_start: Mapped[int] = mapped_column(Integer)
     quote_end: Mapped[int] = mapped_column(Integer)
     confidence: Mapped[float] = mapped_column(Float)
+    validation_status: Mapped[str] = mapped_column(
+        String(32),
+        default="legacy_unclassified",
+        server_default="legacy_unclassified",
+    )
+    validation_reason: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     session: Mapped[AssessmentSession] = relationship(back_populates="evidence_items")
+    attribution_span: Mapped[Optional[EvidenceAttributionSpan]] = relationship(
+        back_populates="evidence_items"
+    )
 
 
 class EvidenceReadinessCheck(Base):
@@ -296,6 +417,9 @@ class EvidenceReadinessCheck(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     session: Mapped[AssessmentSession] = relationship(back_populates="readiness_checks")
+    attribution_spans: Mapped[list[EvidenceAttributionSpan]] = relationship(
+        back_populates="readiness_check"
+    )
 
 
 class AssessmentReport(Base):

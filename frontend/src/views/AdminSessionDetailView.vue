@@ -8,6 +8,7 @@ import {
   answerCount,
   type AdminEvidenceItem,
   type AdminSessionDetail,
+  type EvidenceAttribution,
   type ExpertScore,
   type ReviewStatus,
 } from "@/types/contracts";
@@ -62,6 +63,7 @@ const evidenceItems = computed<AdminEvidenceItem[]>(() => {
     })),
   );
 });
+const evidenceAttributions = computed<EvidenceAttribution[]>(() => detail.value?.evidence_attributions ?? []);
 const inputStats = computed(() => {
   const userTurns = detail.value?.turns.filter((turn) => turn.role === "user") ?? [];
   const duration = userTurns.reduce((sum, turn) => sum + (turn.answer_duration_ms ?? 0), 0);
@@ -90,7 +92,130 @@ function phaseName(value?: string) {
 }
 
 function sourceName(value?: string) {
-  return value === "user" || !value ? "用户原话" : value;
+  return value === "user" || !value ? "参与者输入" : value;
+}
+
+const ownerLabels: Record<EvidenceAttribution["owner"], string> = {
+  participant_owned: "参与者本人",
+  external_quoted: "外部材料（原文引用）",
+  external_paraphrased: "外部材料（转述）",
+  uncertain: "归属不确定",
+};
+
+const relationLabels: Record<EvidenceAttribution["relation"], string> = {
+  own_reasoning: "本人推理",
+  endorses: "采纳 / 赞同",
+  critiques: "批评 / 质疑",
+  rejects: "拒绝 / 反驳",
+  quotes_only: "仅引用",
+  asks_or_requests: "提问 / 请求",
+};
+
+const elicitationLabels: Record<EvidenceAttribution["elicitation_level"], string> = {
+  spontaneous: "自发表达",
+  open_probe: "开放追问",
+  focused_probe: "聚焦追问",
+  strong_scaffold: "强提示",
+};
+
+const eligibilityLabels = {
+  eligible: "可作为评分候选",
+  context_only: "仅作上下文",
+  manual_review: "需人工复核",
+} as const;
+
+const validationLabels = {
+  pending: "待校验",
+  validated: "已校验",
+  rejected: "已拒绝",
+  manual_review: "需人工复核",
+  legacy_unclassified: "旧数据未归类",
+} as const;
+
+function attributionId(item: EvidenceAttribution) {
+  return item.span_id ?? item.id ?? "—";
+}
+
+function attributionEligibility(item: EvidenceAttribution) {
+  const value = item.eligibility ?? item.eligibility_status;
+  return value ? eligibilityLabels[value] : "未记录";
+}
+
+function attributionValidation(item: EvidenceAttribution) {
+  return item.validation_status ? validationLabels[item.validation_status] : "未记录";
+}
+
+function dimensionNames(keys: string[]) {
+  return keys.map((key) => nameFor(key)).join("、");
+}
+
+function hasFinalEvidenceReference(item: EvidenceAttribution) {
+  const id = item.span_id ?? item.id;
+  if (id === null || id === undefined) return false;
+  return evidenceItems.value.some((evidence) =>
+    evidence.attribution_span_id !== null
+    && evidence.attribution_span_id !== undefined
+    && String(evidence.attribution_span_id) === String(id)
+    && evidence.active_for_scoring !== false,
+  );
+}
+
+function attributionUsage(item: EvidenceAttribution) {
+  const eligibility = item.eligibility ?? item.eligibility_status;
+  if (item.validation_status === "rejected") return "未用于评分：归属校验已拒绝";
+  if (eligibility === "context_only") return "未用于评分：仅作上下文";
+  if (eligibility === "manual_review") return "未自动用于评分：需人工复核";
+
+  const hasExplicitUsage = Array.isArray(item.final_scoring_dimension_keys)
+    || Array.isArray(item.snapshot_used_dimension_keys);
+  if (hasExplicitUsage) {
+    const finalKeys = item.final_scoring_dimension_keys ?? [];
+    const finalSet = new Set(finalKeys);
+    const snapshotOnlyKeys = (item.snapshot_used_dimension_keys ?? []).filter((key) => !finalSet.has(key));
+    const usage: string[] = [];
+    if (finalKeys.length) usage.push(`终评已采用：${dimensionNames(finalKeys)}`);
+    if (snapshotOnlyKeys.length) usage.push(`当前证据快照引用：${dimensionNames(snapshotOnlyKeys)}`);
+    if (usage.length) return usage.join("；");
+    if (eligibility === "eligible") return "候选片段未被终评采用";
+    return "未记录评分用途";
+  }
+
+  // V6.2.1 rollout compatibility: old producers exposed one merged field.
+  // A pre-final session must never make that field look like a completed score.
+  if (item.used_dimension_keys?.length) {
+    const finalized = detail.value?.phase === "completed"
+      || detail.value?.report_available === true
+      || Boolean(detail.value?.report)
+      || hasFinalEvidenceReference(item);
+    return finalized
+      ? `终评已采用：${dimensionNames(item.used_dimension_keys)}`
+      : `当前证据快照引用：${dimensionNames(item.used_dimension_keys)}`;
+  }
+  if (eligibility === "eligible") return "候选片段未被终评采用";
+  return "未记录评分用途";
+}
+
+function attributionConfidence(value?: number | null) {
+  return typeof value === "number" ? value.toFixed(2) : "—";
+}
+
+function evidenceValidationText(item: AdminEvidenceItem) {
+  const status = item.validation_status ? validationLabels[item.validation_status] : "";
+  return [status, item.validation_reason].filter(Boolean).join("：");
+}
+
+function evidenceStatusText(item: AdminEvidenceItem) {
+  if (item.status) return item.status;
+  return item.validation_status ? validationLabels[item.validation_status] : "—";
+}
+
+function evidencePositionText(item: AdminEvidenceItem) {
+  const parts: string[] = [];
+  if (typeof item.quote_start === "number" && typeof item.quote_end === "number") {
+    parts.push(`字符 [${item.quote_start}, ${item.quote_end})`);
+  }
+  if (typeof item.confidence === "number") parts.push(`证据置信度 ${item.confidence.toFixed(2)}`);
+  return parts.join(" · ");
 }
 
 function sessionActionName(value?: unknown) {
@@ -242,9 +367,46 @@ onMounted(load);
           <p v-if="!naturalTraces.length" class="empty-cell">暂无自然访谈运行记录</p>
         </article>
 
+        <article class="attribution-card">
+          <div class="section-heading">
+            <div><span class="eyebrow">EVIDENCE ATTRIBUTION</span><h2>输入片段 / 归属</h2></div>
+            <p>独立归属层会区分参与者本人的推理、外部材料与归属不确定内容；只有服务端判定合格的片段才能进入数字评分。</p>
+          </div>
+          <div v-if="evidenceAttributions.length" class="attribution-list">
+            <section
+              v-for="item in evidenceAttributions"
+              :key="String(attributionId(item))"
+              class="attribution-row"
+              :class="[`owner-${item.owner}`, { 'attribution-rejected': item.validation_status === 'rejected' }]"
+            >
+              <header>
+                <strong>第 {{ item.turn_index }} 次回答 · span #{{ attributionId(item) }}</strong>
+                <span class="attribution-badge" :class="item.owner">{{ ownerLabels[item.owner] }}</span>
+                <span class="attribution-badge relation">{{ relationLabels[item.relation] }}</span>
+              </header>
+              <p class="eliciting-question"><strong>前一问</strong><span>{{ item.eliciting_question || '未记录' }}</span></p>
+              <blockquote>
+                <mark class="attribution-span" :class="item.owner">{{ item.quote || '—' }}</mark>
+                <small>字符 [{{ item.start }}, {{ item.end }}) · 来源标签：{{ item.source_label || '未声明' }}</small>
+              </blockquote>
+              <dl class="attribution-meta">
+                <div><dt>归属</dt><dd>{{ ownerLabels[item.owner] }}</dd></div>
+                <div><dt>与外部内容的关系</dt><dd>{{ relationLabels[item.relation] }}</dd></div>
+                <div><dt>提示强度</dt><dd>{{ elicitationLabels[item.elicitation_level] }}</dd></div>
+                <div><dt>归属置信度</dt><dd>{{ attributionConfidence(item.confidence) }}</dd></div>
+                <div><dt>服务端资格</dt><dd>{{ attributionEligibility(item) }}</dd></div>
+                <div><dt>校验状态</dt><dd>{{ attributionValidation(item) }}</dd></div>
+              </dl>
+              <p class="attribution-usage"><strong>评分用途</strong><span>{{ attributionUsage(item) }}</span></p>
+              <p v-if="item.validation_reason || item.reason" class="attribution-reason"><strong>{{ item.validation_status === 'rejected' ? '拒绝原因' : '判定原因' }}</strong><span>{{ item.validation_reason || item.reason }}</span></p>
+            </section>
+          </div>
+          <p v-else class="empty-cell attribution-empty">暂无独立证据归属记录（旧合同或未启用）</p>
+        </article>
+
         <article class="evidence-table-card">
-          <div class="section-heading"><div><span class="eyebrow">FINAL SCORING EVIDENCE</span><h2>终评引用的用户原话</h2></div><p>数字分数只应建立在与用户逐字稿精确匹配、且被判定为充分的证据之上。</p></div>
-          <table class="admin-table"><thead><tr><th>回答</th><th>观察角度</th><th>来源</th><th>证据状态</th><th>用户原话</th></tr></thead><tbody><tr v-for="(item,index) in evidenceItems" :key="`${item.turn_index}-${index}`"><td>#{{ item.turn_index ?? '—' }}</td><td>{{ nameFor(item.dimension_key) }}</td><td>{{ sourceName(item.source_type) }}</td><td>{{ item.status || '—' }}</td><td>“{{ item.quote || '—' }}”</td></tr><tr v-if="!evidenceItems.length"><td colspan="5" class="empty-cell">暂无终评引用证据</td></tr></tbody></table>
+          <div class="section-heading"><div><span class="eyebrow">FINAL SCORING EVIDENCE</span><h2>终评采用的输入片段 / 归属</h2></div><p>数字分数只应建立在已完成归属校验、可追溯到参与者推理的合格输入片段之上。</p></div>
+          <table class="admin-table"><thead><tr><th>回答</th><th>观察角度</th><th>输入来源</th><th>证据状态</th><th>输入片段 / 归属校验</th></tr></thead><tbody><tr v-for="(item,index) in evidenceItems" :key="`${item.turn_index}-${index}`"><td>#{{ item.turn_index ?? '—' }}</td><td>{{ nameFor(item.dimension_key) }}</td><td>{{ sourceName(item.source_type) }}</td><td>{{ evidenceStatusText(item) }}<small v-if="item.active_for_scoring !== undefined">{{ item.active_for_scoring ? '用于终评' : '未用于终评' }}</small></td><td>“{{ item.quote || '—' }}”<small v-if="evidencePositionText(item)">{{ evidencePositionText(item) }}</small><small v-if="item.attribution_span_id !== null && item.attribution_span_id !== undefined">归属 span #{{ item.attribution_span_id }}</small><small v-if="evidenceValidationText(item)">{{ evidenceValidationText(item) }}</small></td></tr><tr v-if="!evidenceItems.length"><td colspan="5" class="empty-cell">暂无终评采用证据</td></tr></tbody></table>
         </article>
       </section>
 
@@ -257,7 +419,7 @@ onMounted(load);
         <article class="trace-review scoring-run-card">
           <h2 class="audit-heading">独立终评运行</h2>
           <table class="admin-table"><thead><tr><th>尝试</th><th>状态</th><th>逐字稿指纹</th><th>模型 / Prompt</th><th>每项模型置信度</th><th>格式修复</th><th>人工复核</th><th>错误</th></tr></thead><tbody><tr v-for="run in scoringRuns" :key="run.id ?? run.attempt_number"><td>#{{ run.attempt_number }}</td><td><span class="table-badge">{{ run.status }}</span></td><td><code>{{ run.transcript_fingerprint || '—' }}</code></td><td>{{ run.model || '—' }}<small><code>{{ run.prompt_template_id || '—' }} / {{ run.prompt_version || '—' }}</code></small></td><td><ul v-if="scoringDimensions(run).length" class="confidence-list"><li v-for="item in scoringDimensions(run)" :key="item.dimension_key"><span>{{ nameFor(item.dimension_key) }}</span><b>{{ item.confidence === null ? '—' : item.confidence.toFixed(2) }}</b><small>未校准 · {{ item.score === null ? '未建议分数' : `模型原始建议 ${item.score} 分` }}</small></li></ul><span v-else>—</span></td><td>{{ run.repair_used ? '是' : '否' }}</td><td>{{ run.manual_review_recommended ? '建议' : '否' }}</td><td class="run-error">{{ run.error || '—' }}</td></tr><tr v-if="!scoringRuns.length"><td colspan="8" class="empty-cell">暂无独立终评运行</td></tr></tbody></table>
-          <p class="audit-note">以上是终评器的原始快照。数字置信度未经校准，任何数字分数都必须有精确的用户原话和充分证据才能进入用户报告。</p>
+          <p class="audit-note">以上是终评器的原始快照。数字置信度未经校准，任何数字分数都必须有精确的输入片段、明确归属和充分证据才能进入参与者报告。</p>
         </article>
       </section>
 

@@ -1,0 +1,143 @@
+{
+  "record_version": "v6.2.1-real-mainline-uat-v1",
+  "recorded_at": "2026-08-08T17:30:01Z",
+  "repository": {
+    "base_commit": "7a44abf32e07f6558ed2bb965e11c63a08d8552b",
+    "branch": "system/v621-evidence-attribution",
+    "base_branch": "system/v612-consistent-closure"
+  },
+  "runtime": {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "database": "disposable_sqlite",
+    "evidence_attribution_mode": "shadow",
+    "tts_mode": "disabled",
+    "session_uuid": "f549a348-eea5-47f5-84db-51b2c40a8b7c"
+  },
+  "contracts": {
+    "interviewer_prompt_version": "v6.2.1",
+    "interviewer_prompt_sha256": "a2782644f1701c6eefb057e391a062d94791d08805b8a6dd784a9b359e4f7c83",
+    "attribution_prompt_sha256": "0a6d49a63cdcceed7792ebca1ae9ce2097adfd23f775113facb71b5ae201e113",
+    "attribution_schema_version": "evidence-attribution-select-v3-id",
+    "candidate_rule_version": "evidence-span-boundaries-v1",
+    "attributed_scorer_prompt_sha256": "09863931f0721c464493a43fde45b724044d5e32bc6d97dd0dda6db909c554f4",
+    "attributed_scorer_schema_version": "attributed-evidence-span-ref-v1",
+    "snapshot_asset_fingerprint": "ae9183440a1ffe1d0769aec24074934abf2522b2ef6b8a9e9175ac373c27ab77"
+  },
+  "replay": {
+    "status": "REAL_DEEPSEEK_V621_MAINLINE_HEURISTICS_PASSED",
+    "opening": "这里没有标准答案，我更关心你怎样作出判断。接下来我会一次只问一个问题。请从工作、学习或生活中，想起最近一件真实、具体、需要你认真判断或权衡的事情——当时最难判断的是什么？",
+    "interviewer_messages": [
+      "你提到很难进入组织内部，那现有门店访谈能提供哪些关键信息，让你觉得它可能支撑起这个研究？",
+      "你刚才提到AI给出的框架不稳定，也引用了关于三角验证的材料。请区分一下，哪些是外部材料或AI的观点，哪些是你自己的判断，以及你采纳了什么、为什么采纳。",
+      "你提到只有能接触不同角色并交叉核实材料时才会采纳这个选题——那目前你判断，门店访谈能接触到哪些不同角色，又可能交叉核实哪些关键信息？"
+    ],
+    "source_clarification_heuristic": true,
+    "return_to_decision_heuristic": true,
+    "mainline_information_gain_events": 2,
+    "substantial_repeat_pairs": [],
+    "quality_flags_by_turn": [
+      [],
+      [],
+      [
+        "repeated_user_wording"
+      ]
+    ],
+    "early_finish": false,
+    "turn_latency_ms": [
+      1686.573,
+      3231.572,
+      2063.262
+    ],
+    "p95_turn_latency_ms_inclusive": 3114.741,
+    "total_wall_ms": 8531.012,
+    "source_navigation": {
+      "focus_kind": "source_ownership",
+      "mainline_relation": "source_clarification",
+      "anchor_turn_index": 3,
+      "anchor_start": 366,
+      "anchor_end": 427
+    },
+    "post_clarification_navigation": {
+      "focus_kind": "basis",
+      "mainline_relation": "core",
+      "visible_return_heuristic": true,
+      "anchor_turn_index": 5,
+      "anchor_start": 40,
+      "anchor_end": 101
+    }
+  },
+  "latest_attribution_snapshot": {
+    "readiness_check_id": 3,
+    "span_count": 6,
+    "eligibility_counts": {
+      "eligible": 4,
+      "context_only": 2,
+      "manual_review": 0
+    },
+    "case_15_spans": [
+      {
+        "turn_index": 3,
+        "start": 0,
+        "end": 208,
+        "owner": "participant_owned",
+        "relation": "own_reasoning",
+        "eligibility": "eligible",
+        "summary": "参与者描述与 AI 交互、质疑不稳定输出的本人反思。"
+      },
+      {
+        "turn_index": 3,
+        "start": 208,
+        "end": 366,
+        "owner": "participant_owned",
+        "relation": "asks_or_requests",
+        "eligibility": "context_only",
+        "summary": "给 AI 的研究问题与方法请求。"
+      },
+      {
+        "turn_index": 3,
+        "start": 366,
+        "end": 427,
+        "owner": "external_quoted",
+        "relation": "quotes_only",
+        "eligibility": "context_only",
+        "summary": "论文中关于多源证据和三角验证的原文。"
+      }
+    ],
+    "attributed_scorer_referenced_span_ids": [
+      6,
+      7,
+      10,
+      11
+    ],
+    "excluded_span_ids": [
+      8,
+      9
+    ],
+    "excluded_span_auto_scoring_count": 0
+  },
+  "hardening_history": [
+    {
+      "finding": "真实模型无法稳定返回正确的 Unicode 偏移。",
+      "change": "改为模型只分类 candidate_id，服务端权威物化 quote、offset、hash 和 occurrence。"
+    },
+    {
+      "finding": "模型曾将来源澄清拆成多个问句或跳过澄清。",
+      "change": "增加服务端权威 source_clarification_required 与 typed-call 语义修复门。"
+    },
+    {
+      "finding": "一个合格的开放式邀请句因句末使用句号而被误拒绝。",
+      "change": "保留最多一个问号、来源双方信号、正确导航和禁止二选一，但允许自然中文邀请句不带问号。"
+    }
+  ],
+  "verification_boundary": {
+    "real_provider_call": "VERIFIED",
+    "server_side_external_text_exclusion_on_this_replay": "VERIFIED",
+    "heuristic_mainline_checks": "PASSED",
+    "blind_human_naturalness_review": "NOT_VERIFIED",
+    "dual_expert_gold_annotation": "NOT_VERIFIED",
+    "member_a_attribution_and_bars_review": "NOT_VERIFIED",
+    "real_tts_microphone_and_deployment": "NOT_VERIFIED",
+    "standardized_validity_or_cross_person_comparability": "NOT_CLAIMED"
+  }
+}

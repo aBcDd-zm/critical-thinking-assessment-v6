@@ -23,12 +23,25 @@ from app.models import (
     AssessmentReport,
     AssessmentSession,
     DialogueTurn,
+    EvidenceAttributionSpan,
     EvidenceItem,
     ScoringRun,
     utcnow,
 )
-from app.schemas import FinalScorerOutput, NaturalInterviewerOutput
+from app.schemas import (
+    AttributedFinalScorerOutput,
+    EvidenceAttributionOutput,
+    EvidenceAttributionSpanOutput,
+    FinalScorerOutput,
+    NaturalInterviewerOutput,
+)
 from app.services.model_gateway import (
+    ATTRIBUTED_EVIDENCE_PROMPT_ID,
+    ATTRIBUTED_EVIDENCE_PROMPT_VERSION,
+    EVIDENCE_ATTRIBUTION_PROMPT_ID,
+    EVIDENCE_ATTRIBUTION_PROMPT_VERSION,
+    EVIDENCE_ATTRIBUTION_SCHEMA_VERSION,
+    EVIDENCE_CANDIDATE_RULE_VERSION,
     INCREMENTAL_EVIDENCE_PROMPT_ID,
     INCREMENTAL_EVIDENCE_PROMPT_VERSION,
     NATURAL_FINAL_SCORER_PROMPT_ID,
@@ -37,8 +50,13 @@ from app.services.model_gateway import (
     ModelGatewayError,
     ModelGatewayService,
     StructuredCallResult,
+    EvidenceAttributionSelectionOutput,
+    attribution_span_candidate_id,
+    attach_attribution_span_candidates,
+    build_interview_anchor_candidates,
     payload_fingerprint,
     resolve_natural_interviewer_prompt,
+    source_clarification_required,
 )
 
 
@@ -203,6 +221,30 @@ class InterviewResult:
     input_fingerprint: str
     model_session_action: str | None
     model_finish_reason: str | None
+    navigation: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class ValidatedAttributionSpan:
+    output: EvidenceAttributionSpanOutput
+    text_hash: str
+    eligibility: str
+    validation_status: str
+    validation_reason: str
+
+
+@dataclass(frozen=True)
+class EvidenceAttributionAssessment:
+    spans: list[ValidatedAttributionSpan]
+    provider: str
+    model: str
+    prompt_template_id: str
+    prompt_version: str
+    schema_version: str
+    repair_used: bool
+    latency_ms: int
+    attempt_count: int
+    input_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -226,7 +268,7 @@ class ReportReadinessAssessment:
     repair_used: bool
     latency_ms: int
     attempt_count: int
-    output: FinalScorerOutput
+    output: FinalScorerOutput | AttributedFinalScorerOutput
 
 
 def normalized_text(value: str) -> str:
@@ -289,6 +331,256 @@ def transcript_fingerprint(session: AssessmentSession) -> str:
         _transcript_rows(session), ensure_ascii=False, separators=(",", ":"), sort_keys=True
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def attribution_text_hash(value: str) -> str:
+    """Canonical hash for an exact Unicode span (UTF-8 bytes)."""
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _attribution_user_turns(
+    transcript: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    previous_assistant: str | None = None
+    rows: list[dict[str, Any]] = []
+    for item in sorted(transcript, key=lambda row: int(row["turn_index"])):
+        if item["role"] == "assistant":
+            previous_assistant = str(item["content"])
+            continue
+        if item["role"] != "user":
+            continue
+        rows.append(
+            {
+                "turn_index": int(item["turn_index"]),
+                "content": str(item["content"]),
+                "preceding_question": previous_assistant,
+            }
+        )
+    return attach_attribution_span_candidates(rows)
+
+
+def classify_span_eligibility(
+    span: EvidenceAttributionSpanOutput,
+) -> tuple[str, str, str]:
+    """Compute the hard eligibility gate without trusting model self-report."""
+
+    if span.owner == "uncertain":
+        return (
+            "manual_review",
+            "manual_review",
+            "source_ownership_uncertain",
+        )
+    if span.owner != "participant_owned":
+        return (
+            "context_only",
+            "validated",
+            "external_material_is_context_only",
+        )
+    if span.relation in {"quotes_only", "asks_or_requests"}:
+        return (
+            "context_only",
+            "validated",
+            "quote_or_request_cannot_support_score",
+        )
+    if span.relation == "endorses":
+        return (
+            "context_only",
+            "validated",
+            "endorsement_requires_separate_participant_reasoning_span",
+        )
+    if span.relation in {"own_reasoning", "critiques", "rejects"}:
+        return "eligible", "validated", "participant_reasoning_eligible"
+    return "manual_review", "manual_review", "unsupported_attribution_combination"
+
+
+def materialize_attribution_output(
+    output: EvidenceAttributionSelectionOutput,
+    span_candidates: list[dict[str, Any]],
+) -> EvidenceAttributionOutput:
+    """Resolve compact model classifications through the server registry.
+
+    The model never controls quote text, offsets, occurrence, or hashes.  This
+    function validates the registry identity and then restores the established
+    span output shape for the existing hard gate and persistence layer.
+    """
+
+    registry: dict[str, dict[str, Any]] = {}
+    occurrence_by_turn_hash: dict[tuple[int, str], int] = {}
+    ordered_candidates = sorted(
+        span_candidates,
+        key=lambda item: (
+            int(item.get("turn_index", -1)),
+            int(item.get("start", -1)),
+            int(item.get("end", -1)),
+        ),
+    )
+    for candidate in ordered_candidates:
+        try:
+            candidate_id = str(candidate["candidate_id"])
+            turn_index = int(candidate["turn_index"])
+            quote = str(candidate["quote"])
+            start = int(candidate["start"])
+            end = int(candidate["end"])
+            quote_hash = str(candidate["quote_hash"])
+            occurrence = int(candidate["occurrence"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FinalizationError(
+                "attribution_candidate_registry_invalid"
+            ) from exc
+        authoritative_hash = attribution_text_hash(quote)
+        if quote_hash != authoritative_hash:
+            raise FinalizationError(
+                "attribution_candidate_registry_quote_hash_mismatch"
+            )
+        occurrence_key = (turn_index, quote_hash)
+        expected_occurrence = occurrence_by_turn_hash.get(occurrence_key, 0) + 1
+        occurrence_by_turn_hash[occurrence_key] = expected_occurrence
+        if occurrence != expected_occurrence:
+            raise FinalizationError(
+                "attribution_candidate_registry_occurrence_mismatch"
+            )
+        expected_id = attribution_span_candidate_id(
+            turn_index=turn_index,
+            start=start,
+            end=end,
+            quote_hash=quote_hash,
+            occurrence=occurrence,
+        )
+        if candidate_id != expected_id:
+            raise FinalizationError(
+                "attribution_candidate_registry_identity_mismatch"
+            )
+        if candidate_id in registry:
+            raise FinalizationError(
+                "attribution_candidate_registry_duplicate_id"
+            )
+        registry[candidate_id] = candidate
+
+    classifications: dict[str, Any] = {}
+    for selection in output.spans:
+        candidate_id = selection.candidate_id
+        if candidate_id not in registry:
+            raise FinalizationError(
+                "attribution_output_unknown_candidate_id"
+            )
+        if candidate_id in classifications:
+            raise FinalizationError(
+                "attribution_output_duplicate_candidate_id"
+            )
+        classifications[candidate_id] = selection
+    if set(registry) - set(classifications):
+        raise FinalizationError("attribution_output_missing_candidate_id")
+
+    materialized: list[dict[str, Any]] = []
+    for candidate in span_candidates:
+        candidate_id = str(candidate["candidate_id"])
+        selection = classifications[candidate_id]
+        forced_uncertain = candidate.get("force_uncertain") is True
+        materialized.append(
+            {
+                "turn_index": int(candidate["turn_index"]),
+                "quote": str(candidate["quote"]),
+                "start": int(candidate["start"]),
+                "end": int(candidate["end"]),
+                "text_hash": None,
+                "owner": "uncertain" if forced_uncertain else selection.owner,
+                "relation": (
+                    "quotes_only" if forced_uncertain else selection.relation
+                ),
+                "elicitation_level": selection.elicitation_level,
+                "source_label": (
+                    None if forced_uncertain else selection.source_label
+                ),
+                "confidence": (
+                    min(selection.confidence, 0.45)
+                    if forced_uncertain
+                    else selection.confidence
+                ),
+                "reason": (
+                    "服务端候选标记：整轮来源混合且无可靠切分点。"
+                    if forced_uncertain
+                    else selection.reason
+                ),
+            }
+        )
+    return EvidenceAttributionOutput.model_validate({"spans": materialized})
+
+
+def validate_attribution_output(
+    output: EvidenceAttributionOutput,
+    transcript: list[dict[str, Any]],
+    *,
+    span_candidates: list[dict[str, Any]] | None = None,
+) -> list[ValidatedAttributionSpan]:
+    """Verify role, occurrence, offsets, hash, and non-overlap before storage."""
+
+    user_turns = {
+        int(item["turn_index"]): str(item["content"])
+        for item in transcript
+        if item.get("role") == "user" and str(item.get("content", "")).strip()
+    }
+    previous_end_by_turn: dict[int, int] = {}
+    represented_user_turns: set[int] = set()
+    validated: list[ValidatedAttributionSpan] = []
+    for span in sorted(output.spans, key=lambda item: (item.turn_index, item.start, item.end)):
+        source = user_turns.get(span.turn_index)
+        if source is None:
+            raise FinalizationError("attribution_span_must_reference_user_turn")
+        if span.start < 0 or span.end > len(source) or span.end <= span.start:
+            raise FinalizationError("attribution_span_offsets_out_of_bounds")
+        if source[span.start:span.end] != span.quote:
+            raise FinalizationError("attribution_span_offsets_do_not_match_quote")
+        previous_end = previous_end_by_turn.get(span.turn_index)
+        if previous_end is not None and span.start < previous_end:
+            raise FinalizationError("attribution_spans_overlap")
+        previous_end_by_turn[span.turn_index] = span.end
+        represented_user_turns.add(span.turn_index)
+        authoritative_hash = attribution_text_hash(span.quote)
+        if span.text_hash is not None and span.text_hash != authoritative_hash:
+            raise FinalizationError("attribution_span_text_hash_mismatch")
+        eligibility, validation_status, validation_reason = (
+            classify_span_eligibility(span)
+        )
+        validated.append(
+            ValidatedAttributionSpan(
+                output=span,
+                text_hash=authoritative_hash,
+                eligibility=eligibility,
+                validation_status=validation_status,
+                validation_reason=validation_reason,
+            )
+        )
+    if not validated:
+        raise FinalizationError("attribution_output_has_no_valid_spans")
+    if set(user_turns) - represented_user_turns:
+        raise FinalizationError("attribution_output_missing_user_turn")
+    if span_candidates is not None:
+        expected = {
+            (
+                int(candidate["turn_index"]),
+                int(candidate["start"]),
+                int(candidate["end"]),
+                str(candidate["quote"]),
+            )
+            for candidate in span_candidates
+        }
+        actual = {
+            (
+                item.output.turn_index,
+                item.output.start,
+                item.output.end,
+                item.output.quote,
+            )
+            for item in validated
+        }
+        if actual - expected:
+            raise FinalizationError(
+                "attribution_output_has_unregistered_span_candidate"
+            )
+        if expected - actual or len(validated) != len(span_candidates):
+            raise FinalizationError("attribution_output_missing_span_candidate")
+    return validated
 
 
 def _is_self_label_or_prompted_claim(quote: str) -> bool:
@@ -412,6 +704,58 @@ def _validate_interviewer_output(
     return _quality_flags(message, latest_user_text)
 
 
+def _validated_navigation(
+    output: NaturalInterviewerOutput,
+    *,
+    prompt_version: str,
+    transcript: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    navigation = output.navigation
+    user_turns = {
+        int(item["turn_index"]): str(item["content"])
+        for item in transcript
+        if item.get("role") == "user"
+    }
+    if not user_turns:
+        if prompt_version == "v6.2.1" and navigation is not None:
+            raise InterviewContractError("opening_navigation_must_be_null")
+        return None
+    if prompt_version == "v6.2.1" and navigation is None:
+        raise InterviewContractError("v621_navigation_required")
+    if navigation is None:
+        return None
+    anchor = navigation.decision_anchor
+    source = user_turns.get(anchor.turn_index)
+    if source is None:
+        raise InterviewContractError("navigation_anchor_must_reference_user_turn")
+    if anchor.start < 0 or anchor.end > len(source) or anchor.end <= anchor.start:
+        raise InterviewContractError("navigation_anchor_offsets_out_of_bounds")
+    if source[anchor.start:anchor.end] != anchor.quote:
+        raise InterviewContractError("navigation_anchor_offsets_do_not_match_quote")
+    if prompt_version == "v6.2.1":
+        candidates = build_interview_anchor_candidates(transcript)
+        anchor_key = (anchor.turn_index, anchor.start, anchor.end, anchor.quote)
+        candidate_keys = {
+            (
+                int(candidate["turn_index"]),
+                int(candidate["start"]),
+                int(candidate["end"]),
+                str(candidate["quote"]),
+            )
+            for candidate in candidates
+        }
+        if anchor_key not in candidate_keys:
+            raise InterviewContractError(
+                "navigation_anchor_not_in_server_candidates"
+            )
+    authoritative_hash = attribution_text_hash(anchor.quote)
+    if anchor.text_hash is not None and anchor.text_hash != authoritative_hash:
+        raise InterviewContractError("navigation_anchor_text_hash_mismatch")
+    result = navigation.model_dump(mode="json")
+    result["decision_anchor"]["text_hash"] = authoritative_hash
+    return result
+
+
 class InterviewOrchestrator:
     def __init__(self, gateway: ModelGatewayService | None = None) -> None:
         self.gateway = gateway or ModelGatewayService()
@@ -431,6 +775,7 @@ class InterviewOrchestrator:
             call,
             input_fingerprint=payload_fingerprint(payload),
             prompt_version=prompt_version,
+            transcript=[],
         )
 
     def process(
@@ -459,6 +804,7 @@ class InterviewOrchestrator:
                 input_fingerprint=hashlib.sha256(user_turn.content.encode("utf-8")).hexdigest(),
                 model_session_action=None,
                 model_finish_reason=None,
+                navigation=None,
             )
         payload = {
             "participant": {
@@ -470,6 +816,13 @@ class InterviewOrchestrator:
             },
             "transcript": _transcript_rows(session),
         }
+        if prompt_version == "v6.2.1":
+            payload["anchor_candidates"] = build_interview_anchor_candidates(
+                payload["transcript"]
+            )
+            payload["source_clarification_required"] = (
+                source_clarification_required(payload["transcript"])
+            )
         call = self.gateway.generate_interviewer(
             payload,
             prompt_version=prompt_version,
@@ -479,8 +832,9 @@ class InterviewOrchestrator:
             input_fingerprint=payload_fingerprint(payload),
             latest_user_text=user_turn.content,
             prompt_version=prompt_version,
+            transcript=payload["transcript"],
         )
-        if result.prompt_version == "v6.2.0" and result.session_action == "finish":
+        if result.prompt_version in {"v6.2.0", "v6.2.1"} and result.session_action == "finish":
             if result.finish_reason in MODEL_NATURAL_CLOSE_REASONS:
                 return replace(
                     result,
@@ -620,14 +974,124 @@ class InterviewOrchestrator:
             output=validated,
         )
 
+    def assess_evidence_attribution(
+        self,
+        *,
+        transcript: list[dict[str, Any]],
+    ) -> EvidenceAttributionAssessment:
+        payload = {"user_turns": _attribution_user_turns(transcript)}
+        call = self.gateway.generate_evidence_attribution(payload)
+        span_candidates = [
+            candidate
+            for turn in payload["user_turns"]
+            for candidate in turn["span_candidates"]
+        ]
+        materialized = materialize_attribution_output(
+            call.output,
+            span_candidates,
+        )
+        return EvidenceAttributionAssessment(
+            spans=validate_attribution_output(
+                materialized,
+                transcript,
+                span_candidates=span_candidates,
+            ),
+            provider=call.provider,
+            model=call.model,
+            prompt_template_id=EVIDENCE_ATTRIBUTION_PROMPT_ID,
+            prompt_version=EVIDENCE_ATTRIBUTION_PROMPT_VERSION,
+            schema_version=EVIDENCE_ATTRIBUTION_SCHEMA_VERSION,
+            repair_used=call.repair_used,
+            latency_ms=call.latency_ms,
+            attempt_count=call.attempt_count,
+            input_fingerprint=payload_fingerprint(payload),
+        )
+
+    def assess_attributed_evidence(
+        self,
+        *,
+        eligible_spans: list[EvidenceAttributionSpan],
+        transcript: list[dict[str, Any]],
+        expected_check_id: int,
+        expected_transcript_fingerprint: str,
+        expected_asset_fingerprint: str,
+    ) -> ReportReadinessAssessment:
+        payload = {
+            "eligible_spans": [
+                {
+                    "attribution_span_id": span.id,
+                    "turn_index": span.turn_index,
+                    "start": span.start,
+                    "end": span.end,
+                    "text": span.quote,
+                    "owner": span.owner,
+                    "relation": span.relation,
+                    "elicitation_level": span.elicitation_level,
+                    "eligibility": span.eligibility,
+                    "preceding_question": next(
+                        (
+                            str(item["content"])
+                            for item in reversed(transcript)
+                            if int(item["turn_index"]) < span.turn_index
+                            and item.get("role") == "assistant"
+                        ),
+                        None,
+                    ),
+                }
+                for span in eligible_spans
+            ]
+        }
+        call = self.gateway.generate_attributed_evidence(payload)
+        validated = self._validate_attributed_output(
+            call.output,
+            eligible_spans,
+            expected_check_id=expected_check_id,
+            expected_transcript_fingerprint=expected_transcript_fingerprint,
+            expected_asset_fingerprint=expected_asset_fingerprint,
+        )
+        sufficient_dimension_count = sum(
+            1
+            for dimension in validated.dimensions
+            if dimension.score is not None
+            and dimension.sufficient
+            and bool(dimension.evidence_refs)
+        )
+        minimum_turns_required = settings.natural_interview_min_user_turns
+        saved_user_answer_count = sum(
+            1 for item in transcript if item.get("role") == "user"
+        )
+        minimum_turns_met = saved_user_answer_count >= minimum_turns_required
+        evidence_ready = sufficient_dimension_count == len(DIMENSIONS)
+        return ReportReadinessAssessment(
+            ready=evidence_ready and minimum_turns_met,
+            evidence_ready=evidence_ready,
+            sufficient_dimension_count=sufficient_dimension_count,
+            minimum_turns_required=minimum_turns_required,
+            minimum_turns_met=minimum_turns_met,
+            provider=call.provider,
+            model=call.model,
+            prompt_template_id=ATTRIBUTED_EVIDENCE_PROMPT_ID,
+            prompt_version=ATTRIBUTED_EVIDENCE_PROMPT_VERSION,
+            repair_used=call.repair_used,
+            latency_ms=call.latency_ms,
+            attempt_count=call.attempt_count,
+            output=validated,
+        )
+
     def finalize(
         self,
         db: Session,
         session: AssessmentSession,
         *,
-        precomputed: StructuredCallResult[FinalScorerOutput] | None = None,
+        precomputed: StructuredCallResult[
+            FinalScorerOutput | AttributedFinalScorerOutput
+        ]
+        | None = None,
         precomputed_prompt_template_id: str | None = None,
         precomputed_prompt_version: str | None = None,
+        attribution_spans: list[EvidenceAttributionSpan] | None = None,
+        readiness_check_id: int | None = None,
+        expected_asset_fingerprint: str | None = None,
     ) -> AssessmentSession:
         if session.report and session.phase == "completed":
             return session
@@ -666,19 +1130,68 @@ class InterviewOrchestrator:
             call = precomputed or self.gateway.generate_final_scorer(
                 {"transcript": transcript}
             )
-            validated = self._validate_final_output(call.output, transcript)
+            strong_scaffold_review = False
+            if isinstance(call.output, AttributedFinalScorerOutput):
+                if (
+                    attribution_spans is None
+                    or readiness_check_id is None
+                    or expected_asset_fingerprint is None
+                ):
+                    raise FinalizationError(
+                        "attributed_finalization_context_missing"
+                    )
+                validated_attributed = self._validate_attributed_output(
+                    call.output,
+                    attribution_spans,
+                    expected_check_id=readiness_check_id,
+                    expected_transcript_fingerprint=frozen_fingerprint,
+                    expected_asset_fingerprint=expected_asset_fingerprint,
+                )
+                span_by_id = {span.id: span for span in attribution_spans}
+                strong_scaffold_review = any(
+                    dimension.score is not None
+                    and bool(dimension.evidence_refs)
+                    and all(
+                        span_by_id[reference.attribution_span_id].elicitation_level
+                        == "strong_scaffold"
+                        for reference in dimension.evidence_refs
+                    )
+                    for dimension in validated_attributed.dimensions
+                )
+                validated_for_report = self._legacy_output_from_attributed(
+                    validated_attributed, attribution_spans
+                )
+                run.result_data = validated_attributed.model_dump(mode="json")
+                self._persist_attributed_evidence(
+                    db,
+                    session,
+                    run,
+                    validated_attributed,
+                    attribution_spans,
+                    readiness_check_id=readiness_check_id,
+                )
+                report_version = "v6.2.1"
+            else:
+                validated_for_report = self._validate_final_output(
+                    call.output, transcript
+                )
+                run.result_data = validated_for_report.model_dump(mode="json")
+                self._persist_evidence(db, session, run, validated_for_report)
+                report_version = "v6.2" if precomputed is not None else "v6.0"
             run.model_provider = call.provider
             run.model_name = call.model
             run.repair_used = call.repair_used
-            run.result_data = validated.model_dump(mode="json")
             run.status = "completed"
             run.completed_at = utcnow()
-            self._persist_evidence(db, session, run, validated)
-            report_data = self._build_report(session, validated)
+            report_data = self._build_report(session, validated_for_report)
+            report_data["manual_review_recommended"] = (
+                bool(report_data["manual_review_recommended"])
+                or strong_scaffold_review
+            )
             db.add(
                 AssessmentReport(
                     session_id=session.id,
-                    version="v6.2" if precomputed is not None else "v6.0",
+                    version=report_version,
                     report_data=report_data,
                     evidence_fingerprint=frozen_fingerprint,
                 )
@@ -687,8 +1200,9 @@ class InterviewOrchestrator:
             session.finalization_state = "completed"
             session.completed_at = utcnow()
             requires_manual_review = session.ended_early or any(
-                dimension.score is None for dimension in validated.dimensions
-            )
+                dimension.score is None
+                for dimension in validated_for_report.dimensions
+            ) or strong_scaffold_review
             run.manual_review_recommended = requires_manual_review
             session.manual_review_recommended = requires_manual_review
             db.commit()
@@ -717,6 +1231,7 @@ class InterviewOrchestrator:
         input_fingerprint: str,
         latest_user_text: str | None = None,
         prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
+        transcript: list[dict[str, Any]] | None = None,
     ) -> InterviewResult:
         quality_flags = _validate_interviewer_output(call.output, latest_user_text)
         prompt_template_id, resolved_version, _ = resolve_natural_interviewer_prompt(
@@ -737,6 +1252,77 @@ class InterviewOrchestrator:
             input_fingerprint=input_fingerprint,
             model_session_action=call.output.session_action,
             model_finish_reason=call.output.finish_reason,
+            navigation=_validated_navigation(
+                call.output,
+                prompt_version=resolved_version,
+                transcript=transcript or [],
+            ),
+        )
+
+    @staticmethod
+    def _validate_attributed_output(
+        output: AttributedFinalScorerOutput,
+        spans: list[EvidenceAttributionSpan],
+        *,
+        expected_check_id: int,
+        expected_transcript_fingerprint: str,
+        expected_asset_fingerprint: str,
+    ) -> AttributedFinalScorerOutput:
+        by_id = {span.id: span for span in spans}
+
+        def validated_span(span_id: int) -> EvidenceAttributionSpan:
+            span = by_id.get(span_id)
+            if span is None:
+                raise FinalizationError("attributed_scorer_referenced_unknown_span")
+            if span.readiness_check_id != expected_check_id:
+                raise FinalizationError("attributed_scorer_referenced_wrong_check")
+            if span.transcript_fingerprint != expected_transcript_fingerprint:
+                raise FinalizationError("attributed_scorer_referenced_stale_transcript")
+            if span.asset_fingerprint != expected_asset_fingerprint:
+                raise FinalizationError("attributed_scorer_referenced_stale_assets")
+            if span.eligibility != "eligible" or span.validation_status != "validated":
+                raise FinalizationError("attributed_scorer_referenced_ineligible_span")
+            if attribution_text_hash(span.quote) != span.text_hash:
+                raise FinalizationError("persisted_attribution_span_hash_mismatch")
+            return span
+
+        normalized_dimensions = []
+        for dimension in output.dimensions:
+            if dimension.score is None:
+                if dimension.evidence_refs or dimension.sufficient:
+                    raise FinalizationError(
+                        "null_score_has_attribution_refs_or_sufficiency"
+                    )
+            elif not dimension.sufficient or not dimension.evidence_refs:
+                raise FinalizationError(
+                    "numeric_score_without_eligible_attribution_refs"
+                )
+            for reference in dimension.evidence_refs:
+                validated_span(reference.attribution_span_id)
+            reason = (
+                dimension.reason
+                if _public_report_text_is_safe(dimension.reason)
+                else _neutral_reason_for(dimension.score)
+            )
+            normalized_dimensions.append(
+                dimension.model_copy(update={"reason": reason})
+            )
+
+        def safe_summaries(items):
+            safe = []
+            for item in items:
+                for span_id in item.attribution_span_ids:
+                    validated_span(span_id)
+                if _public_report_text_is_safe(item.text):
+                    safe.append(item)
+            return safe
+
+        return output.model_copy(
+            update={
+                "dimensions": normalized_dimensions,
+                "strengths": safe_summaries(output.strengths),
+                "priorities": safe_summaries(output.priorities),
+            }
         )
 
     @staticmethod
@@ -816,6 +1402,79 @@ class InterviewOrchestrator:
         )
 
     @staticmethod
+    def _legacy_output_from_attributed(
+        output: AttributedFinalScorerOutput,
+        spans: list[EvidenceAttributionSpan],
+    ) -> FinalScorerOutput:
+        """Adapt validated IDs to the unchanged participant report DTO."""
+
+        by_id = {span.id: span for span in spans}
+        return FinalScorerOutput.model_validate(
+            {
+                "dimensions": [
+                    {
+                        "dimension_key": dimension.dimension_key,
+                        "score": dimension.score,
+                        "quotes": [
+                            {
+                                "turn_index": by_id[
+                                    reference.attribution_span_id
+                                ].turn_index,
+                                "quote": by_id[
+                                    reference.attribution_span_id
+                                ].quote,
+                            }
+                            for reference in dimension.evidence_refs
+                        ],
+                        "reason": dimension.reason,
+                        "confidence": dimension.confidence,
+                        "sufficient": dimension.sufficient,
+                    }
+                    for dimension in output.dimensions
+                ],
+                "strengths": [item.text for item in output.strengths],
+                "priorities": [item.text for item in output.priorities],
+            }
+        )
+
+    @staticmethod
+    def _persist_attributed_evidence(
+        db: Session,
+        session: AssessmentSession,
+        run: ScoringRun,
+        output: AttributedFinalScorerOutput,
+        spans: list[EvidenceAttributionSpan],
+        *,
+        readiness_check_id: int,
+    ) -> None:
+        by_id = {span.id: span for span in spans}
+        for dimension in output.dimensions:
+            if dimension.score is None:
+                continue
+            for reference in dimension.evidence_refs:
+                span = by_id[reference.attribution_span_id]
+                db.add(
+                    EvidenceItem(
+                        session_id=session.id,
+                        scoring_run_id=run.id,
+                        user_turn_id=span.user_turn_id,
+                        attribution_span_id=span.id,
+                        readiness_check_id=readiness_check_id,
+                        dimension_key=dimension.dimension_key,
+                        quote=span.quote,
+                        quote_start=span.start,
+                        quote_end=span.end,
+                        confidence=dimension.confidence,
+                        validation_status="validated",
+                        validation_reason=(
+                            "eligible_strong_scaffold_manual_review"
+                            if span.elicitation_level == "strong_scaffold"
+                            else "eligible_attribution_span_reference"
+                        ),
+                    )
+                )
+
+    @staticmethod
     def _persist_evidence(
         db: Session,
         session: AssessmentSession,
@@ -843,6 +1502,8 @@ class InterviewOrchestrator:
                         quote_start=start,
                         quote_end=start + len(quote.quote),
                         confidence=dimension.confidence,
+                        validation_status="legacy_unclassified",
+                        validation_reason="legacy_quote_contract",
                     )
                 )
 

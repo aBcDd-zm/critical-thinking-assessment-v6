@@ -171,8 +171,8 @@ async function installMockBackend(page: Page) {
 
 async function startInterview(page: Page) {
   await page.goto("/assessment");
-  await expect(page.getByText("在访谈对话中展现你的思维", { exact: true })).toBeVisible();
-  await expect(page.getByText("请从一件真实、具体、需要判断的经历说起", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "开始一次具体的思维访谈" })).toBeVisible();
+  await expect(page.getByText(/这不是与 AI 随意聊天/)).toBeVisible();
   await page.getByLabel("参与编号或昵称").fill("本地流程验收");
   await page.getByLabel(/我已阅读并理解/).check();
   await page.getByRole("button", { name: /开始访谈/ }).click();

@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     # Prompt selection is explicit so a deployment can roll back conversational
     # style without changing code or losing the version recorded in traces.
     natural_interviewer_prompt_version: Literal[
-        "v6.0.3", "v6.0.4", "v6.0.5", "v6.1.1", "v6.2.0"
-    ] = "v6.2.0"
+        "v6.0.3", "v6.0.4", "v6.0.5", "v6.1.1", "v6.2.0", "v6.2.1"
+    ] = "v6.2.1"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_base_url: str = "https://api.deepseek.com"
@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # never delay the interviewer stream, and their validated output is reused
     # directly when the participant generates a report.
     evidence_observer_enabled: bool = True
+    # Attribution is release-gated independently from the interviewer prompt.
+    # ``shadow`` records the new ownership analysis and span-scoring comparison
+    # while preserving the existing participant result. ``enforce`` becomes a
+    # hard gate only for sessions whose opening bound them to v6.2.1.
+    evidence_attribution_mode: Literal["disabled", "shadow", "enforce"] = "shadow"
     deepseek_evidence_thinking: Literal["enabled", "disabled"] = "disabled"
     deepseek_evidence_max_tokens: int = 2000
     deepseek_evidence_primary_timeout_seconds: float = 8.0
@@ -89,6 +94,14 @@ class Settings(BaseSettings):
         violations: list[str] = []
         if self.model_gateway_mode != "real":
             violations.append("MODEL_GATEWAY_MODE must be real")
+        if (
+            self.natural_interviewer_prompt_version == "v6.2.1"
+            and self.evidence_attribution_mode != "enforce"
+        ):
+            violations.append(
+                "EVIDENCE_ATTRIBUTION_MODE must be enforce when "
+                "NATURAL_INTERVIEWER_PROMPT_VERSION is v6.2.1"
+            )
         if not self.deepseek_api_key.strip():
             violations.append("DEEPSEEK_API_KEY must be non-empty")
         if not self.admin_username.strip():

@@ -89,6 +89,30 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
         )
 
 
+def test_v621_is_the_code_default_and_production_requires_enforcement(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("NATURAL_INTERVIEWER_PROMPT_VERSION", raising=False)
+    monkeypatch.delenv("EVIDENCE_ATTRIBUTION_MODE", raising=False)
+    default_config = Settings(_env_file=None)
+    assert default_config.natural_interviewer_prompt_version == "v6.2.1"
+    assert default_config.evidence_attribution_mode == "shadow"
+
+    with pytest.raises(
+        ValidationError,
+        match="EVIDENCE_ATTRIBUTION_MODE must be enforce",
+    ):
+        _production_settings(
+            natural_interviewer_prompt_version="v6.2.1",
+            evidence_attribution_mode="shadow",
+        )
+    production = _production_settings(
+        natural_interviewer_prompt_version="v6.2.1",
+        evidence_attribution_mode="enforce",
+    )
+    assert production.evidence_attribution_mode == "enforce"
+
+
 def test_minimum_user_turn_guard_defaults_to_eight_and_stays_within_cap() -> None:
     assert Settings(_env_file=None).natural_interview_min_user_turns == 8
     assert Settings(

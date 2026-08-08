@@ -1,9 +1,10 @@
 # 思衡 V6 Prompt 交接
 
-默认版本：`natural_interviewer_v6.2.0`、`natural_incremental_evidence_v6.2.1`
-可回滚访谈版本：`natural_interviewer_v6.1.1`、`natural_interviewer_v6.0.5`、`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
+开发默认版本：`natural_interviewer_v6.2.1`、`natural_evidence_attribution_v6.2.1`、`natural_attributed_evidence_v6.2.2`（`shadow`）
+可回滚访谈版本：`natural_interviewer_v6.2.0`、`natural_interviewer_v6.1.1`、`natural_interviewer_v6.0.5`、`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
+旧/对照增量整理器：`natural_incremental_evidence_v6.2.1`
 旧冻结会话兼容评分器：`natural_final_scorer_v6.1.0`
-适用分支：`system/v612-consistent-closure`
+适用分支：`system/v621-evidence-attribution`（叠加 base：`system/v612-consistent-closure@7a44abf`）
 
 ## 设计意图
 
@@ -15,30 +16,44 @@ V6 不是把 V5 的控制器放宽一点。它明确取消“服务端告诉访�
 
 每轮运行时 payload 只提供：最小化的参与者资料与完整有序逐字稿。六维定义、JSON Schema 和模型配置只存在于版本化服务端系统合同中；不把会话 ID/状态、缺失维度、覆盖、候选题目或下一步目标注入模型。用户文本一律是不可信数据，不能改变系统合同。
 
-访谈官必须只返回：
+V6.2.0 及更早访谈官只返回原合同。V6.2.1 在不改变可见文案的前提下增加私有审计 navigation：
 
 ```json
 {
   "interviewer_message": "用户实际看到的自然回应",
   "session_action": "continue",
-  "finish_reason": null
+  "finish_reason": null,
+  "navigation": {
+    "decision_anchor": {
+      "turn_index": 1,
+      "quote": "真实 user turn 的连续原文",
+      "start": 0,
+      "end": 18,
+      "text_hash": null
+    },
+    "focus_kind": "decision_problem|basis|tradeoff|action|outcome|adjustment|source_ownership|other",
+    "mainline_relation": "core|branch|return|source_clarification|user_switch"
+  }
 }
 ```
+
+开场没有 user turn 时 `navigation=null`；之后必须引用 payload 中真实 user span，服务端复核偏移并计算哈希。navigation 只进入 trace，不显示给参与者、不进入 readiness，也不携带维度、分数或候选题。
 
 模型输出的 `session_action` 为 `continue|finish`。V6.2 正常访谈只能返回 `continue/null`；只有用户明确要求结束本次访谈时才可返回 `finish/user_requested`，服务端仍会把它转为继续状态并要求通过页面入口提交当前快照。任何 `finish/enough_understanding|natural_closure` 都会被压制并改为一个自然的单焦点继续问题。旧版本输出合同保持原文不变，仅服务于已绑定旧 Prompt 的会话。
 
 ### 版本选择与回滚
 
-运行时只允许选择已登记的 `v6.0.3|v6.0.4|v6.0.5|v6.1.1|v6.2.0`：
+运行时只允许选择已登记的 `v6.0.3|v6.0.4|v6.0.5|v6.1.1|v6.2.0|v6.2.1`：
 
 ```text
-NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.0
+NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1
+EVIDENCE_ATTRIBUTION_MODE=shadow
 ```
 
-默认使用 `v6.2.0`。发生系统性回归时可改回 `v6.1.1` 或 `v6.0.5` 并重启后端。每个会话使用 `natural_opening` trace 绑定开场版本，因此切换或回滚只影响之后新建的会话，不会使进行中会话中途换版。四个旧 Prompt 文本保持完整，无需改代码。每个 trace 仍记录实际使用的
+开发默认使用 `v6.2.1 + shadow`；生产样例在真实模型盲测和成员 A 审核前仍保持 `v6.2.0 + disabled`。生产若选择 `v6.2.1`，启动校验要求同时使用 `enforce`。发生系统性回归时可改回 `v6.2.0`、`v6.1.1` 或 `v6.0.5` 并重启后端。每个会话使用 `natural_opening` trace 同时绑定开场版本与 attribution mode，因此切换或回滚只影响之后新建的会话，不会使进行中会话中途换版。旧 Prompt 文本保持完整，无需改代码。每个 trace 仍记录实际使用的
 `prompt_template_id` 与 `prompt_version`，不得将不同版本的数据当作同一干预条件。
 
-访谈调用使用 `thinking=disabled`、`max_tokens=512`、25 秒总预算。增量整理器 `natural_incremental_evidence_v6.2.1` 使用独立的 `thinking=disabled`、`max_tokens=2000`、15 秒总预算，首次最多 8 秒且最多重试一次；任务完全后台运行。主动收束还必须满足至少 8 个已保存用户回答；这是服务端确定性门槛，不注入访谈官。旧冻结会话的完整终评仍保留 12000 tokens、90 秒配置，但 V6.2 正常报告生成不会调用它。
+访谈调用使用 `thinking=disabled`、`max_tokens=512`、25 秒总预算。归属器、span 评分器和旧增量整理器各自使用独立的 `thinking=disabled`、`max_tokens=2000`、15 秒总预算，首次最多 8 秒且最多重试一次；任务完全后台运行。主动收束还必须满足至少 8 个已保存用户回答；这是服务端确定性门槛，不注入访谈官。冻结时提升同一 readiness 结果，报告阶段模型调用为零。
 
 冻结 SHA-256：
 
@@ -47,6 +62,25 @@ NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.0
 - `v6.0.5`：`5e8cf29e5c73eee759dfcb54d322d567669600d8107b8b460418152c3bfc93ba`
 - `v6.1.1`：`7bc38dc4853a850ac8870927e3a5b8a7e140a061ac9630dd19702373aa57efe5`
 - `v6.2.0`：`40de5708ff67e05772b408a77f38c5edce67ceb352d660f777044e793954adca`
+- `v6.2.1`：`a2782644f1701c6eefb057e391a062d94791d08805b8a6dd784a9b359e4f7c83`
+- `natural_evidence_attribution_v6.2.1`：`0a6d49a63cdcceed7792ebca1ae9ce2097adfd23f775113facb71b5ae201e113`
+- `natural_attributed_evidence_v6.2.2`：`09863931f0721c464493a43fde45b724044d5e32bc6d97dd0dda6db909c554f4`
+
+这些哈希由自动化冻结；旧版本哈希不得随本版改变。
+
+### `natural_interviewer_v6.2.1`
+
+完整继承 v6.2.0 的自然事件、单问题和证据驱动结束边界，只增加不可见的决策主线审计。服务端在载荷中提供精确 `anchor_candidates` 和权威计算的 `source_clarification_required`；旗标不得缺失或篡改。模型只能原样复制一个候选的 `turn_index/quote/start/end`，`text_hash` 必须为 null，不再自行计算 Unicode 偏移。旗标为 true 时，访谈官必须用一个非二选一的开放问题中性澄清“哪些是外部材料、哪些是自己的判断、采纳了什么及为什么”，并返回 `focus_kind=source_ownership` 与 `mainline_relation=source_clarification`。缺 navigation、错 anchor、多问号、二选一或缺少内外来源两侧任一信号，都在 typed-call 的结构修复循环内失败并最多修复一次，不等到编排层才出错。澄清后回到最终选择、关键依据、实际行动、结果或调整。支线不机械限一轮，但下一问必须能增加对核心决策的理解。
+
+### `natural_evidence_attribution_v6.2.1`
+
+输入是有序 user turns、各自前一条访谈问题，以及服务端预计算的无缝、非重叠 `span_candidates`。每个候选 ID 绑定候选规则版本与 `turn_index/start/end/quote_hash/occurrence`。模型必须对每个 ID 恰好输出一次，只回传 `candidate_id` 与 owner、relation、elicitation、来源标签、置信度、简短理由；不回显原文和偏移，不自行再切分或挑选“可评分”片段。服务端按 ID 权威物化原 span 后，验证角色、原文切片、偏移、occurrence、哈希、候选完整性与指纹，再独立计算资格；绝不按首次 substring 自动纠偏。缺失、重复、未知 ID 或高置信候选总数超过 100 时 fail closed。对应紧凑输出 schema 为 `evidence-attribution-select-v3-id`，候选规则为 `evidence-span-boundaries-v1`。
+
+### `natural_attributed_evidence_v6.2.2`
+
+评分输出结构版本为 `attributed-evidence-span-ref-v1`；这一版本与评分 Prompt 一同进入 shadow/enforce 资产指纹和 Agent trace。
+
+输入只有服务端判定为 eligible 的 span registry 和必要的前一问上下文，不含整段原始 user turn 或被排除材料。评分输出只能引用 `attribution_span_id`；数字分、strengths 和 priorities 均须绑定 eligible ID。未知、跨检查、陈旧或非 eligible ID 由服务端拒绝，不回退到自由 quote 评分。
 
 ### `natural_interviewer_v6.2.0`
 
