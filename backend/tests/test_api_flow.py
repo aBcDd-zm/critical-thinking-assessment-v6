@@ -40,6 +40,7 @@ from app.services.model_gateway import (
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_4,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_0_5,
     NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1,
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_2_0,
     StructuredCallResult,
     resolve_natural_interviewer_prompt,
 )
@@ -134,7 +135,7 @@ def test_consent_and_model_generated_opening_are_natural_only(client) -> None:
     detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     opening = detail["traces"][0]
     assert opening["action"] == "natural_opening"
-    assert opening["prompt_template_id"] == "natural_interviewer_v6.0.5"
+    assert opening["prompt_template_id"] == "natural_interviewer_v6.2.0"
     assert opening["output_contract"]["attempt_count"] == 1
 
 
@@ -184,7 +185,7 @@ def test_interviewer_prompt_v6_0_3_is_preserved_for_rollback() -> None:
     assert "可轻声重复对方最后一句话的关键词" in prompt
 
 
-def test_interviewer_prompt_resolver_preserves_old_versions_and_adds_v6_1_1() -> None:
+def test_interviewer_prompt_resolver_preserves_old_versions_and_adds_v6_2() -> None:
     prompt_id, version, prompt = resolve_natural_interviewer_prompt("v6.0.4")
 
     assert prompt_id == "natural_interviewer_v6.0.4"
@@ -235,6 +236,21 @@ def test_interviewer_prompt_resolver_preserves_old_versions_and_adds_v6_1_1() ->
     assert "finish_reason=user_requested" in compact_prompt
     assert "不是结束访谈的请求" in compact_prompt
     assert "没有新的关键矛盾时，应自然收束并选择finish" not in compact_prompt
+
+    prompt_id, version, prompt = resolve_natural_interviewer_prompt("v6.2.0")
+    compact_prompt = "".join(prompt.split())
+
+    assert prompt_id == "natural_interviewer_v6.2.0"
+    assert version == "v6.2.0"
+    assert prompt == NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_2_0
+    assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
+        "40de5708ff67e05772b408a77f38c5edce67ceb352d660f777044e793954adca"
+    )
+    assert "真实、具体、需要认真判断或权衡的事情" in compact_prompt
+    assert "最多提出一个主要问题" in compact_prompt
+    assert "不得说“内容已完整”“可以结束”“证据已充分”" in compact_prompt
+    assert "独立的后台证据系统" in compact_prompt
+    assert "六维" not in compact_prompt
 
 
 def test_interviewer_prompt_resolver_rejects_unknown() -> None:
@@ -317,6 +333,82 @@ def test_v6_1_1_mock_anchors_the_opening_and_confirms_before_closure() -> None:
     assert user_ended.finish_reason == "user_requested"
 
 
+def test_v6_2_mock_anchors_the_opening_but_never_naturally_closes() -> None:
+    opening = ModelGatewayService._mock_interviewer(
+        {"participant": {"display_name": "小陈"}, "transcript": []},
+        prompt_version="v6.2.0",
+    )
+    assert "真实、具体" in opening.interviewer_message
+    assert opening.session_action == "continue"
+
+    continued = ModelGatewayService._mock_interviewer(
+        {
+            "participant": {"display_name": "小陈"},
+            "transcript": [
+                {
+                    "turn_index": 1,
+                    "role": "user",
+                    "content": "我会先核实信息，再根据反馈决定是否继续。",
+                },
+                {
+                    "turn_index": 2,
+                    "role": "assistant",
+                    "content": "什么情况最可能让你改变现在的决定？",
+                },
+                {
+                    "turn_index": 3,
+                    "role": "user",
+                    "content": "如果关键反馈相反，我会暂停并重新比较风险。",
+                },
+            ],
+        },
+        prompt_version="v6.2.0",
+    )
+    assert continued.session_action == "continue"
+    assert continued.finish_reason is None
+    assert "可以考虑在这里结束" not in continued.interviewer_message
+
+
+def test_v6_2_suppresses_a_model_natural_close_and_keeps_the_session_open(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    gateway = api_router.sessions.orchestrator.gateway
+
+    def natural_close(_payload, **_kwargs):
+        return StructuredCallResult(
+            output=NaturalInterviewerOutput(
+                interviewer_message="这件事已经完整，我们可以结束了。",
+                session_action="finish",
+                finish_reason="natural_closure",
+            ),
+            provider="mock",
+            model="v6.2-natural-close-test",
+            repair_used=False,
+            latency_ms=0,
+        )
+
+    monkeypatch.setattr(gateway, "generate_interviewer", natural_close)
+    response = send(
+        client,
+        session_uuid,
+        "我已经说明了自己的依据、权衡和之后会调整的条件。",
+        "v62-suppress-natural-close",
+    )
+    assert response.status_code == 200
+    events = parse_events(response)
+    assert not any(item["event"] == "session_closure_suggested" for item in events)
+    assert not any(item["event"] == "session_finalizing" for item in events)
+    completed = events[-1]["data"]
+    assert completed["session_action"] == "continue"
+    assert completed["finish_reason"] is None
+    assert completed["session"]["phase"] == "interviewing"
+    assert completed["turn"]["quality_flags"] == [
+        "natural_closure_suppressed_by_evidence_gate"
+    ]
+    assert "已经完整" not in completed["turn"]["content"]
+
+
 def test_interviewer_style_flags_record_binary_questions_and_verbatim_echoes() -> None:
     latest_user_text = "我会先核实导师、资金和项目安排，再决定是否继续申请。"
     flags = _quality_flags(
@@ -339,7 +431,8 @@ def test_mock_interviewer_probes_a_complete_plan_before_natural_closure() -> Non
                     "content": "我已经想清楚了，会先做两周试用，再根据教师反馈决定是否继续。",
                 }
             ],
-        }
+        },
+        prompt_version="v6.0.5",
     )
 
     assert output.session_action == "continue"
@@ -366,7 +459,8 @@ def test_mock_interviewer_probes_a_complete_plan_before_natural_closure() -> Non
                     "content": "如果两周后教师仍要回到表格协调，我会先停止扩展功能并重看方案。",
                 },
             ],
-        }
+        },
+        prompt_version="v6.0.5",
     )
 
     assert closed.session_action == "finish"
@@ -377,7 +471,8 @@ def test_mock_interviewer_probes_a_complete_plan_before_natural_closure() -> Non
         {
             "participant": {"display_name": "小陈"},
             "transcript": [{"turn_index": 1, "role": "user", "content": generic_input}],
-        }
+        },
+        prompt_version="v6.0.5",
     )
     assert generic.session_action == "continue"
     assert generic_input not in generic.interviewer_message
@@ -690,10 +785,8 @@ def test_user_finalize_scores_only_exact_user_quotes_and_hides_confidence(client
 def test_report_readiness_is_aggregate_idempotent_and_not_formal_scoring(
     client, monkeypatch
 ) -> None:
-    session_uuid = create_session(client)
-    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     gateway = api_router.sessions.orchestrator.gateway
-    original = gateway.generate_final_scorer
+    original = gateway.generate_incremental_evidence
     calls = 0
 
     def counted(payload):
@@ -701,16 +794,29 @@ def test_report_readiness_is_aggregate_idempotent_and_not_formal_scoring(
         calls += 1
         return original(payload)
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", counted)
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", counted)
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     first = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
     second = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
 
     assert first.status_code == 200, first.text
-    assert first.json() == {"status": "ready", "ready": True, "cached": False}
+    first_payload = first.json()
+    assert first_payload["status"] == "ready"
+    assert first_payload["ready"] is True
+    assert first_payload["cached"] is True
+    assert isinstance(first_payload["check_id"], int)
+    assert len(first_payload["transcript_fingerprint"]) == 64
     assert second.status_code == 200, second.text
-    assert second.json() == {"status": "ready", "ready": True, "cached": True}
+    assert second.json() == first_payload
     assert calls == 1
-    assert set(first.json()) == {"status", "ready", "cached"}
+    assert set(first_payload) == {
+        "status",
+        "ready",
+        "cached",
+        "check_id",
+        "transcript_fingerprint",
+    }
 
     with TestSession() as db:
         session = db.scalar(
@@ -729,6 +835,122 @@ def test_report_readiness_is_aggregate_idempotent_and_not_formal_scoring(
         assert db.scalar(select(func.count()).select_from(AssessmentReport)) == 0
 
 
+def test_incremental_snapshot_carries_forward_only_validated_prior_evidence(
+    client, monkeypatch
+) -> None:
+    gateway = api_router.sessions.orchestrator.gateway
+    original = gateway.generate_incremental_evidence
+    captured: list[dict] = []
+
+    def recording(payload):
+        captured.append(json.loads(json.dumps(payload, ensure_ascii=False)))
+        return original(payload)
+
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", recording)
+    session_uuid = create_session(client)
+    assert send(
+        client,
+        session_uuid,
+        "我先界定问题边界，并核实已有数据和信息来源。",
+        "incremental-turn-1",
+    ).status_code == 200
+    assert send(
+        client,
+        session_uuid,
+        "我也比较团队与导师的角度，权衡风险；如果反馈变化就调整方案。",
+        "incremental-turn-2",
+    ).status_code == 200
+
+    assert len(captured) == 2
+    assert captured[0]["previous_snapshot"] is None
+    assert [item["turn_index"] for item in captured[0]["new_user_turns"]] == [1]
+    assert captured[1]["previous_snapshot"] is not None
+    assert [item["turn_index"] for item in captured[1]["new_user_turns"]] == [3]
+    client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+    assert len(captured) == 2
+    with TestSession() as db:
+        checks = db.scalars(
+            select(EvidenceReadinessCheck).order_by(EvidenceReadinessCheck.id)
+        ).all()
+        assert len(checks) == 2
+        assert [check.last_user_turn_index for check in checks] == [1, 3]
+        assert all(check.result_data is not None for check in checks)
+
+
+def test_background_snapshot_does_not_wait_and_processing_cannot_freeze(
+    client, monkeypatch
+) -> None:
+    submitted: list[tuple] = []
+    monkeypatch.setattr(settings, "model_gateway_mode", "real")
+    monkeypatch.setattr(
+        session_service_module._evidence_executor,
+        "submit",
+        lambda *args: submitted.append(args),
+    )
+    session_uuid = create_session(client)
+
+    response = send(client, session_uuid, DENSE_ANSWER)
+
+    assert response.status_code == 200
+    assert parse_events(response)[-1]["event"] == "agent_completed"
+    assert len(submitted) == 1
+    readiness = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+    assert readiness.status_code == 202
+    assert readiness.json()["status"] == "checking"
+    blocked = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness.json()["check_id"],
+            "expected_transcript_fingerprint": readiness.json()[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": True,
+        },
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "evidence_snapshot_processing"
+    snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
+    assert snapshot["phase"] == "interviewing"
+    assert snapshot["transcript_fingerprint"] is None
+
+
+def test_v6_2_finalization_promotes_the_exact_snapshot_without_a_model_call(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    ).json()
+    gateway = api_router.sessions.orchestrator.gateway
+
+    def forbidden_final_score(_payload):
+        raise AssertionError("v6.2 report generation must not rescore")
+
+    monkeypatch.setattr(gateway, "generate_final_scorer", forbidden_final_score)
+    finalized = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness["check_id"],
+            "expected_transcript_fingerprint": readiness[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": False,
+        },
+    )
+    assert finalized.status_code == 200, finalized.text
+    assert finalized.json()["session"]["phase"] == "completed"
+    with TestSession() as db:
+        check = db.get(EvidenceReadinessCheck, readiness["check_id"])
+        run = db.scalar(select(ScoringRun))
+        report = db.scalar(select(AssessmentReport))
+        assert check is not None and run is not None and report is not None
+        assert run.result_data == check.result_data
+        assert run.transcript_fingerprint == check.transcript_fingerprint
+        assert report.evidence_fingerprint == check.transcript_fingerprint
+        assert report.version == "v6.2"
+
+
 def test_insufficient_readiness_is_advisory_and_still_allows_finalization(client) -> None:
     session_uuid = create_session(client)
     answer = "这件事情我还没有完全想清楚，今天只想先把现在的感受说出来。"
@@ -736,13 +958,21 @@ def test_insufficient_readiness_is_advisory_and_still_allows_finalization(client
 
     readiness = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
     assert readiness.status_code == 200, readiness.text
-    assert readiness.json() == {
-        "status": "insufficient",
-        "ready": False,
-        "cached": False,
-    }
+    readiness_payload = readiness.json()
+    assert readiness_payload["status"] == "insufficient"
+    assert readiness_payload["ready"] is False
+    assert readiness_payload["cached"] is True
 
-    finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    finalized = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness_payload["check_id"],
+            "expected_transcript_fingerprint": readiness_payload[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": True,
+        },
+    )
     assert finalized.status_code == 200, finalized.text
     assert finalized.json()["session"]["phase"] == "completed"
     assert all(
@@ -751,21 +981,22 @@ def test_insufficient_readiness_is_advisory_and_still_allows_finalization(client
     )
 
 
-def test_readiness_failure_does_not_freeze_or_block_formal_finalization(
+def test_readiness_failure_keeps_session_open_and_can_be_retried(
     client, monkeypatch
 ) -> None:
-    session_uuid = create_session(client)
-    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     gateway = api_router.sessions.orchestrator.gateway
-    original = gateway.generate_final_scorer
+    original = gateway.generate_incremental_evidence
 
     def fail_readiness(_payload):
         raise ModelGatewayError("synthetic readiness failure", transient=True)
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", fail_readiness)
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", fail_readiness)
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     failed = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
-    assert failed.status_code == 503
-    assert failed.json()["code"] == "readiness_check_failed"
+    assert failed.status_code == 200
+    assert failed.json()["status"] == "failed"
+    failed_check_id = failed.json()["check_id"]
 
     with TestSession() as db:
         session = db.scalar(
@@ -777,49 +1008,64 @@ def test_readiness_failure_does_not_freeze_or_block_formal_finalization(
         check = db.scalar(select(EvidenceReadinessCheck))
         assert check is not None
         assert check.status == "failed"
-        assert check.error == "ModelGatewayError"
+        assert "ModelGatewayError" in check.error
+        assert check.attempt_count >= 1
+        assert check.latency_ms >= 1
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", original)
-    finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    still_failed = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
+    assert still_failed.json()["status"] == "failed"
+    assert still_failed.json()["check_id"] == failed_check_id
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", original)
+    recovered = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness?retry_failed=true"
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["status"] == "ready"
+    finalized = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": recovered.json()["check_id"],
+            "expected_transcript_fingerprint": recovered.json()[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": False,
+        },
+    )
     assert finalized.status_code == 200, finalized.text
     assert finalized.json()["session"]["phase"] == "completed"
 
 
-def test_readiness_discards_result_if_transcript_changes_during_check(
-    client, monkeypatch
-) -> None:
+def test_finalize_rejects_an_old_snapshot_after_the_transcript_changes(client) -> None:
     session_uuid = create_session(client)
     assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
-    fingerprints = iter(["a" * 64, "b" * 64])
-    monkeypatch.setattr(
-        session_service_module,
-        "transcript_fingerprint",
-        lambda _session: next(fingerprints),
+    first = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness").json()
+    assert send(
+        client,
+        session_uuid,
+        "后来团队给了新的反馈，所以我又比较了风险并调整了原先的决定。",
+        "client-turn-newer-transcript",
+    ).status_code == 200
+
+    stale = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": first["check_id"],
+            "expected_transcript_fingerprint": first["transcript_fingerprint"],
+            "allow_incomplete": True,
+        },
     )
-
-    readiness = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
-
-    assert readiness.status_code == 202, readiness.text
-    assert readiness.json() == {
-        "status": "checking",
-        "ready": None,
-        "cached": False,
-    }
-    with TestSession() as db:
-        check = db.scalar(select(EvidenceReadinessCheck))
-        assert check is not None
-        assert check.status == "failed"
-        assert check.error == "TranscriptChanged"
-        assert db.scalar(select(func.count()).select_from(ScoringRun)) == 0
-        assert db.scalar(select(func.count()).select_from(EvidenceItem)) == 0
-        assert db.scalar(select(func.count()).select_from(AssessmentReport)) == 0
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "stale_evidence_snapshot"
+    current = client.get(f"/api/v1/sessions/{session_uuid}").json()
+    assert current["phase"] == "interviewing"
+    assert current["transcript_fingerprint"] is None
 
 
 def test_stale_processing_readiness_lease_can_be_reclaimed(client, monkeypatch) -> None:
     session_uuid = create_session(client)
     assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     gateway = api_router.sessions.orchestrator.gateway
-    original = gateway.generate_final_scorer
+    original = gateway.generate_incremental_evidence
     calls = 0
 
     def counted(payload):
@@ -827,38 +1073,28 @@ def test_stale_processing_readiness_lease_can_be_reclaimed(client, monkeypatch) 
         calls += 1
         return original(payload)
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", counted)
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", counted)
     with TestSession() as db:
         session = db.scalar(
             select(AssessmentSession).where(AssessmentSession.uuid == session_uuid)
         )
         assert session is not None
-        stale = EvidenceReadinessCheck(
-            session_id=session.id,
-            transcript_fingerprint=transcript_fingerprint(session),
-            asset_fingerprint=(
-                session_service_module._report_readiness_asset_fingerprint()
-            ),
-            status="processing",
-            prompt_template_id=(
-                session_service_module.NATURAL_FINAL_SCORER_PROMPT_ID
-            ),
-            prompt_version=(
-                session_service_module.NATURAL_FINAL_SCORER_PROMPT_VERSION
-            ),
-            created_at=utcnow()
-            - timedelta(
-                seconds=session_service_module.REPORT_READINESS_LEASE_SECONDS + 1
-            ),
+        stale = db.scalar(select(EvidenceReadinessCheck))
+        assert stale is not None
+        stale.status = "processing"
+        stale.ready = None
+        stale.result_data = None
+        stale.created_at = utcnow() - timedelta(
+            seconds=session_service_module.REPORT_READINESS_LEASE_SECONDS + 1
         )
-        db.add(stale)
         db.commit()
         stale_id = stale.id
 
     readiness = client.post(f"/api/v1/sessions/{session_uuid}/report-readiness")
 
     assert readiness.status_code == 200, readiness.text
-    assert readiness.json() == {"status": "ready", "ready": True, "cached": False}
+    assert readiness.json()["status"] == "ready"
+    assert readiness.json()["ready"] is True
     assert calls == 1
     with TestSession() as db:
         checks = db.scalars(select(EvidenceReadinessCheck)).all()
@@ -884,7 +1120,19 @@ def test_short_or_self_evaluative_dialogue_leaves_dimensions_unmeasured(client) 
     session_uuid = create_session(client)
     self_label = "我觉得自己很擅长证据评估和决策能力，而且逻辑一直很好很理性。"
     assert send(client, session_uuid, self_label).status_code == 200
-    finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    ).json()
+    finalized = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness["check_id"],
+            "expected_transcript_fingerprint": readiness[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": True,
+        },
+    )
     assert finalized.status_code == 200, finalized.text
     dimensions = finalized.json()["report"]["dimensions"]
     assert len(dimensions) == 6
@@ -902,7 +1150,19 @@ def test_short_or_self_evaluative_dialogue_leaves_dimensions_unmeasured(client) 
         "我现在仍然没有想清楚，还需要一点时间再整理自己的想法。",
         "client-turn-short",
     ).status_code == 200
-    short_report = client.post(f"/api/v1/sessions/{short_session}/finalize")
+    short_readiness = client.post(
+        f"/api/v1/sessions/{short_session}/report-readiness"
+    ).json()
+    short_report = client.post(
+        f"/api/v1/sessions/{short_session}/finalize",
+        json={
+            "evidence_check_id": short_readiness["check_id"],
+            "expected_transcript_fingerprint": short_readiness[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": True,
+        },
+    )
     assert short_report.status_code == 200
     assert all(
         item["score"] is None for item in short_report.json()["report"]["dimensions"]
@@ -912,11 +1172,9 @@ def test_short_or_self_evaluative_dialogue_leaves_dimensions_unmeasured(client) 
 def test_self_label_cannot_be_reused_through_a_shorter_substring_quote(
     client, monkeypatch
 ) -> None:
-    session_uuid = create_session(client)
     self_label = "我觉得自己很擅长证据评估和决策能力，而且逻辑一直很好很理性。"
-    assert send(client, session_uuid, self_label).status_code == 200
     gateway = api_router.sessions.orchestrator.gateway
-    original = gateway.generate_final_scorer
+    original = gateway.generate_incremental_evidence
 
     def quote_only_the_label_noun(payload):
         raw = original(payload).output.model_dump(mode="json")
@@ -940,8 +1198,22 @@ def test_self_label_cannot_be_reused_through_a_shorter_substring_quote(
             latency_ms=0,
         )
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", quote_only_the_label_noun)
-    finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", quote_only_the_label_noun)
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, self_label).status_code == 200
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    ).json()
+    finalized = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness["check_id"],
+            "expected_transcript_fingerprint": readiness[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": True,
+        },
+    )
     assert finalized.status_code == 200, finalized.text
     entry = next(
         item
@@ -983,7 +1255,7 @@ def test_each_session_keeps_the_prompt_version_recorded_by_its_opening(
         "new-session-bound-prompt",
     ).status_code == 200
 
-    assert captured_versions == ["v6.0.5", "v6.1.1"]
+    assert captured_versions == ["v6.2.0", "v6.1.1"]
     login_admin(client)
     old_detail = client.get(f"/api/v1/admin/sessions/{old_session}").json()
     new_detail = client.get(f"/api/v1/admin/sessions/{new_session}").json()
@@ -991,7 +1263,7 @@ def test_each_session_keeps_the_prompt_version_recorded_by_its_opening(
         trace["prompt_version"]
         for trace in old_detail["traces"]
         if trace["action"] in {"natural_opening", "natural_interview_turn"}
-    } == {"v6.0.5"}
+    } == {"v6.2.0"}
     assert {
         trace["prompt_version"]
         for trace in new_detail["traces"]
@@ -999,7 +1271,7 @@ def test_each_session_keeps_the_prompt_version_recorded_by_its_opening(
     } == {"v6.1.1"}
 
 
-def test_guided_consent_enforces_user_confirmed_closure_with_default_prompt(
+def test_v6_2_evidence_gate_overrides_legacy_guided_consent_closure(
     client, monkeypatch
 ) -> None:
     session_uuid = create_session(
@@ -1031,13 +1303,14 @@ def test_guided_consent_enforces_user_confirmed_closure_with_default_prompt(
     events = parse_events(response)
     completed = events[-1]["data"]
 
-    assert completed["session_action"] == "suggest_finish"
+    assert completed["session_action"] == "continue"
     assert completed["session"]["phase"] == "interviewing"
-    assert "仍可以继续补充" in completed["turn"]["content"]
+    assert "还有哪条重要依据、权衡或变化" in completed["turn"]["content"]
     assert "正在生成报告" not in completed["turn"]["content"]
     assert completed["turn"]["quality_flags"] == [
-        "closure_suggestion_message_normalized"
+        "natural_closure_suppressed_by_evidence_gate"
     ]
+    assert not any(item["event"] == "session_closure_suggested" for item in events)
     assert not any(item["event"] == "session_finalizing" for item in events)
 
 
@@ -1162,7 +1435,7 @@ def test_model_natural_close_is_an_idempotent_suggestion_until_accepted(
     with TestSession() as db:
         assert db.scalar(
             select(func.count()).select_from(EvidenceReadinessCheck)
-        ) == 0
+        ) == 1
         assert db.scalar(select(func.count()).select_from(ScoringRun)) == 1
 
     login_admin(client)
@@ -1224,6 +1497,7 @@ def test_enough_understanding_is_also_a_close_suggestion(client, monkeypatch) ->
 def test_v6_0_5_natural_close_preserves_the_existing_freeze_path(
     client, monkeypatch
 ) -> None:
+    monkeypatch.setattr(settings, "natural_interviewer_prompt_version", "v6.0.5")
     session_uuid = create_session(client)
     gateway = api_router.sessions.orchestrator.gateway
 
@@ -1255,7 +1529,7 @@ def test_v6_0_5_natural_close_preserves_the_existing_freeze_path(
     assert events[-1]["data"]["session"]["transcript_fingerprint"] is not None
 
 
-def test_explicit_model_user_requested_finish_keeps_existing_finalization_path(
+def test_v6_2_explicit_finish_intent_still_waits_for_the_snapshot_control(
     client, monkeypatch
 ) -> None:
     session_uuid = create_session(client)
@@ -1277,10 +1551,13 @@ def test_explicit_model_user_requested_finish_keeps_existing_finalization_path(
     monkeypatch.setattr(gateway, "generate_interviewer", user_requested)
     response = send(client, session_uuid, "我现在想结束这次访谈，请就停在这里。")
     events = parse_events(response)
-    assert any(item["event"] == "session_finalizing" for item in events)
+    assert not any(item["event"] == "session_finalizing" for item in events)
     assert not any(item["event"] == "session_closure_suggested" for item in events)
-    assert events[-1]["data"]["session_action"] == "finish"
-    assert events[-1]["data"]["session"]["phase"] == "finalizing"
+    assert events[-1]["data"]["session_action"] == "continue"
+    assert events[-1]["data"]["session"]["phase"] == "interviewing"
+    assert events[-1]["data"]["turn"]["quality_flags"] == [
+        "user_finish_intent_requires_evidence_snapshot"
+    ]
 
 
 def test_close_suggestion_acceptance_rejects_a_superseded_turn(
@@ -1741,10 +2018,8 @@ def test_deepseek_endpoint_is_not_prefixed_with_an_extra_v1(monkeypatch) -> None
 
 
 def test_invalid_scorer_quote_fails_then_finalize_retries(client, monkeypatch) -> None:
-    session_uuid = create_session(client)
-    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     gateway = api_router.sessions.orchestrator.gateway
-    original = gateway.generate_final_scorer
+    original = gateway.generate_incremental_evidence
 
     def invalid_quote(payload):
         raw = original(payload).output.model_dump(mode="json")
@@ -1758,28 +2033,40 @@ def test_invalid_scorer_quote_fails_then_finalize_retries(client, monkeypatch) -
             latency_ms=0,
         )
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", invalid_quote)
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", invalid_quote)
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     failed = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
     assert failed.status_code == 503
-    assert failed.json()["code"] == "scoring_failed"
+    assert failed.json()["code"] == "evidence_snapshot_failed"
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["phase"] == "interviewing"
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", original)
-    recovered = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", original)
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness?retry_failed=true"
+    ).json()
+    recovered = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness["check_id"],
+            "expected_transcript_fingerprint": readiness[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": False,
+        },
+    )
     assert recovered.status_code == 200
     assert recovered.json()["session"]["phase"] == "completed"
 
 
 def test_interviewer_text_cannot_be_used_as_final_scoring_evidence(client, monkeypatch) -> None:
-    session_uuid = create_session(client)
-    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     gateway = api_router.sessions.orchestrator.gateway
-    original = gateway.generate_final_scorer
+    original = gateway.generate_incremental_evidence
 
     def assistant_quote(payload):
         raw = original(payload).output.model_dump(mode="json")
-        assistant_turn = next(item for item in payload["transcript"] if item["role"] == "assistant")
         raw["dimensions"][0]["quotes"] = [
-            {"turn_index": assistant_turn["turn_index"], "quote": assistant_turn["content"]}
+            {"turn_index": 0, "quote": "你好"}
         ]
         return StructuredCallResult(
             output=FinalScorerOutput.model_validate(raw),
@@ -1789,19 +2076,20 @@ def test_interviewer_text_cannot_be_used_as_final_scoring_evidence(client, monke
             latency_ms=0,
         )
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", assistant_quote)
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", assistant_quote)
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     failed = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
     assert failed.status_code == 503
-    assert failed.json()["code"] == "scoring_failed"
+    assert failed.json()["code"] == "evidence_snapshot_failed"
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["phase"] == "interviewing"
 
 
 def test_public_report_strips_personality_and_advice_text_from_final_scorer(
     client, monkeypatch
 ) -> None:
-    session_uuid = create_session(client)
-    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     gateway = api_router.sessions.orchestrator.gateway
-    original = gateway.generate_final_scorer
+    original = gateway.generate_incremental_evidence
 
     def unsafe_public_language(payload):
         raw = original(payload).output.model_dump(mode="json")
@@ -1816,7 +2104,9 @@ def test_public_report_strips_personality_and_advice_text_from_final_scorer(
             latency_ms=0,
         )
 
-    monkeypatch.setattr(gateway, "generate_final_scorer", unsafe_public_language)
+    monkeypatch.setattr(gateway, "generate_incremental_evidence", unsafe_public_language)
+    session_uuid = create_session(client)
+    assert send(client, session_uuid, DENSE_ANSWER).status_code == 200
     finalized = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
     assert finalized.status_code == 200, finalized.text
     report = finalized.json()["report"]

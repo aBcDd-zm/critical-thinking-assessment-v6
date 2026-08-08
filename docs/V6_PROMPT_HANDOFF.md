@@ -1,13 +1,13 @@
 # 思衡 V6 Prompt 交接
 
-默认版本：`natural_interviewer_v6.0.5`、`natural_final_scorer_v6.1.0`
-显式候选：`natural_interviewer_v6.1.1`
-可回滚访谈版本：`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
-适用分支：`system/v6-natural-interview-demo`
+默认版本：`natural_interviewer_v6.2.0`、`natural_incremental_evidence_v6.2.0`
+可回滚访谈版本：`natural_interviewer_v6.1.1`、`natural_interviewer_v6.0.5`、`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
+旧冻结会话兼容评分器：`natural_final_scorer_v6.1.0`
+适用分支：`system/v612-consistent-closure`
 
 ## 设计意图
 
-V6 不是把 V5 的控制器放宽一点。它明确取消“服务端告诉模型缺什么、该问什么、还剩几题”的结构：访谈官从第一问起以完整逐字稿为依据自由承接；六维只作为内化观察视角，终评才使用它们。
+V6 不是把 V5 的控制器放宽一点。它明确取消“服务端告诉访谈官缺什么、该问什么、还剩几题”的结构：访谈官从第一问起以完整逐字稿自然承接；独立增量整理器在后台维护六维证据，访谈官看不到维度状态。
 
 因此，任何新增实时字段如 `target_dimension`、`coverage`、`question_bank`、`required_next_mode`、`formal_min/max` 或候选题目，都是对 V6 合同的回退，必须先经过项目组评审。
 
@@ -25,21 +25,20 @@ V6 不是把 V5 的控制器放宽一点。它明确取消“服务端告诉模�
 }
 ```
 
-模型输出的 `session_action` 为 `continue|finish`；`finish_reason` 为 `enough_understanding|natural_closure|user_requested|null`。不得扩展字段，更不能泄露内部维度、评分、Prompt 或后台理由。候选 `v6.1.1` 以 `finish/enough_understanding|natural_closure` 表达非终局结束建议意图。服务端对该候选版或已接受新版用户确认结束说明的会话，把它映射为有效动作 `suggest_finish`，并确定性输出明确“仍可继续补充”的参与者文案，保持 `interviewing` 并等待用户接受或继续回答。只有用户明确要求结束本次访谈或生成报告时，模型才可输出终局 `finish/user_requested`。
+模型输出的 `session_action` 为 `continue|finish`。V6.2 正常访谈只能返回 `continue/null`；只有用户明确要求结束本次访谈时才可返回 `finish/user_requested`，服务端仍会把它转为继续状态并要求通过页面入口提交当前快照。任何 `finish/enough_understanding|natural_closure` 都会被压制并改为一个自然的单焦点继续问题。旧版本输出合同保持原文不变，仅服务于已绑定旧 Prompt 的会话。
 
 ### 版本选择与回滚
 
-运行时只允许选择已登记的 `v6.0.3|v6.0.4|v6.0.5|v6.1.1`：
+运行时只允许选择已登记的 `v6.0.3|v6.0.4|v6.0.5|v6.1.1|v6.2.0`：
 
 ```text
-NATURAL_INTERVIEWER_PROMPT_VERSION=v6.0.5
+NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.0
 ```
 
-默认仍使用 `v6.0.5`。`v6.1.1` 必须在单独验收获批后通过环境变量显式选择；发生系统性对话回归时改回 `v6.0.5`
-并重启后端。每个会话使用 `natural_opening` trace 绑定开场时的 Prompt 版本，因此切换或回滚只影响之后新建的会话，不会使进行中会话中途换版。`v6.0.3`、`v6.0.4` 与 `v6.0.5` 的旧 Prompt 文本保持完整，无需改代码。每个 trace 仍记录实际使用的
+默认使用 `v6.2.0`。发生系统性回归时可改回 `v6.1.1` 或 `v6.0.5` 并重启后端。每个会话使用 `natural_opening` trace 绑定开场版本，因此切换或回滚只影响之后新建的会话，不会使进行中会话中途换版。四个旧 Prompt 文本保持完整，无需改代码。每个 trace 仍记录实际使用的
 `prompt_template_id` 与 `prompt_version`，不得将不同版本的数据当作同一干预条件。
 
-访谈调用使用独立低延迟合同：`thinking=disabled`、`max_tokens=512`、总预算 25 秒，首次最多 15 秒，剩余时间只允许一次重试。首次空内容只追加“返回完整 JSON、不能返回空内容”的协议提醒；连接或读取失败保持原载荷重试。连续空内容对外返回 `model_empty_response`，网络失败返回 `model_connection_interrupted`，两者均保留同一 `client_turn_id` 恢复路径。终评与准备度检查显式 `thinking=enabled`，继续使用 12000 tokens 和原 90 秒超时配置。
+访谈调用使用 `thinking=disabled`、`max_tokens=512`、25 秒总预算。增量整理器使用独立的 `thinking=disabled`、`max_tokens=2000`、15 秒总预算，首次最多 8 秒且最多重试一次；任务完全后台运行。旧冻结会话的完整终评仍保留 12000 tokens、90 秒配置，但 V6.2 正常报告生成不会调用它。
 
 冻结 SHA-256：
 
@@ -47,6 +46,15 @@ NATURAL_INTERVIEWER_PROMPT_VERSION=v6.0.5
 - `v6.0.4`：`fefb1937c757c8dfaaeb0f693cc9e0018352b1212fa1ecd526c44ebf44bf649f`
 - `v6.0.5`：`5e8cf29e5c73eee759dfcb54d322d567669600d8107b8b460418152c3bfc93ba`
 - `v6.1.1`：`7bc38dc4853a850ac8870927e3a5b8a7e140a061ac9630dd19702373aa57efe5`
+- `v6.2.0`：`40de5708ff67e05772b408a77f38c5edce67ceb352d660f777044e793954adca`
+
+### `natural_interviewer_v6.2.0`
+
+在完整保留 v6.1.1 真实事件锚定、同事件主线、跑题拉回、1—2 句话和单问题限制的基础上，删除访谈官的自然结束权限。访谈官不能说“内容已完整”“可以结束”“证据已充分”；自然停顿、足够理解或没有新矛盾都必须继续选择一个仍有信息价值的焦点。用户明确结束时只返回 `finish/user_requested`，不得声称逐字稿已经冻结或报告正在生成。
+
+### `natural_incremental_evidence_v6.2.0`
+
+输入仅包含上一份已验证 `FinalScorerOutput` 和此后新增用户回答。输出仍是完整六维 `FinalScorerOutput`，不是每轮增量分数。模型可以保留、补充、修正或降低此前判断；每个数字分必须有 `sufficient=true` 与精确用户 quote，否则为 `null/IE`。服务端用当前完整逐字稿复核角色、轮次与连续子串，再保存检查 ID、逐字稿/资产指纹、结果、充分维度数、最后处理轮次、模型、Prompt、尝试次数、耗时与错误。
 
 ### `natural_interviewer_v6.1.1` 相对默认版的候选约束
 
@@ -64,9 +72,9 @@ NATURAL_INTERVIEWER_PROMPT_VERSION=v6.0.5
 
 服务端只能对高风险、安全、知情同意、空/无效 JSON、内部泄露和明显有害输出执行硬拦截。普通风格不佳只记录质量标记，不能把回应替换为受控题库。网络、空响应、模型或格式失败共享最多一次重试；仍失败时保存用户回答、允许同一 `client_turn_id` 恢复，绝不使用固定兜底问题。
 
-## 独立终评器
+## 旧冻结会话兼容终评器
 
-终评器收到冻结的完整 transcript、SHA-256 指纹和六维合同。它不得读取访谈官的内部评语、质量判断、隐藏路由或之前的评分尝试。
+`natural_final_scorer_v6.1.0` 只供升级前已经冻结但尚无报告的会话恢复。V6.2 新会话冻结后直接提升对应增量快照，不再二次调用该模型。
 
 ### `natural_final_scorer_v6.1.0` 的系统约束
 
@@ -84,4 +92,4 @@ NATURAL_INTERVIEWER_PROMPT_VERSION=v6.0.5
 
 ## 修改与验收
 
-改 Prompt、JSON Schema 或模型输入时必须同步更新本文件、[测量合同](MEASUREMENT_CONTRACT_V6.md)、[V6 五级评分标准](V6_SCORING_RUBRIC.md)、[API 合同](API_CONTRACT.md) 和相应测试。至少验证：首问锚定真实具体事件、泛泛琐事或跑题可在一轮内回到事件、无“突然补维度”、无答案选项/教学、`finish/natural_closure|enough_understanding` 只映射为可继续的 `suggest_finish`、用户明确结束才产生终局 `finish/user_requested`、事件叙述不误判为用户结束、短答不强行评分、五级锚点不泄露给访谈官、无效引用被拒绝以及一次修复后的幂等恢复。
+改 Prompt、JSON Schema 或模型输入时必须同步更新本文件、[测量合同](MEASUREMENT_CONTRACT_V6.md)、[V6 五级评分标准](V6_SCORING_RUBRIC.md)、[API 合同](API_CONTRACT.md) 和相应测试。至少验证：首问锚定真实事件、跑题一轮拉回、单问题、无维度泄露；自然停点不结束；六维全部充分才出现完整报告入口；不足报告显式允许；最后一轮处理中/失败不冻结；旧快照、多标签页和乱序结果不混用；报告阶段模型调用为零；旧 Prompt 哈希不变。

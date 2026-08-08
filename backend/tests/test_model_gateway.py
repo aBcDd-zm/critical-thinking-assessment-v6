@@ -144,6 +144,30 @@ def test_interviewer_uses_low_latency_non_thinking_profile(
     assert captured["total_timeout_seconds"] == 25.0
 
 
+def test_incremental_evidence_uses_its_own_bounded_non_thinking_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "model_gateway_mode", "real")
+    monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
+    captured: dict[str, object] = {}
+
+    def fake_typed_call(self: ModelGatewayService, **kwargs: object) -> object:
+        captured.update(kwargs)
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr(ModelGatewayService, "_typed_call", fake_typed_call)
+
+    with pytest.raises(RuntimeError, match="captured"):
+        ModelGatewayService().generate_incremental_evidence(
+            {"previous_snapshot": None, "new_user_turns": []}
+        )
+
+    assert captured["max_tokens"] == 2000
+    assert captured["thinking"] == "disabled"
+    assert captured["primary_timeout_seconds"] == 8.0
+    assert captured["total_timeout_seconds"] == 15.0
+
+
 def test_two_empty_model_outputs_raise_distinct_terminal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

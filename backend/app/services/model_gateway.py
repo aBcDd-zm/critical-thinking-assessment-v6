@@ -27,6 +27,8 @@ from app.schemas import (
 
 NATURAL_FINAL_SCORER_PROMPT_ID = "natural_final_scorer_v6.1.0"
 NATURAL_FINAL_SCORER_PROMPT_VERSION = "v6.1.0"
+INCREMENTAL_EVIDENCE_PROMPT_ID = "natural_incremental_evidence_v6.2.0"
+INCREMENTAL_EVIDENCE_PROMPT_VERSION = "v6.2.0"
 
 T = TypeVar("T")
 
@@ -298,6 +300,22 @@ finish_reason=natural_closure 必须与 session_action=finish 同时出现，并
 服务端会把该模型意图映射为 suggest_finish，不得写成已经结束或自动交卷。finish_reason=user_requested 只用于用户已经明确确认结束。"""
 
 
+_V6_2_CLOSURE_POLICY = """结束控制：你不能因为对话自然停顿、已经足够理解或没有新矛盾，
+就宣布可以结束。是否可以生成完整报告由独立的后台证据系统决定，你不会看到它的维度、
+分数或覆盖状态。若当前事件还能继续，只选一个尚未说清、有信息价值的具体焦点自然深入；
+不得说“内容已完整”“可以结束”“证据已充分”或类似判断。
+
+只有对方明确表示要结束本次访谈、停止继续回答或生成本次报告时，才返回
+session_action=finish 且 finish_reason=user_requested。这只表示用户的结束意图，服务端仍会先检查
+当前证据快照；不得声称已经冻结或正在生成报告。"""
+
+
+_V6_2_OUTPUT_POLICY = """仅返回 JSON 对象，严格符合：
+{"interviewer_message":"用户实际看到的自然回应", "session_action":"continue|finish", "finish_reason":"user_requested|null"}
+正常访谈必须返回 session_action=continue 且 finish_reason=null。只有用户明确要求结束本次访谈时，
+才可返回 session_action=finish 且 finish_reason=user_requested。"""
+
+
 for _source_name, _source_block in (
     ("opening", _V6_0_5_OPENING_POLICY),
     ("observation", _V6_0_5_OBSERVATION_POLICY),
@@ -334,6 +352,19 @@ NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1 = (
 )
 
 
+NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_2_0 = (
+    NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1.replace(
+        _V6_1_1_CLOSURE_POLICY,
+        _V6_2_CLOSURE_POLICY,
+        1,
+    ).replace(
+        _V6_1_1_OUTPUT_POLICY,
+        _V6_2_OUTPUT_POLICY,
+        1,
+    )
+)
+
+
 _NATURAL_INTERVIEWER_PROMPTS: dict[str, tuple[str, str]] = {
     "v6.0.3": (
         "natural_interviewer_v6.0.3",
@@ -350,6 +381,10 @@ _NATURAL_INTERVIEWER_PROMPTS: dict[str, tuple[str, str]] = {
     "v6.1.1": (
         "natural_interviewer_v6.1.1",
         NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_1_1,
+    ),
+    "v6.2.0": (
+        "natural_interviewer_v6.2.0",
+        NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_2_0,
     ),
 }
 
@@ -397,6 +432,25 @@ score=null、sufficient=false、quotes=[]，理由使用“证据有限”或“
 仅返回 JSON：
 {{"dimensions":[{{"dimension_key":"...","score":1,"quotes":[{{"turn_index":1,"quote":"..."}}],"reason":"...","confidence":0.0,"sufficient":true}}],"strengths":[],"priorities":[]}}
 必须恰好包含六个维度。"""
+
+
+INCREMENTAL_EVIDENCE_SYSTEM_PROMPT = f"""你是 V6.2 后台增量证据整理器。你不与用户对话，
+不提问，不决定访谈语气。你只依据用户逐字原话，把上一份已验证快照与新增用户回答
+合并为当前完整的六维证据快照。不得累加每轮分数；应依据累计证据重新选择当前最保守的行为等级。
+
+六维合同：
+{_dimension_contract()}
+
+五档行为标准：
+{_final_scoring_contract()}
+
+previous_snapshot 中已有且仍受用户原话支持的证据可以保留；new_user_turns 中的新证据可以补充、
+修正或降低已有判断。quote 必须是对应 user turn 的连续子串，turn_index 必须准确。
+只有证据足以支持行为锚点时才能返回数字分数、sufficient=true 和至少一条 quote；否则必须返回
+score=null、sufficient=false、quotes=[]。回答长度、语言流畅、自信和态度不是能力证据。
+
+strengths 和 priorities 只整理已有原话支持的简短观察。仅返回与 FinalScorerOutput 完全相同的 JSON，
+必须恰好包含六个维度，不得返回对话文案。"""
 
 
 class ModelGatewayService:
@@ -474,6 +528,39 @@ class ModelGatewayService:
             schema=FinalScorerOutput,
             max_tokens=settings.deepseek_scoring_max_tokens,
             thinking="enabled",
+        )
+
+    def generate_incremental_evidence(
+        self, payload: dict[str, Any]
+    ) -> StructuredCallResult[FinalScorerOutput]:
+        previous = payload.get("previous_snapshot")
+        new_turns = payload.get("new_user_turns")
+        if previous is not None and not isinstance(previous, dict):
+            raise ModelGatewayError("invalid_previous_evidence_snapshot")
+        if not isinstance(new_turns, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("turn_index"), int)
+            or not isinstance(item.get("content"), str)
+            for item in new_turns
+        ):
+            raise ModelGatewayError("invalid_incremental_user_turns")
+        if self.mode == "mock":
+            started = time.monotonic()
+            return StructuredCallResult(
+                output=self._mock_incremental_evidence(payload),
+                provider="mock",
+                model="natural-incremental-evidence-mock-v6",
+                repair_used=False,
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
+        return self._typed_call(
+            system_prompt=INCREMENTAL_EVIDENCE_SYSTEM_PROMPT,
+            payload=payload,
+            schema=FinalScorerOutput,
+            max_tokens=settings.deepseek_evidence_max_tokens,
+            thinking=settings.deepseek_evidence_thinking,
+            total_timeout_seconds=settings.deepseek_evidence_total_timeout_seconds,
+            primary_timeout_seconds=settings.deepseek_evidence_primary_timeout_seconds,
         )
 
     @staticmethod
@@ -725,7 +812,7 @@ class ModelGatewayService:
         if not transcript:
             name = str(participant.get("display_name") or "").strip()
             greeting = f"你好，{name}。" if name else "你好。"
-            if prompt_version == "v6.1.1":
+            if prompt_version in {"v6.1.1", "v6.2.0"}:
                 return NaturalInterviewerOutput(
                     interviewer_message=(
                         greeting
@@ -774,7 +861,7 @@ class ModelGatewayService:
                     "生成报告",
                 )
             )
-            if prompt_version == "v6.1.1"
+            if prompt_version in {"v6.1.1", "v6.2.0"}
             else any(
                 marker in normalized
                 for marker in ("结束", "到这里", "不想继续", "先这样")
@@ -792,6 +879,15 @@ class ModelGatewayService:
             for item in transcript
         )
         if prior_probe:
+            if prompt_version == "v6.2.0":
+                return NaturalInterviewerOutput(
+                    interviewer_message=(
+                        "我们再把这次经历往深处看一点：还有哪条重要依据、权衡或变化，"
+                        "是你觉得没有说清的？"
+                    ),
+                    session_action="continue",
+                    finish_reason=None,
+                )
             if prompt_version == "v6.1.1":
                 return NaturalInterviewerOutput(
                     interviewer_message=(
@@ -824,7 +920,7 @@ class ModelGatewayService:
         return NaturalInterviewerOutput(
             interviewer_message=(
                 "先把焦点放回这件具体经历：当时你真正需要作出的判断是什么？"
-                if prompt_version == "v6.1.1"
+                if prompt_version in {"v6.1.1", "v6.2.0"}
                 else "听起来这件事对你确实很重要。此刻你最想先厘清的是什么？"
             ),
             session_action="continue",
@@ -885,6 +981,83 @@ class ModelGatewayService:
                 )
         return FinalScorerOutput.model_validate(
             {"dimensions": dimensions, "strengths": [], "priorities": []}
+        )
+
+    @staticmethod
+    def _mock_incremental_evidence(payload: dict[str, Any]) -> FinalScorerOutput:
+        previous_raw = payload.get("previous_snapshot")
+        previous = (
+            FinalScorerOutput.model_validate(previous_raw)
+            if isinstance(previous_raw, dict)
+            else None
+        )
+        new_turns = [
+            {"turn_index": int(item["turn_index"]), "content": str(item["content"])}
+            for item in payload.get("new_user_turns") or []
+        ]
+        keywords: dict[str, tuple[str, ...]] = {
+            "problem_definition": ("问题", "边界", "核心", "目标", "界定"),
+            "evidence_evaluation": ("证据", "数据", "核实", "来源", "信息"),
+            "reasoning_argumentation": ("假设", "原因", "推理", "反例", "因为"),
+            "multiple_perspectives": ("家人", "导师", "团队", "他人", "角度"),
+            "integrative_decision": ("比较", "权衡", "方案", "决定", "风险"),
+            "dynamic_adjustment": ("如果", "调整", "复盘", "条件", "反馈"),
+        }
+        previous_by_key = (
+            {item.dimension_key: item for item in previous.dimensions}
+            if previous
+            else {}
+        )
+        dimensions: list[dict[str, Any]] = []
+        for dimension in DIMENSIONS:
+            prior = previous_by_key.get(dimension.key)
+            hit = next(
+                (
+                    turn
+                    for turn in new_turns
+                    if len(turn["content"].strip()) >= 12
+                    and any(
+                        keyword in turn["content"]
+                        for keyword in keywords[dimension.key]
+                    )
+                ),
+                None,
+            )
+            if hit is not None:
+                dimensions.append(
+                    {
+                        "dimension_key": dimension.key,
+                        "score": 3,
+                        "quotes": [
+                            {
+                                "turn_index": hit["turn_index"],
+                                "quote": hit["content"],
+                            }
+                        ],
+                        "reason": "从用户原话中可见与该视角相关的具体思考。",
+                        "confidence": 0.55,
+                        "sufficient": True,
+                    }
+                )
+            elif prior is not None:
+                dimensions.append(prior.model_dump(mode="json"))
+            else:
+                dimensions.append(
+                    {
+                        "dimension_key": dimension.key,
+                        "score": None,
+                        "quotes": [],
+                        "reason": "证据有限，未充分测得该视角。",
+                        "confidence": 0.0,
+                        "sufficient": False,
+                    }
+                )
+        return FinalScorerOutput.model_validate(
+            {
+                "dimensions": dimensions,
+                "strengths": list(previous.strengths) if previous else [],
+                "priorities": list(previous.priorities) if previous else [],
+            }
         )
 
 

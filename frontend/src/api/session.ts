@@ -7,6 +7,7 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   FinalizeResponse,
+  FinalizeSessionRequest,
   ReportReadinessResponse,
   SessionSnapshot,
   TurnRequest,
@@ -34,9 +35,9 @@ export const getReportPdf = (uuid: string) =>
 export const exitSession = (uuid: string) =>
   apiRequest<SessionSnapshot>(`/sessions/${encodeURIComponent(uuid)}/exit`, { method: "POST" });
 
-export const checkReportReadiness = (uuid: string) =>
+export const checkReportReadiness = (uuid: string, retryFailed = false) =>
   apiRequest<ReportReadinessResponse>(
-    `/sessions/${encodeURIComponent(uuid)}/report-readiness`,
+    `/sessions/${encodeURIComponent(uuid)}/report-readiness${retryFailed ? "?retry_failed=true" : ""}`,
     { method: "POST" },
   );
 
@@ -53,10 +54,13 @@ export async function acceptClosureSuggestion(
   return { session: result };
 }
 
-export async function finalizeSession(uuid: string): Promise<FinalizeResponse> {
+export async function finalizeSession(
+  uuid: string,
+  payload: FinalizeSessionRequest = {},
+): Promise<FinalizeResponse> {
   const result = await apiRequest<FinalizeResponse | SessionSnapshot>(
     `/sessions/${encodeURIComponent(uuid)}/finalize`,
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify(payload) },
   );
   if ("session" in result) return result;
   return { session: result };

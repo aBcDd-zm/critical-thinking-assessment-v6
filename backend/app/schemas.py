@@ -206,6 +206,29 @@ class AcceptClosureSuggestionRequest(BaseModel):
     )
 
 
+class FinalizeSessionRequest(BaseModel):
+    evidence_check_id: Optional[int] = Field(default=None, ge=1)
+    expected_transcript_fingerprint: Optional[str] = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    # Incomplete reports require an explicit participant confirmation. A
+    # missing value therefore remains false even for body-less legacy retries.
+    allow_incomplete: bool = False
+
+    @model_validator(mode="after")
+    def evidence_reference_is_complete(self) -> "FinalizeSessionRequest":
+        if (self.evidence_check_id is None) != (
+            self.expected_transcript_fingerprint is None
+        ):
+            raise ValueError(
+                "evidence_check_id and expected_transcript_fingerprint must be supplied together"
+            )
+        return self
+
+
 class ReviewRequest(BaseModel):
     status: Literal["pending", "in_review", "approved", "needs_followup"] = "pending"
     decision: Optional[str] = Field(default=None, max_length=80)

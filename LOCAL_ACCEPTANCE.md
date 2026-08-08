@@ -19,21 +19,21 @@
 
 | 项目 | 命令 | 通过标准 | 状态 |
 | --- | --- | --- | --- |
-| 后端回归 | `cd backend && .venv/bin/python -m pytest -q` | V6 状态、自然访谈、评分、幂等与安全测试通过 | VERIFIED — 2026-08-04：81 passed；含 Argon2id 登录、Cookie 篡改/过期、CSRF、后台接口拦截、看板脱敏，以及本轮最少 20 字与访谈风格标记断言 |
-| 新库迁移 | `make migrate`（在空 V6 SQLite） | 只生成 V6 初始结构，不导入旧会话 | VERIFIED — 2026-08-04：初始 revision `20260804_0001` 升级通过，`alembic check` clean |
-| 前端单测/类型 | `cd frontend && npm run test && npm run typecheck` | V6 路由、恢复、语音输入与报告合同通过 | VERIFIED — 2026-08-04：9 files / 26 tests；typecheck 通过，涵盖最少 20 字、Enter 提交、Shift+Enter 换行、中文输入法保护和轮次显示 |
-| 生产构建 | `cd frontend && npm run build` | 无 TypeScript/Vite 错误 | VERIFIED — 2026-08-06：通过 |
-| 页面 API Mock | `cd frontend && npm run test:e2e` | 同意、自然流、结束、报告、语音不自动提交 | VERIFIED — 2026-08-06：2 / 2 通过 |
-| 真栈 Mock | `cd frontend && npm run test:e2e:stack` | 使用 `8061/5177` 与临时库；不访问真实供应商 | VERIFIED — 2026-08-06：5 / 5 通过；Vite 5177 与 Uvicorn 8061 均已干净退出 |
+| 后端回归 | `cd backend && .venv/bin/python -m pytest -q` | V6 状态、自然访谈、评分、幂等与安全测试通过 | VERIFIED — 2026-08-08：154 passed；包含 V6.2 异步快照、引用校验、乱序/旧指纹拒绝、失败重试、不足报告和报告阶段零模型调用 |
+| 新库迁移 | `make migrate`（在空 V6 SQLite） | 只生成 V6 初始结构，不导入旧会话 | VERIFIED — 2026-08-08：空库从初始 revision 升级到 `20260808_0001 (head)`，`alembic check` 返回无新迁移操作 |
+| 前端单测/类型 | `cd frontend && npm run test && npm run typecheck` | V6 路由、恢复、语音输入与报告合同通过 | VERIFIED — 2026-08-08：9 files / 51 tests；typecheck 通过，涵盖后台轮询、充分卡、失败不冻结、最后一轮等待及 20 字移动端提示 |
+| 生产构建 | `cd frontend && npm run build` | 无 TypeScript/Vite 错误 | VERIFIED — 2026-08-08：通过 |
+| 页面 API Mock | `cd frontend && npm run test:e2e` | 同意、自然流、结束、报告、语音不自动提交 | VERIFIED — 2026-08-08：3 / 3 通过；只有证据快照 ready 才显示完整报告入口，旧自然收束文案不可见 |
+| 真栈 Mock | `cd frontend && npm run test:e2e:stack` | 使用 `8061/5177` 与临时库；不访问真实供应商 | VERIFIED — 2026-08-08：5 / 5 通过；同时验证六维充分收束和证据不足提前提交，Vite 5177 与 Uvicorn 8061 均已干净退出 |
 | 管理员后台 | `cd frontend && npm run test:e2e:stack` | 未登录拦截、登录进入看板、刷新恢复、优先复核、保存复核、匿名导出、退出后重新拦截及窄屏入口；不调用真实供应商 | VERIFIED — 2026-08-04：真栈 E2E 覆盖通过 |
-| 完整本地套件 | `make test` | 上述检查全部通过 | VERIFIED — 2026-08-06：后端 104 passed、前端 30 tests、类型检查与构建通过、页面 Mock E2E 2 / 2、真栈 E2E 5 / 5；8061/5177 已关闭 |
+| 完整本地套件 | `make test` | 上述检查全部通过 | VERIFIED — 2026-08-08：后端 154 passed、前端 51 tests、类型检查与构建通过、页面 Mock E2E 3 / 3、真栈 E2E 5 / 5；8061/5177 已关闭 |
 | 生产配置静态安全检查 | 后端生产资产测试（包含在 `make test`） | 不再注入 Basic Auth、`ADMIN_TOKEN` 或前端认证秘密；生产入口仍有后台/登录限流 | VERIFIED — 2026-08-04：生产资产与 shell 语法断言随 81 项后端测试通过 |
 | 生产 Compose/镜像构建 | `docker compose -f docker-compose.production.yml config --quiet` 与镜像构建 | Compose 配置及两张生产镜像可在无真实密钥前构建 | NOT VERIFIED — 当前本机未安装 `docker`，未执行构建或容器启动 |
 | 启停与健康 | `make start && make health && make stop && make check-stopped` | `8060/5176` 可用后均无监听 | NOT REVALIDATED — 8060/5176 已有本次改动前启动的本地进程；为避免影响现有本地 Demo，本次未停止或覆盖它 |
 
-重点断言：访谈请求中没有题库、目标维度、coverage、阶段命令或固定轮次；首个非空回答可简短提交，后续普通回答需 20 个可见字符，完整的“不知道”类不确定短答例外；`Shift+Enter` 换行、中文输入法选词不误提交；页面只显示“已进行 N 轮问答”而不显示配额；格式失败只修复一次并保留用户 turn；同键重放不重复写入；第 40 次后不再无限访谈；评分缺证据时为 `null`；匿名 ZIP 不含真实议题与自由文本。
+重点断言：访谈请求中没有题库、目标维度、coverage、阶段命令或固定轮次；自然停点不产生结束入口，只有六维全部充分才主动显示完整报告卡；证据不足时可显式确认生成有限报告；最后一轮处理中、失败或指纹过期时不冻结会话；报告与结束判断提升同一快照，不再二次模型评分。首个非空回答可简短提交，后续普通回答需 20 个可见字符，完整的“不知道”类短答例外；同键重放不重复写入；第 40 次后只触发技术保护上限；匿名 ZIP 不含真实议题与自由文本。
 
-## 真实模型人工验收（单独记录）
+## 真实模型人工验收（单独记录，当前未执行）
 
 在本机环境变量提供真实模型配置后，至少完成以下三条路径，并记录 Prompt/模型版本、时间、会话 UUID、人工观察和任何异常；不得把密钥或用户真实敏感内容写入本文件：
 
@@ -42,6 +42,8 @@
 3. 短答、跳过和提前结束：检查尊重结束、缺维为 `limited|unmeasured`，不强制补问或打低分。
 
 同一初始回答应与 V5 并行体验一次，形成简短自然度对比：首问来源、轮数变化、是否出现强制反事实/最终整合、是否出现题库感、是否过度解释。此对比只用于产品设计，不证明心理测量效度。
+
+V6.2 发布前还需用真实 DeepSeek 至少完成 10 个访谈轮次，记录访谈回复延迟和后台增量取证延迟；确认取证 P95 不超过 15 秒、已有快照时报告 3 秒内打开，且无自然结束矛盾、旧快照混用或重复评分。该项目前为 `NOT VERIFIED`，Mock 结果不可代替。
 
 ## 未验证边界
 

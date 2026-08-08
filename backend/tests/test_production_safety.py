@@ -79,7 +79,7 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
         natural_interviewer_prompt_version="v6.1.1",
     )
 
-    assert default_config.natural_interviewer_prompt_version == "v6.0.5"
+    assert default_config.natural_interviewer_prompt_version == "v6.2.0"
     assert rollback_config.natural_interviewer_prompt_version == "v6.0.3"
     assert candidate_config.natural_interviewer_prompt_version == "v6.1.1"
     with pytest.raises(ValidationError):

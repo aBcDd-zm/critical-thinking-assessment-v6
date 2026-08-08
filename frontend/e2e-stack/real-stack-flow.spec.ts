@@ -12,7 +12,7 @@ async function submitThroughUi(page: Page, answer: string) {
   await page.getByLabel("你的回答").press("Enter");
 }
 
-test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型收束与报告", async ({ page }) => {
+test("真实 Vue + FastAPI Mock 模型栈：事件开场、幂等恢复、证据收束与报告", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("v6:tts-enabled", "false"));
 
   await page.goto("/assessment");
@@ -29,7 +29,7 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
   await expect(page.getByText("问题界定", { exact: true })).toHaveCount(0);
 
   await submitThroughUi(page, "我需要决定是否申请研究项目，想先核实导师和资金条件。");
-  await expect(page.getByText("听起来这件事对你确实很重要。此刻你最想先厘清的是什么？")).toBeVisible();
+  await expect(page.getByText("先把焦点放回这件具体经历：当时你真正需要作出的判断是什么？")).toBeVisible();
   await expect(page.getByText("已进行 1 轮问答", { exact: true })).toBeVisible();
 
   const replayPayload = {
@@ -88,7 +88,12 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
     page,
     "如果导师确认无法提供稳定指导，或两周试用没有得到有效反馈，我会暂停申请，重新比较其他项目。",
   );
-  await expect(page.getByText("这段对话可以在这里收束", { exact: true })).toBeVisible();
+  await submitThroughUi(
+    page,
+    "核心问题是是否值得投入；我会核实来源和数据，因为假设可能有反例；也会听导师和团队的角度，比较方案、风险并权衡决定；如果反馈改变，我会调整。",
+  );
+  await expect(page.getByText("现有回答已足够生成完整报告", { exact: true })).toBeVisible();
+  await expect(page.getByText("这段对话可以在这里收束", { exact: true })).toHaveCount(0);
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "结束并生成报告" }).click();
   await expect(page).toHaveURL(new RegExp(`/assessment/report/${sessionUuid}$`));
@@ -99,14 +104,14 @@ test("真实 Vue + FastAPI Mock 模型栈：自然开场、幂等恢复、模型
 
   const finalized = await page.evaluate(
     async ({ apiBaseUrl, uuid }) => {
-      const response = await fetch(`${apiBaseUrl}/sessions/${uuid}/finalize`, { method: "POST" });
+      const response = await fetch(`${apiBaseUrl}/sessions/${uuid}`);
       return { status: response.status, body: await response.json() };
     },
     { apiBaseUrl: API_BASE_URL, uuid: sessionUuid! },
   );
   expect(finalized.status).toBe(200);
-  expect(finalized.body.session.phase).toBe("completed");
-  expect(finalized.body.session.transcript_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  expect(finalized.body.phase).toBe("completed");
+  expect(finalized.body.transcript_fingerprint).toMatch(/^[0-9a-f]{64}$/);
 
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 PDF" }).click();
@@ -158,7 +163,30 @@ test("管理员可从优先复核进入详情、保存复核并导出匿名数�
     });
     if (!created.ok) throw new Error(`create failed: ${created.status}`);
     const uuid = (await created.json()).session.uuid as string;
-    const finalized = await fetch(`${apiBaseUrl}/sessions/${uuid}/finalize`, { method: "POST" });
+    const turn = await fetch(`${apiBaseUrl}/sessions/${uuid}/turns:stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+      body: JSON.stringify({
+        content: "这件事让我很犹豫，我还没有想清楚该怎样处理，也愿意保留已有回答。",
+        client_turn_id: "playwright-admin-evidence-turn",
+        input_mode: "text",
+        answer_duration_ms: 1000,
+      }),
+    });
+    if (!turn.ok) throw new Error(`turn failed: ${turn.status}`);
+    await turn.text();
+    const readinessResponse = await fetch(`${apiBaseUrl}/sessions/${uuid}/report-readiness`, { method: "POST" });
+    if (!readinessResponse.ok) throw new Error(`readiness failed: ${readinessResponse.status}`);
+    const readiness = await readinessResponse.json();
+    const finalized = await fetch(`${apiBaseUrl}/sessions/${uuid}/finalize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evidence_check_id: readiness.check_id,
+        expected_transcript_fingerprint: readiness.transcript_fingerprint,
+        allow_incomplete: readiness.status !== "ready",
+      }),
+    });
     if (!finalized.ok) throw new Error(`finalize failed: ${finalized.status}`);
     return uuid;
   }, API_BASE_URL);

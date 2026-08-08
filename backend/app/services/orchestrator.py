@@ -28,6 +28,8 @@ from app.models import (
 )
 from app.schemas import FinalScorerOutput, NaturalInterviewerOutput
 from app.services.model_gateway import (
+    INCREMENTAL_EVIDENCE_PROMPT_ID,
+    INCREMENTAL_EVIDENCE_PROMPT_VERSION,
     NATURAL_FINAL_SCORER_PROMPT_ID,
     NATURAL_FINAL_SCORER_PROMPT_VERSION,
     NATURAL_INTERVIEWER_PROMPT_VERSION,
@@ -48,6 +50,14 @@ CLOSURE_CONFIRMATION_CONSENT_VERSIONS = frozenset(
 SAFE_CLOSURE_SUGGESTION_MESSAGE = (
     "这件事已经梳理得比较完整，可以考虑在这里结束；"
     "如果还有重要内容，你仍可以继续补充。"
+)
+EVIDENCE_GATE_CONTINUATION_MESSAGE = (
+    "我们再把这次经历往深处看一点：还有哪条重要依据、权衡或变化，"
+    "是你觉得没有说清的？"
+)
+USER_FINISH_INTENT_MESSAGE = (
+    "好的。如果你想现在提交，可以点击“结束并生成报告”；"
+    "证据有限的部分会如实说明。"
 )
 SAFETY_STOP_MESSAGE = (
     "你刚才提到的内容可能涉及当下的人身安全。此刻比继续访谈更重要的是先获得"
@@ -196,11 +206,11 @@ class InterviewResult:
 
 @dataclass(frozen=True)
 class ReportReadinessAssessment:
-    """Ephemeral result of applying the existing final evidence rules.
+    """Private result of applying the existing final evidence rules.
 
-    This object is intentionally aggregate-only.  Dimension results remain
-    inside the scorer call and are neither returned to the participant nor
-    persisted as formal scores by the readiness path.
+    Participant APIs expose only the aggregate decision.  The validated output
+    may be cached privately and promoted only if this exact transcript is later
+    frozen, avoiding a second scorer call with a potentially different result.
     """
 
     ready: bool
@@ -211,6 +221,8 @@ class ReportReadinessAssessment:
     prompt_version: str
     repair_used: bool
     latency_ms: int
+    attempt_count: int
+    output: FinalScorerOutput
 
 
 def normalized_text(value: str) -> str:
@@ -464,6 +476,29 @@ class InterviewOrchestrator:
             latest_user_text=user_turn.content,
             prompt_version=prompt_version,
         )
+        if result.prompt_version == "v6.2.0" and result.session_action == "finish":
+            if result.finish_reason in MODEL_NATURAL_CLOSE_REASONS:
+                return replace(
+                    result,
+                    content=EVIDENCE_GATE_CONTINUATION_MESSAGE,
+                    session_action="continue",
+                    finish_reason=None,
+                    quality_flags=[
+                        *result.quality_flags,
+                        "natural_closure_suppressed_by_evidence_gate",
+                    ],
+                )
+            if result.finish_reason == "user_requested":
+                return replace(
+                    result,
+                    content=USER_FINISH_INTENT_MESSAGE,
+                    session_action="continue",
+                    finish_reason=None,
+                    quality_flags=[
+                        *result.quality_flags,
+                        "user_finish_intent_requires_evidence_snapshot",
+                    ],
+                )
         confirmation_enabled = (
             result.prompt_version == "v6.1.1"
             or session.consent_version in CLOSURE_CONFIRMATION_CONSENT_VERSIONS
@@ -473,15 +508,6 @@ class InterviewOrchestrator:
             and result.session_action == "finish"
             and result.finish_reason in MODEL_NATURAL_CLOSE_REASONS
         ):
-            # A candidate prompt or the matching participant consent enables the
-            # same visible contract: model-authored natural closure is only a
-            # suggestion, never authority to freeze the transcript. Sessions on
-            # the legacy consent retain the old behavior for rollback. The raw
-            # model action remains traceable while the effective action stays open.
-            # Do not rely on a language heuristic to decide whether generated
-            # text accidentally claims that the interview is already over. The
-            # participant-visible suggestion is deterministic; the model's raw
-            # action and reason remain recorded separately in the audit trace.
             return replace(
                 result,
                 content=SAFE_CLOSURE_SUGGESTION_MESSAGE,
@@ -537,9 +563,53 @@ class InterviewOrchestrator:
             prompt_version=NATURAL_FINAL_SCORER_PROMPT_VERSION,
             repair_used=call.repair_used,
             latency_ms=call.latency_ms,
+            attempt_count=call.attempt_count,
+            output=validated,
         )
 
-    def finalize(self, db: Session, session: AssessmentSession) -> AssessmentSession:
+    def assess_incremental_evidence(
+        self,
+        *,
+        previous_snapshot: dict[str, Any] | None,
+        new_user_turns: list[dict[str, Any]],
+        transcript: list[dict[str, Any]],
+    ) -> ReportReadinessAssessment:
+        call = self.gateway.generate_incremental_evidence(
+            {
+                "previous_snapshot": previous_snapshot,
+                "new_user_turns": new_user_turns,
+            }
+        )
+        validated = self._validate_final_output(call.output, transcript)
+        sufficient_dimension_count = sum(
+            1
+            for dimension in validated.dimensions
+            if dimension.score is not None
+            and dimension.sufficient
+            and bool(dimension.quotes)
+        )
+        return ReportReadinessAssessment(
+            ready=sufficient_dimension_count == len(DIMENSIONS),
+            sufficient_dimension_count=sufficient_dimension_count,
+            provider=call.provider,
+            model=call.model,
+            prompt_template_id=INCREMENTAL_EVIDENCE_PROMPT_ID,
+            prompt_version=INCREMENTAL_EVIDENCE_PROMPT_VERSION,
+            repair_used=call.repair_used,
+            latency_ms=call.latency_ms,
+            attempt_count=call.attempt_count,
+            output=validated,
+        )
+
+    def finalize(
+        self,
+        db: Session,
+        session: AssessmentSession,
+        *,
+        precomputed: StructuredCallResult[FinalScorerOutput] | None = None,
+        precomputed_prompt_template_id: str | None = None,
+        precomputed_prompt_version: str | None = None,
+    ) -> AssessmentSession:
         if session.report and session.phase == "completed":
             return session
         if session.phase != "finalizing":
@@ -563,14 +633,20 @@ class InterviewOrchestrator:
             transcript_fingerprint=frozen_fingerprint,
             model_provider="pending",
             model_name="pending",
-            prompt_template_id=NATURAL_FINAL_SCORER_PROMPT_ID,
-            prompt_version=NATURAL_FINAL_SCORER_PROMPT_VERSION,
+            prompt_template_id=(
+                precomputed_prompt_template_id or NATURAL_FINAL_SCORER_PROMPT_ID
+            ),
+            prompt_version=(
+                precomputed_prompt_version or NATURAL_FINAL_SCORER_PROMPT_VERSION
+            ),
         )
         db.add(run)
         db.commit()
         try:
             transcript = _transcript_rows(session)
-            call = self.gateway.generate_final_scorer({"transcript": transcript})
+            call = precomputed or self.gateway.generate_final_scorer(
+                {"transcript": transcript}
+            )
             validated = self._validate_final_output(call.output, transcript)
             run.model_provider = call.provider
             run.model_name = call.model
@@ -583,7 +659,7 @@ class InterviewOrchestrator:
             db.add(
                 AssessmentReport(
                     session_id=session.id,
-                    version="v6.0",
+                    version="v6.2" if precomputed is not None else "v6.0",
                     report_data=report_data,
                     evidence_fingerprint=frozen_fingerprint,
                 )

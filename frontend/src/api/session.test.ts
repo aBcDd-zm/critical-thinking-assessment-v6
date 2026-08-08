@@ -41,10 +41,20 @@ describe("V6 natural interview NDJSON client", () => {
       }), { status: 200, headers: { "content-type": "application/json" } }),
     );
 
-    const result = await finalizeSession("session-v6");
+    const fingerprint = "f".repeat(64);
+    const result = await finalizeSession("session-v6", {
+      evidence_check_id: 12,
+      expected_transcript_fingerprint: fingerprint,
+      allow_incomplete: true,
+    });
 
     expect(fetchMock.mock.calls[0]?.[0]).toContain("/sessions/session-v6/finalize");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      evidence_check_id: 12,
+      expected_transcript_fingerprint: fingerprint,
+      allow_incomplete: true,
+    });
     expect(result.session.phase).toBe("completed");
   });
 
@@ -53,6 +63,8 @@ describe("V6 natural interview NDJSON client", () => {
       status: "insufficient",
       ready: false,
       cached: true,
+      check_id: 12,
+      transcript_fingerprint: "e".repeat(64),
     };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify(response), {
@@ -69,7 +81,30 @@ describe("V6 natural interview NDJSON client", () => {
     expect(result).not.toHaveProperty("dimensions");
     expect(result).not.toHaveProperty("scores");
     expect(result).not.toHaveProperty("quotes");
-    expect(result).not.toHaveProperty("transcript_fingerprint");
+    expect(result).toHaveProperty("transcript_fingerprint", "e".repeat(64));
+    expect(result).toHaveProperty("check_id", 12);
+  });
+
+  it("retries a failed exact evidence snapshot only when explicitly requested", async () => {
+    const response = {
+      status: "checking",
+      ready: null,
+      cached: false,
+      check_id: 13,
+      transcript_fingerprint: "d".repeat(64),
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(response), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await checkReportReadiness("session-v6", true);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(
+      "/sessions/session-v6/report-readiness?retry_failed=true",
+    );
   });
 
   it("accepts one exact persisted closure suggestion with its transcript fingerprint", async () => {

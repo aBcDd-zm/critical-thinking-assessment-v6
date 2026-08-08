@@ -174,7 +174,19 @@ def test_dashboard_uses_aggregates_without_transcript_or_review_note_leakage(cli
         },
     )
     assert turn.status_code == 200
-    finalization = client.post(f"/api/v1/sessions/{completed_uuid}/finalize")
+    readiness = client.post(
+        f"/api/v1/sessions/{completed_uuid}/report-readiness"
+    ).json()
+    finalization = client.post(
+        f"/api/v1/sessions/{completed_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness["check_id"],
+            "expected_transcript_fingerprint": readiness[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": True,
+        },
+    )
     assert finalization.status_code == 200
 
     csrf_headers = _login(client)

@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     # Prompt selection is explicit so a deployment can roll back conversational
     # style without changing code or losing the version recorded in traces.
     natural_interviewer_prompt_version: Literal[
-        "v6.0.3", "v6.0.4", "v6.0.5", "v6.1.1"
-    ] = "v6.0.5"
+        "v6.0.3", "v6.0.4", "v6.0.5", "v6.1.1", "v6.2.0"
+    ] = "v6.2.0"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_base_url: str = "https://api.deepseek.com"
@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     # Final scoring spends tokens on six dimensions plus exact evidence quotes;
     # keep its completion budget separate from short interviewer turns.
     deepseek_scoring_max_tokens: int = 12000
+    # Evidence snapshots run independently after each saved answer. They must
+    # never delay the interviewer stream, and their validated output is reused
+    # directly when the participant generates a report.
+    evidence_observer_enabled: bool = True
+    deepseek_evidence_thinking: Literal["enabled", "disabled"] = "disabled"
+    deepseek_evidence_max_tokens: int = 2000
+    deepseek_evidence_primary_timeout_seconds: float = 8.0
+    deepseek_evidence_total_timeout_seconds: float = 15.0
     tts_mode: Literal["fake", "doubao", "disabled"] = "fake"
     doubao_tts_api_key: str = ""
     doubao_tts_resource_id: str = "seed-tts-2.0"

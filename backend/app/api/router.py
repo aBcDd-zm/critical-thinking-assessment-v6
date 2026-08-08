@@ -47,6 +47,7 @@ from app.schemas import (
     CreateSessionRequest,
     ExitRequest,
     ExpertScoresRequest,
+    FinalizeSessionRequest,
     ReviewRequest,
     SubmitTurnRequest,
 )
@@ -373,6 +374,7 @@ def _run_turn_submission(
                 request,
                 emit=lambda event: publish("event", event),
             )
+        sessions.schedule_evidence_snapshot(session_factory, session_uuid)
     except ServiceError as exc:
         publish("service_error", exc)
     except Exception as exc:
@@ -450,9 +452,13 @@ async def submit_turn_stream(
 
 
 @router.post("/sessions/{session_uuid}/finalize")
-def finalize_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+def finalize_session(
+    session_uuid: str,
+    request: FinalizeSessionRequest = Body(default_factory=FinalizeSessionRequest),
+    db: Session = Depends(get_db),
+) -> Any:
     try:
-        session = sessions.finalize(db, session_uuid)
+        session = sessions.finalize(db, session_uuid, request)
         return {"session": session_snapshot(session), "report": serialize_report(session)}
     except ServiceError as exc:
         return _service_error(exc)
@@ -480,11 +486,21 @@ def accept_closure_suggestion(
 
 
 @router.post("/sessions/{session_uuid}/report-readiness")
-def report_readiness(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+def report_readiness(
+    session_uuid: str,
+    retry_failed: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    worker_session_factory: Callable[[], Session] = Depends(get_session_factory),
+) -> Any:
     """Check aggregate evidence readiness without freezing or scoring a session."""
 
     try:
-        result = sessions.report_readiness(db, session_uuid)
+        result = sessions.report_readiness(
+            db,
+            session_uuid,
+            worker_session_factory,
+            retry_failed=retry_failed,
+        )
         return JSONResponse(
             status_code=202 if result["status"] == "checking" else 200,
             content=result,

@@ -149,19 +149,27 @@ export interface FinalizeResponse {
   report?: AssessmentReport | null;
 }
 
-export type ReportReadinessStatus = "ready" | "insufficient" | "checking";
+export interface FinalizeSessionRequest {
+  evidence_check_id?: number;
+  expected_transcript_fingerprint?: string;
+  allow_incomplete?: boolean;
+}
+
+export type ReportReadinessStatus = "ready" | "insufficient" | "checking" | "failed";
 
 /**
  * Participant-safe report readiness result.
  *
  * Dimension names, scores, quotes, and internal scoring details deliberately
- * stay out of this contract: the check only supports an optional soft gate
- * before a participant manually ends the interview.
+ * stay out of this contract. The exact check id and transcript fingerprint
+ * are an optimistic-concurrency boundary for finalizing this same snapshot.
  */
 export interface ReportReadinessResponse {
   status: ReportReadinessStatus;
   ready: boolean | null;
   cached: boolean;
+  check_id: number;
+  transcript_fingerprint: string;
 }
 
 /** Administrative contracts stay intentionally separate from participant UI. */

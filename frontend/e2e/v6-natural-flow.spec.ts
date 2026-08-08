@@ -16,7 +16,11 @@ type MockState = {
   };
 };
 
-const INITIAL_QUESTION = "你愿意从最近一直在想的一件事开始聊吗？";
+const INITIAL_QUESTION = "请想起最近一件真实、具体、需要认真权衡的事情：当时最难判断的是什么？";
+
+function transcriptFingerprint(state: MockState) {
+  return String(Math.max(1, state.answers)).repeat(64).slice(0, 64);
+}
 
 function snapshot(state: MockState) {
   return {
@@ -92,31 +96,21 @@ async function installMockBackend(page: Page) {
         state.answers += 1;
         state.turns.push({ id: state.turns.length + 1, turn_index: state.turns.length, role: "user", phase: "interviewing", ...payload });
       }
-      const close = state.answers >= 2;
       const assistant = {
         id: state.turns.length + 1,
         turn_index: state.turns.length,
         role: "assistant",
         phase: "interviewing",
-        content: close ? "这件事已经梳理得比较完整，可以考虑在这里结束；如果还有重要内容，你仍可以继续补充。" : "听起来这对你很重要；你现在最在意的是什么？",
+        content: state.answers >= 2
+          ? "我们再把这次经历往深处看一点：还有哪条重要依据、权衡或变化，是你觉得没有说清的？"
+          : "听起来这对你很重要；你现在最在意的是什么？",
       };
       state.turns.push(assistant);
-      if (close) {
-        state.closureSuggestion = {
-          closure_turn_id: Number(assistant.id),
-          transcript_fingerprint: "a".repeat(64),
-          finish_reason: "natural_closure",
-        };
-      }
       const events = [
         { event: "user_turn_saved", data: { turn: state.turns.at(-2) } },
         { event: "agent_started", data: {} },
         { event: "agent_delta", delta: assistant.content },
-        ...(close ? [{
-          event: "session_closure_suggested",
-          data: { session_uuid: UUID, ...state.closureSuggestion! },
-        }] : []),
-        { event: "agent_completed", data: { turn: assistant, session_action: close ? "suggest_finish" : "continue", finish_reason: close ? "natural_closure" : null, session: snapshot(state) } },
+        { event: "agent_completed", data: { turn: assistant, session_action: "continue", finish_reason: null, session: snapshot(state) } },
       ];
       await route.fulfill({
         status: 200,
@@ -126,7 +120,14 @@ async function installMockBackend(page: Page) {
       return;
     }
     if (path === `/sessions/${UUID}/report-readiness` && request.method() === "POST") {
-      await fulfillJson(route, { status: "ready", ready: true, cached: false });
+      const ready = state.answers >= 2;
+      await fulfillJson(route, {
+        status: ready ? "ready" : "insufficient",
+        ready,
+        cached: true,
+        check_id: state.answers,
+        transcript_fingerprint: transcriptFingerprint(state),
+      });
       return;
     }
     if (
@@ -140,6 +141,15 @@ async function installMockBackend(page: Page) {
       return;
     }
     if (path === `/sessions/${UUID}/finalize` && request.method() === "POST") {
+      const payload = request.postDataJSON() as Record<string, unknown>;
+      if (
+        payload.evidence_check_id !== state.answers
+        || payload.expected_transcript_fingerprint !== transcriptFingerprint(state)
+        || payload.allow_incomplete !== false
+      ) {
+        await fulfillJson(route, { detail: "snapshot mismatch" }, 409);
+        return;
+      }
       state.phase = "completed";
       await fulfillJson(route, { session: snapshot(state), report: report() });
       return;
@@ -168,7 +178,7 @@ async function startInterview(page: Page) {
   await expect(page.getByText(INITIAL_QUESTION)).toBeVisible();
 }
 
-test("consent → natural conversation → model closing → evidence report", async ({ page }) => {
+test("consent → natural conversation → evidence-ready snapshot → report", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("v6:tts-enabled", "false"));
   const state = await installMockBackend(page);
   await startInterview(page);
@@ -188,7 +198,8 @@ test("consent → natural conversation → model closing → evidence report", a
   await expect(page.getByText(/还差 \d+ 字/)).toBeVisible();
   await page.getByLabel("你的回答").fill("我想先确认自己真正重视什么，也想弄清楚这个选择会带来的变化。");
   await page.getByLabel("你的回答").press("Enter");
-  await expect(page.getByText("这段对话可以在这里收束", { exact: true })).toBeVisible();
+  await expect(page.getByText("现有回答已足够生成完整报告", { exact: true })).toBeVisible();
+  await expect(page.getByText("这段对话可以在这里收束", { exact: true })).toHaveCount(0);
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "结束并生成报告" }).click();
   await expect(page).toHaveURL(new RegExp(`/assessment/report/${UUID}$`));

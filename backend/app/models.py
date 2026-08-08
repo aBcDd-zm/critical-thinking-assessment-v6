@@ -251,12 +251,12 @@ class EvidenceItem(Base):
 
 
 class EvidenceReadinessCheck(Base):
-    """Private, non-scoring cache for the report-readiness soft gate.
+    """Validated incremental evidence snapshot for one exact transcript.
 
-    A check is keyed by the exact transcript and scoring assets.  It never
-    stores dimension-level output, scores, or quotes, and is deliberately
-    separate from ``ScoringRun`` so a preflight cannot be mistaken for a
-    formal assessment result.
+    The snapshot remains private while the interview is open. Finalization may
+    promote this exact result into the formal scoring/report records only after
+    its transcript fingerprint has been frozen, so no second model score or
+    stale-last-turn shortcut is needed.
     """
 
     __tablename__ = "evidence_readiness_checks"
@@ -288,6 +288,9 @@ class EvidenceReadinessCheck(Base):
     prompt_version: Mapped[str] = mapped_column(String(40))
     repair_used: Mapped[bool] = mapped_column(Boolean, default=False)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_user_turn_index: Mapped[Optional[int]] = mapped_column(Integer)
+    result_data: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON)
     error: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
