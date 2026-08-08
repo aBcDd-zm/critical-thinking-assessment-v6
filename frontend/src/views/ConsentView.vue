@@ -37,8 +37,9 @@ async function startInterview() {
     <section class="consent-card" aria-labelledby="consent-title">
       <a class="brand" href="/assessment" aria-label="思衡首页"><span>思衡</span></a>
       <header class="consent-intro">
-        <h1 id="consent-title">在访谈对话中展现你的思维</h1>
-        <p>请从一件真实、具体、需要判断的经历说起</p>
+        <span class="eyebrow">批判性思维探索访谈</span>
+        <h1 id="consent-title">开始一次具体的思维访谈</h1>
+        <p>感谢你参与「思衡」。这不是与 AI 随意聊天：请从工作、学习、项目或生活中，选择一件亲身经历、需要判断、取舍或行动的具体事情，围绕同一件事说明经过、想法和理由。</p>
       </header>
 
       <aside v-if="recentSession" class="resume-banner" aria-labelledby="resume-title">
