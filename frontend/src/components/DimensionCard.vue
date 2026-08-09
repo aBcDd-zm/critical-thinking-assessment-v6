@@ -3,7 +3,9 @@ import { computed, ref } from "vue";
 import type { ReportDimension } from "@/types/contracts";
 import { publicScoreLabel } from "./scoreFormat";
 
-const props = defineProps<{ dimension: ReportDimension }>();
+const props = defineProps<{
+  dimension: ReportDimension;
+}>();
 const open = ref(false);
 const strength = computed(() => props.dimension.strength || props.dimension.reason);
 
@@ -13,9 +15,10 @@ const statusLabels = {
   unmeasured: "未充分测得",
 };
 
-function evidenceSource(source?: string, turnIndex?: number) {
+function evidenceSource(source?: string, turnIndex?: number, answerOrdinal?: number) {
   const sourceLabel = source === "user" || !source ? "用户原话" : source;
-  return turnIndex === undefined ? sourceLabel : `第 ${turnIndex} 次回答 · ${sourceLabel}`;
+  if (answerOrdinal !== undefined) return `第 ${answerOrdinal} 次回答 · ${sourceLabel}`;
+  return turnIndex === undefined ? sourceLabel : `对话记录 #${turnIndex} · ${sourceLabel}`;
 }
 </script>
 
@@ -38,7 +41,7 @@ function evidenceSource(source?: string, turnIndex?: number) {
         <h3>你的原话</h3>
         <blockquote v-for="(evidence, index) in dimension.evidences" :key="`${evidence.turn_index}-${index}`">
           “{{ evidence.quote }}”
-          <small>{{ evidenceSource(evidence.source_type, evidence.turn_index) }}</small>
+          <small>{{ evidenceSource(evidence.source_type, evidence.turn_index, evidence.answer_ordinal) }}</small>
         </blockquote>
         <p v-if="!dimension.evidences.length" class="muted">本次没有形成足以引用的有效证据。</p>
       </section>

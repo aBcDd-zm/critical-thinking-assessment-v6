@@ -640,9 +640,8 @@ def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
         for evidence in item.get("evidences", [])[:3]:
             story.append(
                 Paragraph(
-                    "用户原话（turn "
-                    + escape(str(evidence.get("turn_index", "")))
-                    + "）："
+                    escape(_public_evidence_source_label(evidence))
+                    + "："
                     + escape(evidence.get("quote", "")),
                     styles["BodyText"],
                 )
@@ -656,6 +655,16 @@ def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
     )
     doc.build(story)
     return output.getvalue()
+
+
+def _public_evidence_source_label(evidence: dict[str, Any]) -> str:
+    answer_ordinal = evidence.get("answer_ordinal")
+    if isinstance(answer_ordinal, int) and answer_ordinal >= 1:
+        return f"用户原话（第 {answer_ordinal} 次回答）"
+    turn_index = evidence.get("turn_index")
+    if isinstance(turn_index, int) and turn_index >= 0:
+        return f"用户原话（对话记录 #{turn_index}）"
+    return "用户原话"
 
 
 def _public_score_label(score: int | float) -> str:

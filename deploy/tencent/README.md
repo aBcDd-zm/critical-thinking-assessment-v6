@@ -41,6 +41,9 @@ chmod 600 .env.production
 
 不要在服务器仓库内创建 `backend/.env`；生产 Compose 只读取工程根的 `.env.production`，并将 DeepSeek Key 传给后端容器，不传给前端容器。
 
+当前生产样例固定新会话使用 `NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1`、
+`EVIDENCE_ATTRIBUTION_MODE=enforce` 与 `EVIDENCE_OBSERVER_ENABLED=true`。发布前应只核对这三个非密钥字段，不要打印整份环境文件。此切换只影响部署后创建的会话；已存在的 shadow/disabled 会话继续按 `natural_opening` trace 中的绑定运行。
+
 ## 构建与本机健康检查
 
 ```sh

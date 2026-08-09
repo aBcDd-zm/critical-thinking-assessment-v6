@@ -32,12 +32,13 @@ class Settings(BaseSettings):
     deepseek_timeout_seconds: float = 90.0
     deepseek_max_tokens: int = 3000
     # Interview turns use a deliberately smaller, non-thinking profile. The
-    # first request receives at most 15 seconds and a single retry may use the
-    # rest of the 25-second wall-clock budget.
+    # first request receives at most 30 seconds. Mixed transport/contract
+    # recovery remains bounded by an 80-second wall-clock budget, below the
+    # 90-second streaming proxy timeout.
     deepseek_interview_thinking: Literal["enabled", "disabled"] = "disabled"
     deepseek_interview_max_tokens: int = 512
-    deepseek_interview_primary_timeout_seconds: float = 15.0
-    deepseek_interview_total_timeout_seconds: float = 25.0
+    deepseek_interview_primary_timeout_seconds: float = 30.0
+    deepseek_interview_total_timeout_seconds: float = 80.0
     # Final scoring spends tokens on six dimensions plus exact evidence quotes;
     # keep its completion budget separate from short interviewer turns.
     deepseek_scoring_max_tokens: int = 12000
@@ -46,10 +47,10 @@ class Settings(BaseSettings):
     # directly when the participant generates a report.
     evidence_observer_enabled: bool = True
     # Attribution is release-gated independently from the interviewer prompt.
-    # ``shadow`` records the new ownership analysis and span-scoring comparison
-    # while preserving the existing participant result. ``enforce`` becomes a
-    # hard gate only for sessions whose opening bound them to v6.2.1.
-    evidence_attribution_mode: Literal["disabled", "shadow", "enforce"] = "shadow"
+    # New sessions use the enforced ownership gate by default. Existing sessions
+    # keep the mode recorded by their opening trace, including historical shadow
+    # and disabled contracts.
+    evidence_attribution_mode: Literal["disabled", "shadow", "enforce"] = "enforce"
     deepseek_evidence_thinking: Literal["enabled", "disabled"] = "disabled"
     deepseek_evidence_max_tokens: int = 2000
     deepseek_evidence_primary_timeout_seconds: float = 8.0
@@ -94,13 +95,18 @@ class Settings(BaseSettings):
         violations: list[str] = []
         if self.model_gateway_mode != "real":
             violations.append("MODEL_GATEWAY_MODE must be real")
-        if (
-            self.natural_interviewer_prompt_version == "v6.2.1"
-            and self.evidence_attribution_mode == "disabled"
-        ):
+        if not self.evidence_observer_enabled:
+            violations.append("EVIDENCE_OBSERVER_ENABLED must be true")
+        if self.natural_interviewer_prompt_version == "v6.2.1":
+            if self.evidence_attribution_mode != "enforce":
+                violations.append(
+                    "EVIDENCE_ATTRIBUTION_MODE must be enforce when "
+                    "NATURAL_INTERVIEWER_PROMPT_VERSION is v6.2.1"
+                )
+        elif self.evidence_attribution_mode != "disabled":
             violations.append(
-                "EVIDENCE_ATTRIBUTION_MODE must be shadow or enforce when "
-                "NATURAL_INTERVIEWER_PROMPT_VERSION is v6.2.1"
+                "EVIDENCE_ATTRIBUTION_MODE must be disabled when "
+                "NATURAL_INTERVIEWER_PROMPT_VERSION is not v6.2.1"
             )
         if not self.deepseek_api_key.strip():
             violations.append("DEEPSEEK_API_KEY must be non-empty")

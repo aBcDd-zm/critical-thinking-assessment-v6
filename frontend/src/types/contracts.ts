@@ -118,6 +118,7 @@ export interface ReportEvidence {
   quote: string;
   source_type?: "user" | string;
   turn_index?: number;
+  answer_ordinal?: number;
 }
 
 export interface ReportDimension {

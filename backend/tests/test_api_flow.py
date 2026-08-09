@@ -781,6 +781,13 @@ def test_user_finalize_scores_only_exact_user_quotes_and_hides_confidence(client
     payload = finalized.json()
     assert payload["session"]["phase"] == "completed"
     report = payload["report"]
+    answer_ordinal_by_turn_index = {
+        turn["turn_index"]: ordinal
+        for ordinal, turn in enumerate(
+            (turn for turn in payload["session"]["turns"] if turn["role"] == "user"),
+            start=1,
+        )
+    }
     assert "total_score" not in report
     assert len(report["dimensions"]) == 6
     assert all("confidence" not in item for item in report["dimensions"])
@@ -790,14 +797,33 @@ def test_user_finalize_scores_only_exact_user_quotes_and_hides_confidence(client
             assert dimension["status"] == "sufficient"
             assert dimension["evidences"]
             assert all(evidence["quote"] in DENSE_ANSWER for evidence in dimension["evidences"])
+            assert all(
+                evidence["answer_ordinal"]
+                == answer_ordinal_by_turn_index[evidence["turn_index"]]
+                for evidence in dimension["evidences"]
+            )
 
     public_report = client.get(f"/api/v1/sessions/{session_uuid}/report")
     assert public_report.status_code == 200
+    for dimension in public_report.json()["dimensions"]:
+        for evidence in dimension["evidences"]:
+            assert evidence["answer_ordinal"] == answer_ordinal_by_turn_index[
+                evidence["turn_index"]
+            ]
     assert client.get(f"/api/v1/sessions/{session_uuid}/report.pdf").content.startswith(b"%PDF")
     login_admin(client)
     admin_detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
     assert admin_detail["evidence_items"]
     assert "confidence" in admin_detail["evidence_items"][0]
+
+
+def test_pdf_evidence_labels_use_answer_ordinals_without_losing_raw_fallback() -> None:
+    assert api_router._public_evidence_source_label(
+        {"turn_index": 15, "answer_ordinal": 8}
+    ) == "用户原话（第 8 次回答）"
+    assert api_router._public_evidence_source_label(
+        {"turn_index": 15}
+    ) == "用户原话（对话记录 #15）"
 
 
 def test_report_readiness_is_aggregate_idempotent_and_not_formal_scoring(
@@ -2162,11 +2188,11 @@ def test_deepseek_endpoint_is_not_prefixed_with_an_extra_v1(monkeypatch) -> None
         def json(self):
             return {"choices": [{"message": {"content": "{}"}}]}
 
-    def fake_post(url, **_kwargs):
+    async def fake_post(url, **_kwargs):
         captured["url"] = url
         return FakeResponse()
 
-    monkeypatch.setattr("app.services.model_gateway.httpx.post", fake_post)
+    monkeypatch.setattr("app.services.model_gateway._async_http_post", fake_post)
     monkeypatch.setattr(settings, "deepseek_base_url", "https://api.deepseek.com")
     gateway._post_json([{"role": "user", "content": "{}"}])
     assert captured["url"] == "https://api.deepseek.com/chat/completions"
@@ -2344,10 +2370,10 @@ def test_model_gateway_marks_tls_transport_errors_as_transient(monkeypatch) -> N
     gateway = ModelGatewayService()
     monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
 
-    def tls_eof(*_args, **_kwargs):
+    async def tls_eof(*_args, **_kwargs):
         raise httpx.ConnectError("EOF occurred in violation of protocol")
 
-    monkeypatch.setattr("app.services.model_gateway.httpx.post", tls_eof)
+    monkeypatch.setattr("app.services.model_gateway._async_http_post", tls_eof)
     with pytest.raises(ModelGatewayError) as failure:
         gateway._post_json([{"role": "user", "content": "test"}])
 

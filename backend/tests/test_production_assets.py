@@ -13,6 +13,7 @@ def _text(relative_path: str) -> str:
 
 def test_production_compose_isolates_v6_and_uses_the_shared_gateway_network() -> None:
     compose = _text("docker-compose.production.yml")
+    backend_dockerfile = _text("backend/Dockerfile")
     frontend_service = compose.split("  frontend:\n", 1)[1]
 
     assert "name: cta-v6" in compose
@@ -29,6 +30,9 @@ def test_production_compose_isolates_v6_and_uses_the_shared_gateway_network() ->
     assert "ADMIN_TOKEN" not in frontend_service
     assert "SITE_BASIC_USER" not in frontend_service
     assert "SITE_BASIC_PASSWORD" not in frontend_service
+    # The queued readiness registry is intentionally process-local. Production
+    # must remain one backend process until that lease moves to shared storage.
+    assert '"--workers", "1"' in backend_dockerfile
 
 
 def test_nginx_keeps_admin_review_protected_and_streaming_unbuffered() -> None:
@@ -36,6 +40,7 @@ def test_nginx_keeps_admin_review_protected_and_streaming_unbuffered() -> None:
     frontend_dockerfile = _text("frontend/Dockerfile")
     frontend_http = _text("frontend/src/api/http.ts")
     admin_location = nginx.split("location ^~ /api/v1/admin", 1)[1].split("}", 1)[0]
+    interview_location = nginx.split("turns:stream$", 1)[1].split("}", 1)[0]
 
     assert "auth_basic" not in nginx
     assert '${ADMIN_TOKEN}' not in nginx
@@ -54,6 +59,8 @@ def test_nginx_keeps_admin_review_protected_and_streaming_unbuffered() -> None:
     assert "proxy_send_timeout 200s;" in admin_location
     assert "proxy_buffering off" in nginx
     assert "proxy_request_buffering off" in nginx
+    assert "proxy_read_timeout 90s;" in interview_location
+    assert "proxy_send_timeout 90s;" in interview_location
     assert "limit_req zone=turn_submit" in nginx
     assert "ARG VITE_API_BASE_URL=/api/v1" in frontend_dockerfile
     assert 'credentials: "include"' in frontend_http
@@ -80,6 +87,7 @@ def test_tencent_caddy_fragment_is_additive_and_targets_only_v6() -> None:
 
 def test_production_example_keeps_deepseek_out_of_the_frontend_build() -> None:
     example = _text(".env.production.example")
+    development_example = _text("backend/.env.example")
     dockerfile = _text("frontend/Dockerfile")
 
     assert "DEEPSEEK_API_KEY=REPLACE_" in example
@@ -88,6 +96,14 @@ def test_production_example_keeps_deepseek_out_of_the_frontend_build() -> None:
     assert "ADMIN_JWT_SECRET=REPLACE_" in example
     assert "ADMIN_TOKEN" not in example
     assert "SITE_BASIC_" not in example
+    assert "NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1" in example
+    assert "EVIDENCE_ATTRIBUTION_MODE=enforce" in example
+    assert "EVIDENCE_ATTRIBUTION_MODE=shadow" not in example
+    assert "EVIDENCE_OBSERVER_ENABLED=true" in example
+    assert "DEEPSEEK_INTERVIEW_PRIMARY_TIMEOUT_SECONDS=30" in example
+    assert "DEEPSEEK_INTERVIEW_TOTAL_TIMEOUT_SECONDS=80" in example
+    assert "NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1" in development_example
+    assert "EVIDENCE_ATTRIBUTION_MODE=enforce" in development_example
     assert "DEEPSEEK_API_KEY" not in dockerfile
 
 
