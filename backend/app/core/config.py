@@ -96,10 +96,10 @@ class Settings(BaseSettings):
             violations.append("MODEL_GATEWAY_MODE must be real")
         if (
             self.natural_interviewer_prompt_version == "v6.2.1"
-            and self.evidence_attribution_mode != "enforce"
+            and self.evidence_attribution_mode == "disabled"
         ):
             violations.append(
-                "EVIDENCE_ATTRIBUTION_MODE must be enforce when "
+                "EVIDENCE_ATTRIBUTION_MODE must be shadow or enforce when "
                 "NATURAL_INTERVIEWER_PROMPT_VERSION is v6.2.1"
             )
         if not self.deepseek_api_key.strip():

@@ -50,10 +50,10 @@ NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1
 EVIDENCE_ATTRIBUTION_MODE=shadow
 ```
 
-开发默认使用 `v6.2.1 + shadow`；生产样例在真实模型盲测和成员 A 审核前仍保持 `v6.2.0 + disabled`。生产若选择 `v6.2.1`，启动校验要求同时使用 `enforce`。发生系统性回归时可改回 `v6.2.0`、`v6.1.1` 或 `v6.0.5` 并重启后端。每个会话使用 `natural_opening` trace 同时绑定开场版本与 attribution mode，因此切换或回滚只影响之后新建的会话，不会使进行中会话中途换版。旧 Prompt 文本保持完整，无需改代码。每个 trace 仍记录实际使用的
+开发默认使用 `v6.2.1 + shadow`；生产样例在真实模型盲测和成员 A 审核前仍保持 `v6.2.0 + disabled`。生产可先选择 `v6.2.1 + shadow` 采集盲测数据而不接管参与者评分；启动校验拒绝 `v6.2.1 + disabled`，只有归属和 BARS 验收通过后才切换为 `enforce`。发生系统性回归时可改回 `v6.2.0`、`v6.1.1` 或 `v6.0.5` 并重启后端。每个会话使用 `natural_opening` trace 同时绑定开场版本与 attribution mode，因此切换或回滚只影响之后新建的会话，不会使进行中会话中途换版。旧 Prompt 文本保持完整，无需改代码。每个 trace 仍记录实际使用的
 `prompt_template_id` 与 `prompt_version`，不得将不同版本的数据当作同一干预条件。
 
-访谈调用使用 `thinking=disabled`、`max_tokens=512`、25 秒总预算。归属器、span 评分器和旧增量整理器各自使用独立的 `thinking=disabled`、`max_tokens=2000`、15 秒总预算，首次最多 8 秒且最多重试一次；任务完全后台运行。主动收束还必须满足至少 8 个已保存用户回答；这是服务端确定性门槛，不注入访谈官。冻结时提升同一 readiness 结果，报告阶段模型调用为零。
+访谈调用使用 `thinking=disabled`、`max_tokens=512`、25 秒总预算。归属器、span 评分器和旧增量整理器各自使用独立的 `thinking=disabled`、`max_tokens=2000`；生产 shadow 采集使用 60 秒总预算、首次最多 30 秒且最多重试一次，任务完全后台运行，不阻塞访谈回复。主动收束还必须满足至少 8 个已保存用户回答；这是服务端确定性门槛，不注入访谈官。冻结时提升同一 readiness 结果，报告阶段模型调用为零。
 
 冻结 SHA-256：
 
