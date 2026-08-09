@@ -1,6 +1,6 @@
 # 思衡 V6 Prompt 交接
 
-开发默认版本：`natural_interviewer_v6.2.1`、`natural_evidence_attribution_v6.2.1`、`natural_attributed_evidence_v6.2.2`（`shadow`）
+新会话默认版本：`natural_interviewer_v6.2.1`、`natural_evidence_attribution_v6.2.1`、`natural_attributed_evidence_v6.2.2`（`enforce`）
 可回滚访谈版本：`natural_interviewer_v6.2.0`、`natural_interviewer_v6.1.1`、`natural_interviewer_v6.0.5`、`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
 旧/对照增量整理器：`natural_incremental_evidence_v6.2.1`
 旧冻结会话兼容评分器：`natural_final_scorer_v6.1.0`
@@ -47,13 +47,13 @@ V6.2.0 及更早访谈官只返回原合同。V6.2.1 在不改变可见文案的
 
 ```text
 NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1
-EVIDENCE_ATTRIBUTION_MODE=shadow
+EVIDENCE_ATTRIBUTION_MODE=enforce
 ```
 
-开发默认使用 `v6.2.1 + shadow`；生产样例在真实模型盲测和成员 A 审核前仍保持 `v6.2.0 + disabled`。生产可先选择 `v6.2.1 + shadow` 采集盲测数据而不接管参与者评分；启动校验拒绝 `v6.2.1 + disabled`，只有归属和 BARS 验收通过后才切换为 `enforce`。发生系统性回归时可改回 `v6.2.0`、`v6.1.1` 或 `v6.0.5` 并重启后端。每个会话使用 `natural_opening` trace 同时绑定开场版本与 attribution mode，因此切换或回滚只影响之后新建的会话，不会使进行中会话中途换版。旧 Prompt 文本保持完整，无需改代码。每个 trace 仍记录实际使用的
+代码默认、开发示例和生产样例统一使用 `v6.2.1 + enforce`。生产启动只允许 `v6.2.1 + enforce`，或经单独评审的“旧 Prompt + disabled”回滚组合，并且所有生产组合都必须保持 `EVIDENCE_OBSERVER_ENABLED=true`，避免运维显示 enforce 而实际仍走旧评分，也避免关闭后台任务后新旧会话都无法生成 readiness。每个会话使用 `natural_opening` trace 同时绑定开场版本与 attribution mode；因此发布切换不会把已建 shadow/disabled 会话中途改成 enforce。发生系统性回归时，仍可经单独评审改回 `v6.2.0 + disabled`或更早保留版本并重启；该回滚也只影响之后新建会话。旧 Prompt 文本保持完整。每个 trace 仍记录实际使用的
 `prompt_template_id` 与 `prompt_version`，不得将不同版本的数据当作同一干预条件。
 
-访谈调用使用 `thinking=disabled`、`max_tokens=512`、25 秒总预算。归属器、span 评分器和旧增量整理器各自使用独立的 `thinking=disabled`、`max_tokens=2000`；生产 shadow 采集使用 60 秒总预算、首次最多 30 秒且最多重试一次，任务完全后台运行，不阻塞访谈回复。主动收束还必须满足至少 8 个已保存用户回答；这是服务端确定性门槛，不注入访谈官。冻结时提升同一 readiness 结果，报告阶段模型调用为零。
+访谈调用使用 `thinking=disabled`、`max_tokens=512`、首次 30 秒且全链路 80 秒封顶。归属器和 span 评分器各自使用独立的 `thinking=disabled`、`max_tokens=2000` 后台配置；旧 shadow 会话还会依其开场绑定执行对照增量整理器。这些任务不阻塞访谈回复。主动收束还必须满足至少 8 个已保存用户回答；这是服务端确定性门槛，不注入访谈官。冻结时只提升同一 readiness 结果，报告阶段模型调用为零。
 
 冻结 SHA-256：
 
@@ -104,7 +104,7 @@ EVIDENCE_ATTRIBUTION_MODE=shadow
 只输出符合 JSON Schema 的对象，不使用 Markdown，也不附加解释。
 ```
 
-服务端只能对高风险、安全、知情同意、空/无效 JSON、内部泄露和明显有害输出执行硬拦截。普通风格不佳只记录质量标记，不能把回应替换为受控题库。网络、空响应、模型或格式失败共享最多一次重试；仍失败时保存用户回答、允许同一 `client_turn_id` 恢复，绝不使用固定兜底问题。
+服务端只能对高风险、安全、知情同意、空/无效 JSON、内部泄露和明显有害输出执行硬拦截。普通风格不佳只记录质量标记，不能把回应替换为受控题库。V6.2.1 访谈在 80 秒总预算内最多允许一次瞬态传输重试和一次结构合同修复；同类连续失败仍在两次后终止，最多三次模型请求。仍失败时保存用户回答、允许同一 `client_turn_id` 恢复，绝不使用固定兜底问题。后台证据任务继续各自共享最多一次重试。
 
 ## 旧冻结会话兼容终评器
 

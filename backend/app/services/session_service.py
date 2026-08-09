@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import threading
@@ -12,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -76,20 +77,107 @@ _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 TECHNICAL_USER_TURN_CAP = 40
 REPORT_READINESS_RULE_VERSION = "incremental-evidence-v3-min8-strict"
 EVIDENCE_ELIGIBILITY_RULE_VERSION = "participant-owned-reasoning-v1"
-# Shadow comparison has three sequential 15-second model budgets (attribution,
-# attributed scorer, and legacy scorer). Include commit grace before reclaim.
+# This is a minimum, not the production lease itself. The effective lease also
+# covers every sequential evidence-model budget for the mode bound at opening:
+# enforce has two calls, while historical shadow sessions still have three.
 REPORT_READINESS_LEASE_SECONDS = 60
+REPORT_READINESS_LEASE_GRACE_SECONDS = 30
 LEGACY_INTERVIEWER_PROMPT_VERSION = "v6.0.5"
 _evidence_executor = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="v6-evidence",
 )
+_queued_evidence_tasks: set[tuple[int, str]] = set()
+_queued_evidence_tasks_lock = threading.Lock()
 
 
 def _lease_token(value: datetime) -> str:
     if value.tzinfo is not None:
         value = value.astimezone(timezone.utc).replace(tzinfo=None)
     return value.isoformat()
+
+
+def _register_queued_evidence_task(check_id: int, lease_token: str) -> None:
+    with _queued_evidence_tasks_lock:
+        _queued_evidence_tasks.add((check_id, lease_token))
+
+
+def _discard_queued_evidence_task(check_id: int, lease_token: str | None) -> None:
+    if lease_token is None:
+        return
+    with _queued_evidence_tasks_lock:
+        _queued_evidence_tasks.discard((check_id, lease_token))
+
+
+def _queued_evidence_task_is_live(check_id: int, lease_token: str) -> bool:
+    with _queued_evidence_tasks_lock:
+        return (check_id, lease_token) in _queued_evidence_tasks
+
+
+def _report_readiness_lease_seconds(effective_mode: str) -> float:
+    """Keep a worker lease beyond the bound mode's worst-case model budget."""
+
+    stage_count = {
+        "disabled": 1,
+        "enforce": 2,
+        "shadow": 3,
+    }.get(effective_mode, 1)
+    configured_budget = settings.deepseek_evidence_total_timeout_seconds * stage_count
+    return max(
+        float(REPORT_READINESS_LEASE_SECONDS),
+        configured_budget + REPORT_READINESS_LEASE_GRACE_SECONDS,
+    )
+
+
+def _start_evidence_snapshot_lease(
+    db: Session,
+    check_id: int,
+    queued_lease_token: str | None,
+) -> str | None:
+    """Atomically exchange an enqueue token for a fresh running lease.
+
+    ``created_at`` is the existing lease clock. A queued task is protected by
+    the in-process registration above, while a worker refreshes the clock only
+    when an executor thread actually starts it. The conditional UPDATE keeps a
+    reclaimed/stale worker from acquiring the replacement task's lease.
+    """
+
+    try:
+        check = db.get(EvidenceReadinessCheck, check_id)
+        if check is None or check.status != "processing":
+            return None
+        current_token = _lease_token(check.created_at)
+        if queued_lease_token is not None and current_token != queued_lease_token:
+            return None
+        if check.model_provider != "queued":
+            # Direct callers and already-started workers retain the normal
+            # token check without refreshing a running lease a second time.
+            return current_token
+
+        started_at = utcnow()
+        if _lease_token(started_at) == current_token:
+            started_at += timedelta(microseconds=1)
+        claimed = db.execute(
+            update(EvidenceReadinessCheck)
+            .where(
+                EvidenceReadinessCheck.id == check_id,
+                EvidenceReadinessCheck.status == "processing",
+                EvidenceReadinessCheck.model_provider == "queued",
+                EvidenceReadinessCheck.created_at == check.created_at,
+            )
+            .values(
+                model_provider="pending",
+                created_at=started_at,
+            )
+        )
+        if claimed.rowcount != 1:
+            db.rollback()
+            return None
+        db.commit()
+        db.expire_all()
+        return _lease_token(started_at)
+    finally:
+        _discard_queued_evidence_task(check_id, queued_lease_token)
 
 
 def _report_readiness_asset_fingerprint(
@@ -195,7 +283,34 @@ def serialize_turn(turn: DialogueTurn) -> dict[str, Any]:
 def serialize_report(session: AssessmentSession) -> dict[str, Any] | None:
     if not session.report:
         return None
-    data = dict(session.report.report_data)
+    data = deepcopy(session.report.report_data)
+    answer_ordinal_by_turn_index = {
+        turn.turn_index: ordinal
+        for ordinal, turn in enumerate(
+            (
+                turn
+                for turn in sorted(session.turns, key=lambda item: item.turn_index)
+                if turn.role == "user"
+            ),
+            start=1,
+        )
+    }
+    dimensions = data.get("dimensions")
+    if isinstance(dimensions, list):
+        for dimension in dimensions:
+            if not isinstance(dimension, dict):
+                continue
+            evidences = dimension.get("evidences")
+            if not isinstance(evidences, list):
+                continue
+            for evidence in evidences:
+                if not isinstance(evidence, dict):
+                    continue
+                turn_index = evidence.get("turn_index")
+                if isinstance(turn_index, int):
+                    answer_ordinal = answer_ordinal_by_turn_index.get(turn_index)
+                    if answer_ordinal is not None:
+                        evidence["answer_ordinal"] = answer_ordinal
     data["generated_at"] = session.report.created_at.isoformat()
     return data
 
@@ -835,18 +950,33 @@ class SessionService:
             if existing.status == "failed" and not retry_failed:
                 return existing, None, [], [], False
             if existing.status == "processing":
+                current_token = _lease_token(existing.created_at)
+                if (
+                    existing.model_provider == "queued"
+                    and _queued_evidence_task_is_live(existing.id, current_token)
+                ):
+                    # Executor backlog is not model-runtime. Keep the unique
+                    # queued job until its worker atomically starts a fresh
+                    # running lease. Missing registrations are orphaned rows
+                    # from a restart or failed submit and may be reclaimed now.
+                    return existing, None, [], [], False
                 created_at = existing.created_at
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=now.tzinfo)
-                lease_expired = created_at < now - timedelta(
-                    seconds=REPORT_READINESS_LEASE_SECONDS
+                lease_expired = (
+                    existing.model_provider == "queued"
+                    or created_at
+                    < now
+                    - timedelta(
+                        seconds=_report_readiness_lease_seconds(effective_mode)
+                    )
                 )
                 if not lease_expired:
                     return existing, None, [], [], False
             existing.status = "processing"
             existing.ready = None
             existing.sufficient_dimension_count = None
-            existing.model_provider = "pending"
+            existing.model_provider = "queued"
             existing.model_name = "pending"
             existing.repair_used = False
             existing.latency_ms = 0
@@ -868,6 +998,7 @@ class SessionService:
                 transcript_fingerprint=fingerprint,
                 asset_fingerprint=asset_fingerprint,
                 status="processing",
+                model_provider="queued",
                 prompt_template_id=INCREMENTAL_EVIDENCE_PROMPT_ID,
                 prompt_version=INCREMENTAL_EVIDENCE_PROMPT_VERSION,
             )
@@ -948,6 +1079,13 @@ class SessionService:
 
         try:
             with session_factory() as db:
+                expected_lease_token = _start_evidence_snapshot_lease(
+                    db,
+                    check_id,
+                    expected_lease_token,
+                )
+                if expected_lease_token is None:
+                    return
                 check = db.get(EvidenceReadinessCheck, check_id)
                 if not lease_is_current(check):
                     return
@@ -1361,6 +1499,7 @@ class SessionService:
     ) -> None:
         if not settings.evidence_observer_enabled:
             return
+        queued_lease_token: str | None = None
         with session_factory() as db:
             with _locks[session_uuid]:
                 session = self.get(db, session_uuid)
@@ -1373,20 +1512,28 @@ class SessionService:
                         retry_failed=retry_failed,
                     )
                 )
+                if should_run:
+                    queued_lease_token = _lease_token(check.created_at)
+                    _register_queued_evidence_task(check.id, queued_lease_token)
         if not should_run:
             return
+        assert queued_lease_token is not None
         args = (
             session_factory,
             check.id,
             previous,
             new_turns,
             transcript,
-            _lease_token(check.created_at),
+            queued_lease_token,
         )
-        if settings.model_gateway_mode == "mock":
-            self._execute_evidence_snapshot(*args)
-        else:
-            _evidence_executor.submit(self._execute_evidence_snapshot, *args)
+        try:
+            if settings.model_gateway_mode == "mock":
+                self._execute_evidence_snapshot(*args)
+            else:
+                _evidence_executor.submit(self._execute_evidence_snapshot, *args)
+        except Exception:
+            _discard_queued_evidence_task(check.id, queued_lease_token)
+            raise
 
     def report_readiness(
         self,

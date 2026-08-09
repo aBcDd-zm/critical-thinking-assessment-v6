@@ -10,7 +10,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/api/session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/session")>();
-  return { ...actual, getReport: mocks.getReport, getReportPdf: mocks.getReportPdf };
+  return {
+    ...actual,
+    getReport: mocks.getReport,
+    getReportPdf: mocks.getReportPdf,
+  };
 });
 vi.mock("vue-router", () => ({
   useRoute: () => ({ params: { sessionUuid: "session-v6" } }),
@@ -26,7 +30,7 @@ describe("ReportView", () => {
       strengths: ["能区分事实与假设"],
       priorities: ["记录改变原判断的条件"],
       dimensions: [
-        { dimension_key: "problem_definition", dimension_name: "问题界定", status: "sufficient", score: 4, reason: "有精确原话。", suggestion: "继续标记假设。", evidences: [{ quote: "这只是我现在的假设", source_type: "user", turn_index: 2 }] },
+        { dimension_key: "problem_definition", dimension_name: "问题界定", status: "sufficient", score: 4, reason: "有精确原话。", suggestion: "继续标记假设。", evidences: [{ quote: "这只是我现在的假设", source_type: "user", turn_index: 15, answer_ordinal: 8 }] },
         { dimension_key: "evidence_evaluation", dimension_name: "证据评估", status: "limited", score: null, reason: "证据较少。", suggestion: "增加核实来源。", evidences: [] },
       ],
       experimental_notice: "实验结果不用于人格或职业判断。",
@@ -58,7 +62,8 @@ describe("ReportView", () => {
 
     await wrapper.findAll(".dimension-head")[0]!.trigger("click");
     expect(wrapper.text()).toContain("这只是我现在的假设");
-    expect(wrapper.text()).toContain("第 2 次回答 · 用户原话");
+    expect(wrapper.text()).toContain("第 8 次回答 · 用户原话");
+    expect(wrapper.text()).not.toContain("第 15 次回答");
     expect(wrapper.text()).toContain("优势");
     expect(wrapper.text()).toContain("建议");
   });

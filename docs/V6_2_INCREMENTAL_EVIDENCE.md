@@ -28,7 +28,7 @@ V6.2.1 增加最低八轮保护。系统仅在已保存的非重复用户回答�
 | --- | --- | ---: | ---: | ---: |
 | `natural_interviewer_v6.2.0` | disabled | 512 | 15 秒 | 25 秒 |
 | `natural_incremental_evidence_v6.2.1` | disabled | 2000 | 8 秒 | 15 秒 |
-| `natural_interviewer_v6.2.1` | disabled | 512 | 15 秒 | 25 秒 |
+| `natural_interviewer_v6.2.1` | disabled | 512 | 30 秒 | 80 秒 |
 | `natural_evidence_attribution_v6.2.1` | disabled | 2000 | 8 秒 | 15 秒 |
 | `natural_attributed_evidence_v6.2.2` | disabled | 2000 | 8 秒 | 15 秒 |
 | `natural_final_scorer_v6.1.0`（仅旧冻结会话兼容） | enabled | 12000 | 90 秒 | 原兼容路径 |

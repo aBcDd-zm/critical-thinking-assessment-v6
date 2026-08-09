@@ -20,6 +20,9 @@ def _production_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "app_env": "production",
         "model_gateway_mode": "real",
+        "natural_interviewer_prompt_version": "v6.2.1",
+        "evidence_attribution_mode": "enforce",
+        "evidence_observer_enabled": True,
         "deepseek_api_key": "deepseek-test-key",
         "admin_username": "admin",
         "admin_password_hash": TEST_ADMIN_PASSWORD_HASH,
@@ -68,7 +71,11 @@ def test_development_configuration_keeps_mock_and_fake_compatibility() -> None:
     assert config.tts_mode == "fake"
 
 
-def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> None:
+def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NATURAL_INTERVIEWER_PROMPT_VERSION", raising=False)
+    monkeypatch.delenv("EVIDENCE_ATTRIBUTION_MODE", raising=False)
     default_config = Settings(_env_file=None)
     rollback_config = Settings(
         _env_file=None,
@@ -79,7 +86,7 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
         natural_interviewer_prompt_version="v6.1.1",
     )
 
-    assert default_config.natural_interviewer_prompt_version == "v6.2.0"
+    assert default_config.natural_interviewer_prompt_version == "v6.2.1"
     assert rollback_config.natural_interviewer_prompt_version == "v6.0.3"
     assert candidate_config.natural_interviewer_prompt_version == "v6.1.1"
     with pytest.raises(ValidationError):
@@ -89,33 +96,68 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
         )
 
 
-def test_v621_is_the_code_default_and_production_allows_staged_shadow_rollout(
+def test_v621_enforce_is_the_code_default_and_production_contract(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("NATURAL_INTERVIEWER_PROMPT_VERSION", raising=False)
     monkeypatch.delenv("EVIDENCE_ATTRIBUTION_MODE", raising=False)
     default_config = Settings(_env_file=None)
     assert default_config.natural_interviewer_prompt_version == "v6.2.1"
-    assert default_config.evidence_attribution_mode == "shadow"
+    assert default_config.evidence_attribution_mode == "enforce"
 
-    with pytest.raises(
-        ValidationError,
-        match="EVIDENCE_ATTRIBUTION_MODE must be shadow or enforce",
-    ):
-        _production_settings(
-            natural_interviewer_prompt_version="v6.2.1",
-            evidence_attribution_mode="disabled",
-        )
-    shadow_production = _production_settings(
-        natural_interviewer_prompt_version="v6.2.1",
-        evidence_attribution_mode="shadow",
-    )
+    for forbidden_mode in ("disabled", "shadow"):
+        with pytest.raises(
+            ValidationError,
+            match="EVIDENCE_ATTRIBUTION_MODE must be enforce",
+        ):
+            _production_settings(
+                natural_interviewer_prompt_version="v6.2.1",
+                evidence_attribution_mode=forbidden_mode,
+            )
     enforce_production = _production_settings(
         natural_interviewer_prompt_version="v6.2.1",
         evidence_attribution_mode="enforce",
     )
-    assert shadow_production.evidence_attribution_mode == "shadow"
     assert enforce_production.evidence_attribution_mode == "enforce"
+
+    with pytest.raises(
+        ValidationError,
+        match="EVIDENCE_OBSERVER_ENABLED must be true",
+    ):
+        _production_settings(
+            natural_interviewer_prompt_version="v6.2.1",
+            evidence_attribution_mode="enforce",
+            evidence_observer_enabled=False,
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="EVIDENCE_OBSERVER_ENABLED must be true",
+    ):
+        _production_settings(
+            natural_interviewer_prompt_version="v6.2.0",
+            evidence_attribution_mode="disabled",
+            evidence_observer_enabled=False,
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="EVIDENCE_ATTRIBUTION_MODE must be disabled",
+    ):
+        _production_settings(
+            natural_interviewer_prompt_version="v6.2.0",
+            evidence_attribution_mode="enforce",
+        )
+
+
+def test_explicit_legacy_production_rollback_remains_selectable() -> None:
+    rollback = _production_settings(
+        natural_interviewer_prompt_version="v6.2.0",
+        evidence_attribution_mode="disabled",
+    )
+
+    assert rollback.natural_interviewer_prompt_version == "v6.2.0"
+    assert rollback.evidence_attribution_mode == "disabled"
 
 
 def test_minimum_user_turn_guard_defaults_to_eight_and_stays_within_cap() -> None:

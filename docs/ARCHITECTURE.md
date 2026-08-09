@@ -25,18 +25,21 @@ flowchart LR
 
 - 用户只看到“澄澄”、当前已完成的问答轮数和必要的输入提示，不接触六维、评分或后台审计字段；轮数不表示阶段、配额或上限。
 - 访谈期模型读完整逐字稿，只返回用户实际可见的自然回应及 `continue|finish`。它不接收目标维度、缺失维度、候选问题、coverage、阶段命令、每维预算或固定轮次。
-- 开发配置的 `NATURAL_INTERVIEWER_PROMPT_VERSION` 默认为 `v6.2.1`；`v6.2.0` 及更早版本完整保留。每个会话按 `natural_opening` trace 绑定版本，配置切换只影响新会话；当前生产样例仍锁 `v6.2.0 + disabled`，不得把 Draft 分支当作已发布切换。
-- 访谈调用关闭思考模式，使用 512 tokens 和 25 秒总预算。归属与 span 评分分别使用独立的后台证据配置；它们在访谈回复持久化后启动，不占用回复或输入框等待链路。
+- 代码默认、开发示例与生产样例统一为 `NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1` 和 `EVIDENCE_ATTRIBUTION_MODE=enforce`；`v6.2.0` 及更早版本仍保留供显式回滚。每个会话按 `natural_opening` trace 绑定 Prompt 和归属模式，配置切换只影响新会话。
+- 访谈调用关闭思考模式，使用 512 tokens、首次 30 秒且全链路 80 秒封顶。归属与 span 评分分别使用独立的后台证据配置；它们在访谈回复持久化后启动，不占用回复或输入框等待链路。
 - 访谈官不读取证据覆盖，也不决定是否可以结束。V6.2.1 的内部 navigation 只引用真实 user span，记录决策锚点、当前焦点和 `core|branch|return|source_clarification|user_switch`，不携带维度或题库。
 - 服务端不相信归属器自报的评分资格：先验证 user role、偏移、精确切片、非重叠与 SHA-256，再按 owner/relation 计算资格。评分器看不到 context-only/uncertain span，只能引用同一检查中的 eligible ID。
 
 ## 发布模式与会话合同
 
+- 当前新会话发布合同为 `v6.2.1 + enforce`；生产启动只接受这一组合或“旧 Prompt + disabled”的显式回滚组合，并且两者都必须开启证据观察器。以下 `disabled|shadow` 路径只用于已绑定历史会话、显式回滚或审计对照，不得中途改写其开场合同。
 - `disabled`：保持 V6.2.0 的原始增量评分链，供旧合同与快速回滚。
 - `shadow`：另存归属 span 和 span-ID 评分对照，但参与者 readiness、报告与旧链完全一致；任何 shadow 失败都必须留下 trace，不能伪装成 enforce 成功。
 - `enforce`：只对开场 trace 已同时绑定 `v6.2.1 + enforce` 的新会话启用归属硬门。开场 trace 也冻结 attribution mode，因此 shadow 期间已创建的会话不会在部署切换后中途变成 enforce。归属、格式、指纹或 span 引用任一失败时该快照失败，不调用或回退原始整段评分；旧绑定会话继续旧链。
 
 资产指纹包含归属 Prompt、紧凑 candidate-ID 分类 schema、服务端 span 候选规则、资格规则、span 评分 Prompt、模型配置、Rubric 与最低轮次规则。任务只能写入自己的逐字稿/资产行；陈旧或乱序结果不能覆盖当前快照。
+
+后台 queued/running lease 的排队登记目前是单进程内状态，生产镜像因此锁定一个后端容器和 `--workers 1`。扩展到多 worker 或多副本之前，必须先把队列登记与领取 lease 迁移到数据库或分布式协调层，不能直接水平扩容。
 
 ## 状态与事务边界
 
@@ -63,7 +66,7 @@ V6.2 将模型意图与结束控制彻底分开：`finish/enough_understanding|n
 
 1. 校验会话、同意、高风险门与 `(session_id, client_turn_id)`。
 2. 保存唯一用户 turn、输入方式、作答时长和调用审计；同键相同载荷重放原结果。
-3. 将完整逐字稿交给会话绑定版本的访谈官；网络、空响应或结构失败在 25 秒总预算内共享最多一次重试。空响应重试只追加 JSON 输出协议提醒，网络重试保持原载荷。
+3. 将完整逐字稿交给会话绑定版本的访谈官；V6.2.1 在 80 秒总预算内最多允许一次瞬态传输重试和一次结构合同修复，最多三次请求，同类连续失败两次后停止。空响应重试只追加 JSON 输出协议提醒，网络重试保持原载荷。
 4. 重试仍失败时，用户 turn 保留、会话仍可用、同一键可恢复；空响应与网络错误分别记录，不生成固定兜底问题。
 5. AI 回复持久化后立即返回用户，并为当前精确逐字稿创建一个幂等证据任务；任务完成顺序不会覆盖更新版本。enforce 模式在一次任务中绑定归属 span、readiness check 与评分引用。
 6. 已保存用户回答至少为 8，且六维全部满足 `score != null`、`sufficient=true` 和至少一个经服务端验证的 eligible span 时，前端才主动显示完整报告入口。第 8 轮不是固定结束点；用户仍可在此前确认生成带提前结束标记的证据有限报告。

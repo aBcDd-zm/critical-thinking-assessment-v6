@@ -980,6 +980,23 @@ class InterviewOrchestrator:
         transcript: list[dict[str, Any]],
     ) -> EvidenceAttributionAssessment:
         payload = {"user_turns": _attribution_user_turns(transcript)}
+        if not payload["user_turns"]:
+            # Ending before the first answer is an explicit product path, not an
+            # attribution failure. With no participant text there is nothing to
+            # classify, so record a deterministic empty audit instead of making
+            # a billable model call or weakening the non-empty span contract.
+            return EvidenceAttributionAssessment(
+                spans=[],
+                provider="system",
+                model="empty-participant-transcript-v1",
+                prompt_template_id=EVIDENCE_ATTRIBUTION_PROMPT_ID,
+                prompt_version=EVIDENCE_ATTRIBUTION_PROMPT_VERSION,
+                schema_version=EVIDENCE_ATTRIBUTION_SCHEMA_VERSION,
+                repair_used=False,
+                latency_ms=0,
+                attempt_count=0,
+                input_fingerprint=payload_fingerprint(payload),
+            )
         call = self.gateway.generate_evidence_attribution(payload)
         span_candidates = [
             candidate
@@ -1041,7 +1058,37 @@ class InterviewOrchestrator:
                 for span in eligible_spans
             ]
         }
-        call = self.gateway.generate_attributed_evidence(payload)
+        if eligible_spans:
+            call = self.gateway.generate_attributed_evidence(payload)
+        else:
+            # No eligible participant-owned reasoning can never support a
+            # numeric score. This deterministic IE result is the hard gate's
+            # only valid outcome and prevents an empty registry from becoming a
+            # model-hallucinated score or an unnecessary provider call.
+            call = StructuredCallResult(
+                output=AttributedFinalScorerOutput.model_validate(
+                    {
+                        "dimensions": [
+                            {
+                                "dimension_key": dimension.key,
+                                "score": None,
+                                "evidence_refs": [],
+                                "reason": "没有可用于自动评分的本人推理片段。",
+                                "confidence": 0.0,
+                                "sufficient": False,
+                            }
+                            for dimension in DIMENSIONS
+                        ],
+                        "strengths": [],
+                        "priorities": [],
+                    }
+                ),
+                provider="system",
+                model="no-eligible-span-gate-v1",
+                repair_used=False,
+                latency_ms=0,
+                attempt_count=0,
+            )
         validated = self._validate_attributed_output(
             call.output,
             eligible_spans,

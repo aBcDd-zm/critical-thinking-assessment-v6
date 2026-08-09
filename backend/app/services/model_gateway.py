@@ -8,6 +8,7 @@ natural conversation should continue or close.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -43,6 +44,59 @@ ATTRIBUTED_EVIDENCE_SCHEMA_VERSION = "attributed-evidence-span-ref-v1"
 T = TypeVar("T")
 
 
+def _httpx_phase_timeout(timeout_seconds: float) -> httpx.Timeout:
+    """Bound inactivity per HTTP phase while an outer deadline caps total wall time."""
+
+    total = max(0.1, float(timeout_seconds))
+    return httpx.Timeout(
+        connect=min(5.0, total),
+        pool=min(1.0, total),
+        write=min(5.0, total),
+        read=total,
+    )
+
+
+async def _async_http_post(url: str, **kwargs: Any) -> httpx.Response:
+    """Perform one cancellable provider request without sharing client state."""
+
+    async with httpx.AsyncClient() as client:
+        return await client.post(url, **kwargs)
+
+
+def _httpx_post_with_wall_deadline(
+    url: str,
+    *,
+    wall_timeout_seconds: float,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Cancel the provider request when its cumulative wall allowance expires.
+
+    HTTPX phase timeouts measure inactivity and can restart for every response
+    chunk. ``asyncio.wait_for`` is therefore the authoritative cumulative
+    deadline; cancellation also closes the request through ``AsyncClient``.
+    Model calls are intentionally made only from synchronous FastAPI/executor
+    workers, so a running event loop here is a programming error.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise ModelGatewayError(
+            "model_gateway_sync_call_inside_event_loop",
+            error_code="model_gateway_sync_call_inside_event_loop",
+        )
+
+    async def run() -> httpx.Response:
+        return await asyncio.wait_for(
+            _async_http_post(url, **kwargs),
+            timeout=max(0.1, float(wall_timeout_seconds)),
+        )
+
+    return asyncio.run(run())
+
+
 class ModelGatewayError(RuntimeError):
     def __init__(
         self,
@@ -50,6 +104,7 @@ class ModelGatewayError(RuntimeError):
         *,
         repair_used: bool = False,
         transient: bool = False,
+        repairable: bool = False,
         error_code: str | None = None,
         latency_ms: int = 0,
         attempt_count: int = 0,
@@ -57,6 +112,7 @@ class ModelGatewayError(RuntimeError):
         super().__init__(message)
         self.repair_used = repair_used
         self.transient = transient
+        self.repairable = repairable
         self.error_code = error_code or message.split(":", 1)[0]
         self.latency_ms = latency_ms
         self.attempt_count = attempt_count
@@ -429,6 +485,15 @@ def _validate_v621_interviewer_contract(
         for term in ("自己", "你的判断", "本人", "你采纳", "你的理由", "采纳理由")
     ):
         raise ValueError("v621_source_clarification_participant_signal_missing")
+
+
+def _validate_v621_opening_contract(output: NaturalInterviewerOutput) -> None:
+    """Keep the opening semantic gate inside the typed repair loop."""
+
+    if output.session_action != "continue" or output.finish_reason is not None:
+        raise ValueError("opening_must_invite_and_continue")
+    if output.navigation is not None:
+        raise ValueError("opening_navigation_must_be_null")
 
 
 def _dimension_contract() -> str:
@@ -923,7 +988,10 @@ strengths/priorities 没有合适的 eligible span 则返回空数组。
 
 
 class ModelGatewayService:
-    """Typed model calls with one bounded retry and explicit call profiles."""
+    """Typed model calls with bounded retries and explicit call profiles."""
+
+    _RETRY_SHARED_ONCE = "shared_once"
+    _RETRY_INTERVIEW_RESILIENT = "interview_resilient"
 
     def __init__(self) -> None:
         self.mode = settings.model_gateway_mode
@@ -953,11 +1021,13 @@ class ModelGatewayService:
             payload,
             prompt_version=selected_version,
         )
-        output_validator = (
-            (lambda output: _validate_v621_interviewer_contract(output, payload))
-            if selected_version == "v6.2.1" and payload.get("transcript")
-            else None
-        )
+        output_validator: Callable[[NaturalInterviewerOutput], None] | None = None
+        if selected_version == "v6.2.1":
+            output_validator = (
+                (lambda output: _validate_v621_interviewer_contract(output, payload))
+                if payload.get("transcript")
+                else _validate_v621_opening_contract
+            )
         _, _, system_prompt = resolve_natural_interviewer_prompt(selected_version)
         if self.mode == "mock":
             started = time.monotonic()
@@ -990,6 +1060,8 @@ class ModelGatewayService:
             total_timeout_seconds=settings.deepseek_interview_total_timeout_seconds,
             primary_timeout_seconds=settings.deepseek_interview_primary_timeout_seconds,
             output_validator=output_validator,
+            retry_strategy=self._RETRY_INTERVIEW_RESILIENT,
+            max_attempts=3,
         )
 
     def generate_final_scorer(
@@ -1195,9 +1267,20 @@ class ModelGatewayService:
         total_timeout_seconds: float | None = None,
         primary_timeout_seconds: float | None = None,
         output_validator: Callable[[T], None] | None = None,
+        retry_strategy: str = _RETRY_SHARED_ONCE,
+        max_attempts: int = 2,
     ) -> StructuredCallResult[T]:
         if not settings.deepseek_api_key.strip():
             raise ModelGatewayError("missing_deepseek_api_key")
+        if retry_strategy not in {
+            self._RETRY_SHARED_ONCE,
+            self._RETRY_INTERVIEW_RESILIENT,
+        }:
+            raise ValueError("unsupported_model_retry_strategy")
+        if max_attempts < 1 or max_attempts > 3:
+            raise ValueError("max_attempts_must_be_between_one_and_three")
+        if retry_strategy == self._RETRY_SHARED_ONCE and max_attempts > 2:
+            raise ValueError("shared_retry_strategy_allows_at_most_two_attempts")
         started = time.monotonic()
         messages: list[dict[str, str]] = [
             {"role": "system", "content": system_prompt},
@@ -1208,8 +1291,42 @@ class ModelGatewayService:
         ]
         last_error: Exception | None = None
         repair_used = False
-        retry_used = False
+        shared_retry_used = False
+        transport_retry_used = False
+        contract_repair_used = False
         attempt_count = 0
+
+        def terminal_error_code(error: Exception | None) -> str:
+            if isinstance(error, ModelGatewayError):
+                if error.error_code in {"model_output_empty", "model_empty_response"}:
+                    return "model_empty_response"
+                if error.repairable:
+                    return "model_invalid_response"
+                if not error.transient:
+                    return error.error_code
+            if error is not None and not isinstance(error, ModelGatewayError):
+                return "model_invalid_response"
+            return "model_connection_interrupted"
+
+        def retry_available(kind: Literal["transport", "contract"]) -> bool:
+            nonlocal shared_retry_used, transport_retry_used, contract_repair_used
+            if attempt_count >= max_attempts:
+                return False
+            if retry_strategy == self._RETRY_SHARED_ONCE:
+                if shared_retry_used:
+                    return False
+                shared_retry_used = True
+                return True
+            if kind == "transport":
+                if transport_retry_used:
+                    return False
+                transport_retry_used = True
+                return True
+            if contract_repair_used:
+                return False
+            contract_repair_used = True
+            return True
+
         while True:
             elapsed = time.monotonic() - started
             remaining = (
@@ -1218,16 +1335,16 @@ class ModelGatewayService:
                 else max(0.0, total_timeout_seconds - elapsed)
             )
             if remaining is not None and remaining <= 0:
-                terminal_code = (
-                    "model_empty_response"
-                    if isinstance(last_error, ModelGatewayError)
-                    and last_error.error_code in {"model_output_empty", "model_empty_response"}
-                    else "model_connection_interrupted"
-                )
+                terminal_code = terminal_error_code(last_error)
                 raise ModelGatewayError(
                     terminal_code,
                     repair_used=repair_used,
-                    transient=True,
+                    transient=terminal_code in {
+                        "model_empty_response",
+                        "model_connection_interrupted",
+                        "model_http_retryable",
+                    },
+                    repairable=terminal_code == "model_invalid_response",
                     error_code=terminal_code,
                     latency_ms=int(elapsed * 1000),
                     attempt_count=attempt_count,
@@ -1237,6 +1354,18 @@ class ModelGatewayService:
                 timeout_seconds = remaining
                 if attempt_count == 0 and primary_timeout_seconds is not None:
                     timeout_seconds = min(timeout_seconds, primary_timeout_seconds)
+                elif (
+                    retry_strategy == self._RETRY_INTERVIEW_RESILIENT
+                    and max_attempts - attempt_count > 1
+                ):
+                    # A slow second request must not consume the entire wall-clock
+                    # budget and leave no chance to recover from a different error
+                    # class. This reserves an equal share for the final bounded
+                    # attempt without extending the configured total budget.
+                    timeout_seconds = min(
+                        timeout_seconds,
+                        remaining / (max_attempts - attempt_count),
+                    )
                 timeout_seconds = max(0.1, timeout_seconds)
             attempt_count += 1
             try:
@@ -1246,9 +1375,22 @@ class ModelGatewayService:
                     timeout_seconds=timeout_seconds,
                     thinking=thinking,
                 )
-                output = schema.model_validate(raw)
-                if output_validator is not None:
-                    output_validator(output)
+                try:
+                    output = schema.model_validate(raw)
+                    if output_validator is not None:
+                        output_validator(output)
+                except Exception as contract_exc:
+                    # Input/payload guards run before this provider call. Errors
+                    # here describe only the provider's schema or semantic output
+                    # and therefore remain eligible for the single explicit
+                    # contract-repair attempt, including validators that use a
+                    # ModelGatewayError for a stable audit code.
+                    raise ModelGatewayError(
+                        "model_contract_invalid:"
+                        f"{type(contract_exc).__name__}:{str(contract_exc)[:500]}",
+                        repairable=True,
+                        error_code="model_contract_invalid",
+                    ) from contract_exc
                 return StructuredCallResult(
                     output=output,
                     provider="deepseek",
@@ -1260,8 +1402,7 @@ class ModelGatewayService:
             except Exception as exc:
                 last_error = exc
                 if isinstance(exc, ModelGatewayError) and exc.error_code == "model_output_empty":
-                    if not retry_used:
-                        retry_used = True
+                    if retry_available("transport"):
                         messages.append(
                             {
                                 "role": "user",
@@ -1275,13 +1416,13 @@ class ModelGatewayService:
                         "model_empty_response",
                         repair_used=repair_used,
                         transient=True,
+                        repairable=False,
                         error_code="model_empty_response",
                         latency_ms=int((time.monotonic() - started) * 1000),
                         attempt_count=attempt_count,
                     ) from exc
                 if isinstance(exc, ModelGatewayError) and exc.transient:
-                    if not retry_used:
-                        retry_used = True
+                    if retry_available("transport"):
                         # A network failure says nothing about the requested
                         # output. Retry the exact original payload once.
                         continue
@@ -1289,12 +1430,22 @@ class ModelGatewayService:
                         f"model_connection_interrupted:{type(last_error).__name__}:{str(last_error)[:500]}",
                         repair_used=repair_used,
                         transient=True,
+                        repairable=False,
                         error_code="model_connection_interrupted",
                         latency_ms=int((time.monotonic() - started) * 1000),
                         attempt_count=attempt_count,
                     ) from exc
-                if not retry_used:
-                    retry_used = True
+                if isinstance(exc, ModelGatewayError) and not exc.repairable:
+                    raise ModelGatewayError(
+                        f"{exc.error_code}:{type(exc).__name__}:{str(exc)[:500]}",
+                        repair_used=repair_used,
+                        transient=False,
+                        repairable=False,
+                        error_code=exc.error_code,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        attempt_count=attempt_count,
+                    ) from exc
+                if retry_available("contract"):
                     repair_used = True
                     messages.append(
                         {
@@ -1309,6 +1460,7 @@ class ModelGatewayService:
                 raise ModelGatewayError(
                     f"structured_model_call_failed:{type(last_error).__name__}:{str(last_error)[:500]}",
                     repair_used=repair_used,
+                    repairable=True,
                     error_code="model_invalid_response",
                     latency_ms=int((time.monotonic() - started) * 1000),
                     attempt_count=attempt_count,
@@ -1329,8 +1481,14 @@ class ModelGatewayService:
             base_url = base_url[:-3]
         url = base_url + "/chat/completions"
         try:
-            response = httpx.post(
+            request_timeout_seconds = (
+                settings.deepseek_timeout_seconds
+                if timeout_seconds is None
+                else timeout_seconds
+            )
+            response = _httpx_post_with_wall_deadline(
                 url,
+                wall_timeout_seconds=request_timeout_seconds,
                 headers={
                     "Authorization": f"Bearer {settings.deepseek_api_key}",
                     "Content-Type": "application/json",
@@ -1347,15 +1505,35 @@ class ModelGatewayService:
                     "thinking": {"type": thinking},
                     "response_format": {"type": "json_object"},
                 },
-                timeout=(
-                    settings.deepseek_timeout_seconds
-                    if timeout_seconds is None
-                    else timeout_seconds
-                ),
+                timeout=_httpx_phase_timeout(request_timeout_seconds),
             )
-            response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                retryable = status_code in {408, 425, 429} or 500 <= status_code < 600
+                error_code = (
+                    "model_http_retryable" if retryable else "model_http_rejected"
+                )
+                raise ModelGatewayError(
+                    f"{error_code}:HTTPStatusError:{status_code}",
+                    transient=retryable,
+                    repairable=False,
+                    error_code=error_code,
+                ) from exc
+            try:
+                body = response.json()
+                content = body["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                # A successful HTTP response with an invalid provider envelope is
+                # not a participant-contract error. Retry the exact request once;
+                # never tell the model to repair JSON it did not produce.
+                raise ModelGatewayError(
+                    f"model_response_envelope_invalid:{type(exc).__name__}:{str(exc)[:300]}",
+                    transient=True,
+                    repairable=False,
+                    error_code="model_response_envelope_invalid",
+                ) from exc
             if not isinstance(content, str) or not content.strip():
                 # A successful HTTP response with no model content is distinct
                 # from a transport failure. The caller may add a protocol-only
@@ -1363,15 +1541,36 @@ class ModelGatewayService:
                 raise ModelGatewayError(
                     "model_output_empty",
                     transient=True,
+                    repairable=False,
                     error_code="model_output_empty",
                 )
             cleaned = content.strip()
             if cleaned.startswith(chr(96) * 3):
                 cleaned = cleaned.strip(chr(96)).removeprefix("json").strip()
-            parsed = json.loads(cleaned)
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError as exc:
+                raise ModelGatewayError(
+                    f"model_output_invalid_json:{exc.msg}",
+                    repairable=True,
+                    error_code="model_output_invalid_json",
+                ) from exc
             if not isinstance(parsed, dict):
-                raise ValueError("model_output_not_object")
+                raise ModelGatewayError(
+                    "model_output_not_object",
+                    repairable=True,
+                    error_code="model_output_not_object",
+                )
             return parsed
+        except ModelGatewayError:
+            raise
+        except asyncio.TimeoutError as exc:
+            raise ModelGatewayError(
+                "model_transport_deadline_exceeded",
+                transient=True,
+                repairable=False,
+                error_code="model_transport_deadline_exceeded",
+            ) from exc
         except (
             httpx.ConnectError,
             httpx.ConnectTimeout,
@@ -1386,6 +1585,7 @@ class ModelGatewayService:
             raise ModelGatewayError(
                 f"model_transport_failed:{type(exc).__name__}:{str(exc)[:500]}",
                 transient=True,
+                repairable=False,
                 error_code="model_transport_failed",
             ) from exc
         except (
@@ -1394,10 +1594,11 @@ class ModelGatewayService:
             IndexError,
             TypeError,
             ValueError,
-            json.JSONDecodeError,
         ) as exc:
             raise ModelGatewayError(
-                f"model_request_failed:{type(exc).__name__}:{str(exc)[:500]}"
+                f"model_request_failed:{type(exc).__name__}:{str(exc)[:500]}",
+                repairable=False,
+                error_code="model_request_failed",
             ) from exc
 
     @staticmethod

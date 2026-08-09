@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -15,6 +16,7 @@ from app.core.config import settings
 from app.models import (
     AgentTrace,
     AssessmentSession,
+    DialogueTurn,
     EvidenceAttributionSpan,
     EvidenceItem,
     EvidenceReadinessCheck,
@@ -54,6 +56,7 @@ from app.services.orchestrator import (
 )
 from app.services.session_service import (
     _lease_token,
+    _report_readiness_lease_seconds,
     _report_readiness_asset_fingerprint,
 )
 from tests.conftest import (
@@ -540,6 +543,28 @@ def test_enforce_uses_attributed_ids_and_never_calls_raw_scorer(
             span.schema_version == EVIDENCE_ATTRIBUTION_SCHEMA_VERSION
             for span in spans
         )
+        span_by_id = {span.id: span for span in spans}
+        referenced_span_ids = {
+            reference["attribution_span_id"]
+            for dimension in check.result_data["dimensions"]
+            for reference in dimension["evidence_refs"]
+        }
+        assert referenced_span_ids
+        assert all(
+            span_by_id[span_id].eligibility == "eligible"
+            and span_by_id[span_id].validation_status == "validated"
+            and span_by_id[span_id].readiness_check_id == check.id
+            for span_id in referenced_span_ids
+        )
+        opening = db.scalar(
+            select(AgentTrace).where(
+                AgentTrace.session_id == session.id,
+                AgentTrace.action == "natural_opening",
+            )
+        )
+        assert opening is not None
+        assert opening.prompt_version == "v6.2.1"
+        assert opening.output_contract["evidence_attribution_mode"] == "enforce"
         check_id = check.id
         fingerprint = check.transcript_fingerprint
 
@@ -591,7 +616,91 @@ def test_enforce_uses_attributed_ids_and_never_calls_raw_scorer(
         evidence = list(db.scalars(select(EvidenceItem)))
         assert evidence
         assert all(item.attribution_span_id is not None for item in evidence)
+        assert all(item.readiness_check_id == check_id for item in evidence)
         assert all(item.validation_status == "validated" for item in evidence)
+        assert all(
+            item.attribution_span is not None
+            and item.attribution_span.eligibility == "eligible"
+            and item.attribution_span.validation_status == "validated"
+            for item in evidence
+        )
+
+
+def test_enforce_zero_answer_report_is_deterministically_insufficient(
+    client, monkeypatch
+) -> None:
+    _configure_v621(monkeypatch, "enforce")
+    gateway = router_module.sessions.orchestrator.gateway
+    monkeypatch.setattr(
+        gateway,
+        "generate_evidence_attribution",
+        lambda _payload: (_ for _ in ()).throw(
+            AssertionError("empty transcript must not call attribution model")
+        ),
+    )
+    monkeypatch.setattr(
+        gateway,
+        "generate_attributed_evidence",
+        lambda _payload: (_ for _ in ()).throw(
+            AssertionError("empty eligible registry must not call scorer")
+        ),
+    )
+    session_uuid = _create_session(client)
+
+    readiness = client.post(
+        f"/api/v1/sessions/{session_uuid}/report-readiness"
+    )
+    assert readiness.status_code == 200, readiness.text
+    readiness_payload = readiness.json()
+    assert readiness_payload["status"] == "insufficient"
+    assert readiness_payload["ready"] is False
+
+    with TestSession() as db:
+        check = db.scalar(select(EvidenceReadinessCheck))
+        assert check is not None
+        assert check.status == "insufficient"
+        assert check.sufficient_dimension_count == 0
+        assert check.model_provider == "system"
+        assert all(
+            dimension["score"] is None
+            and dimension["sufficient"] is False
+            and dimension["evidence_refs"] == []
+            for dimension in check.result_data["dimensions"]
+        )
+        assert db.scalar(select(EvidenceAttributionSpan.id)) is None
+        traces = list(
+            db.scalars(
+                select(AgentTrace).where(
+                    AgentTrace.action.in_(
+                        {
+                            "evidence_attribution_snapshot",
+                            "attributed_evidence_snapshot",
+                        }
+                    )
+                )
+            )
+        )
+        assert len(traces) == 2
+        assert all(trace.model_provider == "system" for trace in traces)
+        assert all(trace.output_contract["attempt_count"] == 0 for trace in traces)
+
+    finalized = client.post(
+        f"/api/v1/sessions/{session_uuid}/finalize",
+        json={
+            "evidence_check_id": readiness_payload["check_id"],
+            "expected_transcript_fingerprint": readiness_payload[
+                "transcript_fingerprint"
+            ],
+            "allow_incomplete": True,
+        },
+    )
+    assert finalized.status_code == 200, finalized.text
+    report = finalized.json()["report"]
+    assert len(report["dimensions"]) == 6
+    assert all(item["score"] is None for item in report["dimensions"])
+    assert all(item["evidences"] == [] for item in report["dimensions"])
+    with TestSession() as db:
+        assert db.scalar(select(EvidenceItem.id)) is None
 
 
 def test_enforce_attribution_failure_does_not_freeze_or_fallback(
@@ -628,6 +737,13 @@ def test_enforce_attribution_failure_does_not_freeze_or_fallback(
             )
         )
         assert any("evidence_attribution" in trace.action for trace in failed_traces)
+        assert all(trace.fallback_used is False for trace in failed_traces)
+        assert not db.scalar(
+            select(AgentTrace.id).where(
+                AgentTrace.action == "incremental_evidence_snapshot"
+            )
+        )
+        assert db.scalar(select(EvidenceItem.id)) is None
 
 
 def test_saved_user_turn_schedules_snapshot_after_interviewer_failure(
@@ -1603,6 +1719,163 @@ def test_session_binds_attribution_mode_at_opening(client, monkeypatch) -> None:
             )
         )
         assert "evidence_refs" in enforce_check.result_data["dimensions"][0]
+
+    _configure_v621(monkeypatch, "disabled")
+    disabled_uuid = _create_session(client)
+    monkeypatch.setattr(settings, "evidence_attribution_mode", "enforce")
+    _submit(
+        client,
+        disabled_uuid,
+        "我会先核实数据来源，再根据反例调整决定。",
+        suffix="00000003",
+    )
+    with TestSession() as db:
+        disabled_session = db.scalar(
+            select(AssessmentSession).where(
+                AssessmentSession.uuid == disabled_uuid
+            )
+        )
+        disabled_check = db.scalar(
+            select(EvidenceReadinessCheck).where(
+                EvidenceReadinessCheck.session_id == disabled_session.id
+            )
+        )
+        disabled_opening = db.scalar(
+            select(AgentTrace).where(
+                AgentTrace.session_id == disabled_session.id,
+                AgentTrace.action == "natural_opening",
+            )
+        )
+        assert disabled_opening.output_contract["evidence_attribution_mode"] == "disabled"
+        assert "quotes" in disabled_check.result_data["dimensions"][0]
+        assert not db.scalar(
+            select(EvidenceAttributionSpan.id).where(
+                EvidenceAttributionSpan.session_id == disabled_session.id
+            )
+        )
+
+
+def test_readiness_lease_covers_enforce_and_historical_shadow_budgets(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "deepseek_evidence_total_timeout_seconds", 60.0)
+
+    assert _report_readiness_lease_seconds("disabled") == 90.0
+    assert _report_readiness_lease_seconds("enforce") == 150.0
+    assert _report_readiness_lease_seconds("shadow") == 210.0
+
+
+def test_executor_queue_wait_does_not_consume_the_running_lease(
+    client, monkeypatch
+) -> None:
+    _configure_v621(monkeypatch, "enforce")
+    session_uuid = _create_session(client)
+    with TestSession() as db:
+        session = db.scalar(
+            select(AssessmentSession).where(
+                AssessmentSession.uuid == session_uuid
+            )
+        )
+        assert session is not None
+        db.add(
+            DialogueTurn(
+                session_id=session.id,
+                turn_index=1,
+                role="user",
+                phase="interviewing",
+                content="我会先核实数据来源，再根据反例调整决定。",
+                client_turn_id="queued-lease-user-turn",
+                input_mode="text",
+                answer_duration_ms=1000,
+                quality_flags=[],
+            )
+        )
+        session.user_answer_count = 1
+        db.commit()
+
+    class ControlledExecutor:
+        def __init__(self) -> None:
+            self.jobs: list[tuple[object, tuple[object, ...]]] = []
+
+        def submit(self, function, *args):
+            self.jobs.append((function, args))
+            return object()
+
+        def run_next(self) -> None:
+            function, args = self.jobs.pop(0)
+            function(*args)
+
+    controlled = ControlledExecutor()
+    started_tokens: list[str | None] = []
+
+    def claim_running_lease_only(
+        session_factory,
+        check_id,
+        _previous_snapshot,
+        _new_user_turns,
+        _transcript,
+        queued_lease_token,
+    ) -> None:
+        with session_factory() as db:
+            started_tokens.append(
+                session_service_module._start_evidence_snapshot_lease(
+                    db,
+                    check_id,
+                    queued_lease_token,
+                )
+            )
+
+    monkeypatch.setattr(settings, "model_gateway_mode", "real")
+    monkeypatch.setattr(session_service_module, "_evidence_executor", controlled)
+    monkeypatch.setattr(
+        router_module.sessions,
+        "_execute_evidence_snapshot",
+        claim_running_lease_only,
+    )
+
+    router_module.sessions.schedule_evidence_snapshot(TestSession, session_uuid)
+    assert len(controlled.jobs) == 1
+    with TestSession() as db:
+        check = db.scalar(select(EvidenceReadinessCheck))
+        assert check is not None
+        check_id = check.id
+        queued_at = check.created_at
+        queued_token = _lease_token(queued_at)
+        assert check.model_provider == "queued"
+
+    runtime_lease = _report_readiness_lease_seconds("enforce")
+    clock = [queued_at + timedelta(seconds=runtime_lease + 30)]
+    monkeypatch.setattr(session_service_module, "utcnow", lambda: clock[0])
+
+    # The job is still in the controlled executor queue. Even though its enqueue
+    # timestamp is older than the full running budget, polling must not reclaim it.
+    router_module.sessions.schedule_evidence_snapshot(TestSession, session_uuid)
+    assert len(controlled.jobs) == 1
+    with TestSession() as db:
+        check = db.get(EvidenceReadinessCheck, check_id)
+        assert check is not None
+        assert check.model_provider == "queued"
+        assert _lease_token(check.created_at) == queued_token
+
+    controlled.run_next()
+    assert started_tokens[-1] is not None
+    assert started_tokens[-1] != queued_token
+    with TestSession() as db:
+        check = db.get(EvidenceReadinessCheck, check_id)
+        assert check is not None
+        running_at = check.created_at
+        assert check.model_provider == "pending"
+        assert _lease_token(running_at) == started_tokens[-1]
+
+    clock[0] = running_at + timedelta(seconds=runtime_lease - 1)
+    router_module.sessions.schedule_evidence_snapshot(TestSession, session_uuid)
+    assert len(controlled.jobs) == 0
+
+    clock[0] = running_at + timedelta(seconds=runtime_lease + 1)
+    router_module.sessions.schedule_evidence_snapshot(TestSession, session_uuid)
+    assert len(controlled.jobs) == 1
+    controlled.run_next()
+    assert started_tokens[-1] is not None
 
 
 def test_v620_cached_snapshot_finalizes_after_global_mode_switch(
