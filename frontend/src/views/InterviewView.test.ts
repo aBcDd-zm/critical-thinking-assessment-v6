@@ -50,6 +50,13 @@ const readyReadiness = {
   minimum_turns_required: 8,
   minimum_turns_met: true,
 };
+const failedReadiness = {
+  status: "failed" as const,
+  ready: null,
+  cached: false,
+  check_id: 9,
+  transcript_fingerprint: transcriptFingerprint,
+};
 
 describe("InterviewView", () => {
   afterEach(() => {
@@ -396,6 +403,68 @@ describe("InterviewView", () => {
     expect(wrapper.find("button.send-button").exists()).toBe(true);
     wrapper.unmount();
     vi.useRealTimers();
+  });
+
+  it("keeps a passive evidence failure silent after a submitted answer", async () => {
+    const updatedSession = {
+      uuid: "session-v6",
+      phase: "interviewing" as const,
+      user_answer_count: 1,
+      turns: [
+        openingTurn,
+        { id: 2, turn_index: 1, role: "user" as const, content: validAnswer, input_mode: "text" as const },
+      ],
+    };
+    mocks.getSession
+      .mockResolvedValueOnce({ uuid: "session-v6", phase: "interviewing", user_answer_count: 0, turns: [openingTurn] })
+      .mockResolvedValueOnce(updatedSession);
+    mocks.submitTurnStream.mockResolvedValueOnce(undefined);
+    mocks.checkReportReadiness.mockResolvedValueOnce(failedReadiness);
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue(validAnswer);
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(mocks.checkReportReadiness).toHaveBeenCalledWith("session-v6");
+    expect(wrapper.text()).not.toContain("当前证据结果暂未整理完成");
+    expect(wrapper.find(".notice-banner").exists()).toBe(false);
+    expect(wrapper.find("textarea").exists()).toBe(true);
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+  });
+
+  it("retains a passive failure so an explicit report request retries it", async () => {
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 1,
+      turns: [openingTurn, { id: 2, turn_index: 1, role: "user", content: validAnswer }],
+    });
+    mocks.checkReportReadiness
+      .mockResolvedValueOnce(failedReadiness)
+      .mockResolvedValueOnce(insufficientReadiness);
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("当前证据结果暂未整理完成");
+    expect(wrapper.find(".notice-banner").exists()).toBe(false);
+    await wrapper.get("button.compact-action").trigger("click");
+    await flushPromises();
+
+    expect(mocks.checkReportReadiness).toHaveBeenNthCalledWith(1, "session-v6");
+    expect(mocks.checkReportReadiness).toHaveBeenNthCalledWith(2, "session-v6", true);
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6", {
+      evidence_check_id: 7,
+      expected_transcript_fingerprint: transcriptFingerprint,
+      allow_incomplete: true,
+    });
   });
 
   it("keeps the legacy automatic report path for older prompt versions that already froze the session", async () => {

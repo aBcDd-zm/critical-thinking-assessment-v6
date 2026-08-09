@@ -315,9 +315,8 @@ async function refreshEvidenceReadiness(generation = readinessPollGeneration) {
     const result = await checkReportReadiness(uuid.value);
     if (generation !== readinessPollGeneration || !isInterviewing.value) return;
     evidenceReadiness.value = result;
-    if (result.status === "failed") {
-      notice.value = "当前证据结果暂未整理完成，可以继续回答或稍后重试。";
-    }
+    // Keep passive failures available for an explicit report retry without
+    // exposing background evidence processing during the interview.
   } catch {
     if (generation === readinessPollGeneration && isInterviewing.value) {
       evidenceReadiness.value = null;
