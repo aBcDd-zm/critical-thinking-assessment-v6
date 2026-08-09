@@ -12,7 +12,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -77,6 +77,130 @@ EVIDENCE_GATE_CONTINUATION_MESSAGE = (
 USER_FINISH_INTENT_MESSAGE = (
     "好的。如果你想现在提交，可以点击“结束并生成报告”；"
     "证据有限的部分会如实说明。"
+)
+AMBIGUOUS_USER_FINISH_INTENT_MESSAGE = (
+    "我还不能确认你是否在要求结束本次访谈。如果想结束，可选择“结束并生成报告”"
+    "或页面上方的“退出不生成报告”。"
+    "若继续，刚才这件事里还有哪条重要依据、权衡或变化没有说清？"
+)
+_FINISH_INTENT_TRADITIONAL_TRANSLATION = str.maketrans(
+    {
+        "訪": "访",
+        "談": "谈",
+        "對": "对",
+        "話": "话",
+        "這": "这",
+        "請": "请",
+        "繼": "继",
+        "續": "续",
+        "問": "问",
+        "報": "报",
+        "產": "产",
+        "現": "现",
+        "裡": "里",
+        "願": "愿",
+        "說": "说",
+        "幫": "帮",
+    }
+)
+_EXPLICIT_USER_FINISH_INTENT_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        # Keep this deliberately conservative. The permanent end button remains
+        # available when a participant uses wording that is not matched here.
+        r"^(?:好的)?(?:我|本人)(?:现在|这次|本次|已经|就|真的|确实)*"
+        r"(?:想|要|希望|决定|准备|打算)(?:现在|立即|就)?"
+        r"(?:结束|停止)(?:这次|本次|当前)?(?:访谈|对话|问答)"
+        r"(?:了|吧|啦)?(?:请?(?:就)?停在这里|谢谢|多谢)?$",
+        r"^(?:(?:请|麻烦)(?:帮我)?(?:现在|立即|就)?)?(?:结束|停止|退出)"
+        r"(?:这次|本次|当前)?(?:访谈|对话|问答)(?:吧|谢谢|多谢)?$",
+        r"^(?:我)?(?:已经|都)?(?:说完|回答完)(?:了)?(?:请|麻烦)(?:帮我)?"
+        r"(?:结束|停止)(?:这次|本次|当前)?(?:访谈|对话|问答)(?:吧)?$",
+        r"^(?:我|本人)(?:现在|已经|真的|确实|有点累了|累了|有事了)*"
+        r"(?:不想|不愿意|不愿|不准备|不打算)(?:再|继续)"
+        r"(?:回答|参与|进行|聊|说)(?:这次|本次|当前)?"
+        r"(?:访谈|对话|问答)?(?:了|啦|吧)?$",
+        r"^(?:我|本人)(?:现在|已经)?(?:不想|不愿意|不愿|不准备|不打算)"
+        r"(?:再|继续)(?:了|啦|吧)$",
+        r"^(?:我|本人)(?:现在|已经|真的|确实|有点累了|累了|有事了)*"
+        r"(?:不想|不愿意|不愿|不准备|不打算)"
+        r"(?:(?:参与|进行)(?:这次|本次|当前)?(?:访谈|对话|问答)|"
+        r"(?:回答|答|聊|说)(?:了|啦|吧))$",
+        r"^(?:(?:请|麻烦)(?:你)?|我(?:希望|想让)你)?(?:别|不要|不用)"
+        r"(?:再|继续)?(?:问|提问|追问)(?:我)?(?:了|啦|吧)?$",
+        r"^(?:请|麻烦)(?:你)?(?:停止|结束)(?:向我)?(?:提问|追问)(?:吧)?$",
+        r"^(?:我|本人)?(?:现在|已经|真的|就)*(?:想|要|希望|决定|准备|打算)?"
+        r"退出(?:这次|本次|当前)?(?:访谈|对话|问答)?(?:了|吧|啦)?$",
+        r"^(?:我|本人)(?:现在|真的)?(?:想|要|希望)停(?:了|下|下来)?$",
+        r"^(?:我)?(?:不聊|不说|不答|不回答|不继续)(?:了|啦|吧)$",
+        r"^(?:这次|本次|当前)(?:访谈|对话|问答)(?:就)?到这里(?:吧|了)?$",
+        r"^(?:(?:我|本人)(?:现在|这次|本次)?(?:想|要|希望|决定|准备|打算)|"
+        r"(?:请|麻烦)(?:帮我)?(?:现在|立即|就)?)"
+        r"(?:结束(?:这次|本次|当前)?(?:访谈|对话|问答)(?:并|然后)?)?"
+        r"(?:生成|产生|输出|提交)(?:这次|本次|当前)?报告"
+        r"(?:吧|谢谢|多谢)?$",
+        r"^(?:i(?:want|wouldlike|dlike|need|havedecided)to|please)"
+        r"(?:end|stop)(?:this|the)?(?:interview|conversation|assessment)(?:now)?$",
+        r"^i(?:do(?:not|nt)|dont)wanttocontinue"
+        r"(?:answering|thisinterview|theinterview|thisconversation|theconversation)?$",
+        r"^i(?:want|need)to(?:leave|quit)(?:this|the)?"
+        r"(?:interview|conversation|assessment)?$",
+        r"^please(?:stop|quit)(?:asking|theinterview|thisinterview)?$",
+        r"^(?:stop|quit)$",
+        r"^(?:i(?:want|wouldlike|dlike|need)to|please)"
+        r"(?:generate|create|produce|submit)(?:my|the)?report$",
+    )
+)
+_CLEAR_NON_FINISH_INTENT_MARKERS = (
+    "还有什么想问",
+    "继续问",
+    "接着问",
+    "请继续",
+    "想继续",
+    "要继续",
+    "希望继续",
+    "还想继续",
+    "还不准备结束",
+    "还不想结束",
+    "不是要结束",
+    "并非要结束",
+    "不想结束",
+    "不要结束",
+    "不提交",
+)
+_FINISH_INTENT_CUES = (
+    "结束",
+    "停止",
+    "退出",
+    "不聊",
+    "不说",
+    "不答",
+    "不想回答",
+    "不愿回答",
+    "不回答",
+    "不继续",
+    "别问",
+    "不要问",
+    "说完",
+    "到这里",
+    "到这儿",
+    "到此为止",
+    "够了",
+    "就这样",
+    "先这样",
+    "停一下",
+    "不想继续",
+    "不愿继续",
+    "要走了",
+    "先走了",
+    "生成报告",
+    "产生报告",
+    "输出报告",
+    "提交报告",
+    "end",
+    "stop",
+    "quit",
+    "report",
 )
 SAFETY_STOP_MESSAGE = (
     "你刚才提到的内容可能涉及当下的人身安全。此刻比继续访谈更重要的是先获得"
@@ -277,6 +401,97 @@ def normalized_text(value: str) -> str:
         for char in unicodedata.normalize("NFKC", value).casefold().translate(_TRANSLATION)
         if not char.isspace() and not unicodedata.category(char).startswith("P")
     )
+
+
+def classify_user_finish_request(
+    value: str,
+) -> Literal["confirmed", "not_intent", "ambiguous"]:
+    """Classify whether the participant directly asks to end this interview.
+
+    A model-provided ``user_requested`` label is not evidence by itself. This
+    intentionally narrow guard preserves hard stop requests, rejects clearly
+    unrelated or negated cases, and routes uncertain wording to a neutral choice.
+    """
+
+    raw = unicodedata.normalize("NFKC", value).strip().casefold()
+    normalized = normalized_text(value).translate(
+        _FINISH_INTENT_TRADITIONAL_TRANSLATION
+    )
+    if not normalized:
+        return "ambiguous"
+    quote_pairs = (
+        ("“", "”"),
+        ('"', '"'),
+        ("‘", "’"),
+        ("'", "'"),
+        ("「", "」"),
+        ("『", "』"),
+    )
+    if any(
+        raw.startswith(left) and raw.endswith(right)
+        for left, right in quote_pairs
+    ):
+        return "ambiguous"
+    if re.search(
+        r"(?:如果|假如|要是|假设).{0,24}"
+        r"(?:结束|停止|退出|生成报告|提交报告)",
+        normalized,
+    ):
+        return "ambiguous"
+    if re.search(
+        r"(?:朋友|同学|别人|他|她).{0,16}(?:说|问|要求).{0,16}"
+        r"(?:结束|停止|退出|报告)",
+        normalized,
+    ):
+        return "ambiguous"
+    has_question_form = any(marker in raw for marker in ("?", "？"))
+    if not has_question_form and any(
+        pattern.fullmatch(normalized)
+        for pattern in _EXPLICIT_USER_FINISH_INTENT_PATTERNS
+    ):
+        return "confirmed"
+    # Longer mixed sentences can contain a real interview-level stop request
+    # plus another clause. Keep those uncertain instead of letting a nearby
+    # topic/report negation override the participant's boundary.
+    if re.search(
+        r"(?:(?:我|本人).{0,8}(?:想|要|希望|决定|准备|打算)|"
+        r"(?:请|麻烦)(?:帮我)?).{0,8}(?:结束|停止|退出).{0,8}"
+        r"(?:访谈|对话|问答)",
+        normalized,
+    ):
+        return "ambiguous"
+    if re.search(
+        r"(?:(?:我|本人).{0,8}(?:想|要|希望|决定|准备|打算)|"
+        r"(?:请|麻烦)(?:帮我)?).{0,8}(?:生成|产生|输出|提交)报告",
+        normalized,
+    ):
+        return "ambiguous"
+    single_question_refusal = "这个问题" in normalized and any(
+        marker in normalized for marker in ("不想回答", "不回答", "换一个")
+    )
+    if single_question_refusal:
+        return "not_intent"
+    if re.search(
+        r"(?:不想|不愿|不要|不打算|不准备|无法|不能)(?:再)?继续",
+        normalized,
+    ):
+        return "ambiguous"
+    if any(marker in normalized for marker in _CLEAR_NON_FINISH_INTENT_MARKERS):
+        return "not_intent"
+    if re.search(
+        r"(?:项目|事情|方案|会议|任务|关系|课程|工作).{0,10}(?:结束|停止|提交)",
+        normalized,
+    ):
+        return "not_intent"
+    if has_question_form:
+        return "ambiguous"
+    if any(marker in normalized for marker in _FINISH_INTENT_CUES):
+        return "ambiguous"
+    return "not_intent"
+
+
+def is_explicit_user_finish_request(value: str) -> bool:
+    return classify_user_finish_request(value) == "confirmed"
 
 
 def is_immediate_high_risk(value: str) -> bool:
@@ -847,6 +1062,26 @@ class InterviewOrchestrator:
                     ],
                 )
             if result.finish_reason == "user_requested":
+                finish_intent = classify_user_finish_request(user_turn.content)
+                if finish_intent != "confirmed":
+                    return replace(
+                        result,
+                        content=(
+                            AMBIGUOUS_USER_FINISH_INTENT_MESSAGE
+                            if finish_intent == "ambiguous"
+                            else EVIDENCE_GATE_CONTINUATION_MESSAGE
+                        ),
+                        session_action="continue",
+                        finish_reason=None,
+                        quality_flags=[
+                            *result.quality_flags,
+                            (
+                                "ambiguous_user_finish_intent_requires_confirmation"
+                                if finish_intent == "ambiguous"
+                                else "unconfirmed_user_finish_intent_suppressed"
+                            ),
+                        ],
+                    )
                 return replace(
                     result,
                     content=USER_FINISH_INTENT_MESSAGE,
