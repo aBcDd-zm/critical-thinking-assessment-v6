@@ -1,10 +1,11 @@
 # 思衡 V6 Prompt 交接
 
 新会话默认版本：`natural_interviewer_v6.2.1`、`natural_evidence_attribution_v6.2.1`、`natural_attributed_evidence_v6.2.2`（`enforce`）
+显式候选访谈版本：`natural_interviewer_v6.2.3`（仍必须配合 `enforce`，未通过人工验收前不改默认）
 可回滚访谈版本：`natural_interviewer_v6.2.0`、`natural_interviewer_v6.1.1`、`natural_interviewer_v6.0.5`、`natural_interviewer_v6.0.4`、`natural_interviewer_v6.0.3`
 旧/对照增量整理器：`natural_incremental_evidence_v6.2.1`
 旧冻结会话兼容评分器：`natural_final_scorer_v6.1.0`
-适用分支：`system/v621-evidence-attribution`（叠加 base：`system/v612-consistent-closure@7a44abf`）
+交付目标基线：`system/v6-natural-interview-demo`；v6.2.3 在独立候选分支中验证，未经人工验收不改生产默认。
 
 ## 设计意图
 
@@ -16,7 +17,7 @@ V6 不是把 V5 的控制器放宽一点。它明确取消“服务端告诉访�
 
 每轮运行时 payload 只提供：最小化的参与者资料与完整有序逐字稿。六维定义、JSON Schema 和模型配置只存在于版本化服务端系统合同中；不把会话 ID/状态、缺失维度、覆盖、候选题目或下一步目标注入模型。用户文本一律是不可信数据，不能改变系统合同。
 
-V6.2.0 及更早访谈官只返回原合同。V6.2.1 在不改变可见文案的前提下增加私有审计 navigation：
+V6.2.0 及更早访谈官只返回原合同。V6.2.1 增加私有审计 navigation；v6.2.3 完整沿用同一 navigation 与来源归属合同，只细化参与者可见的承接方式：
 
 ```json
 {
@@ -43,14 +44,14 @@ V6.2.0 及更早访谈官只返回原合同。V6.2.1 在不改变可见文案的
 
 ### 版本选择与回滚
 
-运行时只允许选择已登记的 `v6.0.3|v6.0.4|v6.0.5|v6.1.1|v6.2.0|v6.2.1`：
+运行时只允许选择已登记的 `v6.0.3|v6.0.4|v6.0.5|v6.1.1|v6.2.0|v6.2.1|v6.2.3`：
 
 ```text
 NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1
 EVIDENCE_ATTRIBUTION_MODE=enforce
 ```
 
-代码默认、开发示例和生产样例统一使用 `v6.2.1 + enforce`。生产启动只允许 `v6.2.1 + enforce`，或经单独评审的“旧 Prompt + disabled”回滚组合，并且所有生产组合都必须保持 `EVIDENCE_OBSERVER_ENABLED=true`，避免运维显示 enforce 而实际仍走旧评分，也避免关闭后台任务后新旧会话都无法生成 readiness。每个会话使用 `natural_opening` trace 同时绑定开场版本与 attribution mode；因此发布切换不会把已建 shadow/disabled 会话中途改成 enforce。发生系统性回归时，仍可经单独评审改回 `v6.2.0 + disabled`或更早保留版本并重启；该回滚也只影响之后新建会话。旧 Prompt 文本保持完整。每个 trace 仍记录实际使用的
+代码默认、开发示例和生产样例统一使用 `v6.2.1 + enforce`。`v6.2.3 + enforce` 是候选组合，只能经显式配置启用；合并候选代码本身不会改变生产默认。生产启动只允许 `v6.2.1|v6.2.3 + enforce`，或经单独评审的“旧 Prompt + disabled”回滚组合，并且所有生产组合都必须保持 `EVIDENCE_OBSERVER_ENABLED=true`。每个会话使用 `natural_opening` trace 同时绑定开场版本与 attribution mode；因此发布切换不会把已建会话中途换版。发生系统性回归时，仍可经单独评审改回 `v6.2.1 + enforce`、`v6.2.0 + disabled`或更早保留版本并重启；该切换只影响之后新建会话。旧 Prompt 文本保持完整。每个 trace 仍记录实际使用的
 `prompt_template_id` 与 `prompt_version`，不得将不同版本的数据当作同一干预条件。
 
 访谈调用使用 `thinking=disabled`、`max_tokens=512`、首次 30 秒且全链路 80 秒封顶。归属器和 span 评分器各自使用独立的 `thinking=disabled`、`max_tokens=2000` 后台配置；旧 shadow 会话还会依其开场绑定执行对照增量整理器。这些任务不阻塞访谈回复。主动收束还必须满足至少 8 个已保存用户回答；这是服务端确定性门槛，不注入访谈官。冻结时只提升同一 readiness 结果，报告阶段模型调用为零。
@@ -63,6 +64,7 @@ EVIDENCE_ATTRIBUTION_MODE=enforce
 - `v6.1.1`：`7bc38dc4853a850ac8870927e3a5b8a7e140a061ac9630dd19702373aa57efe5`
 - `v6.2.0`：`40de5708ff67e05772b408a77f38c5edce67ceb352d660f777044e793954adca`
 - `v6.2.1`：`a2782644f1701c6eefb057e391a062d94791d08805b8a6dd784a9b359e4f7c83`
+- `v6.2.3`：`e61110850329702aee18c7fde7528ff0489dcbe36409e0ab75ecdf2d954cbd1e`
 - `natural_evidence_attribution_v6.2.1`：`0a6d49a63cdcceed7792ebca1ae9ce2097adfd23f775113facb71b5ae201e113`
 - `natural_attributed_evidence_v6.2.2`：`09863931f0721c464493a43fde45b724044d5e32bc6d97dd0dda6db909c554f4`
 
@@ -71,6 +73,10 @@ EVIDENCE_ATTRIBUTION_MODE=enforce
 ### `natural_interviewer_v6.2.1`
 
 完整继承 v6.2.0 的自然事件、单问题和证据驱动结束边界，只增加不可见的决策主线审计。服务端在载荷中提供精确 `anchor_candidates` 和权威计算的 `source_clarification_required`；旗标不得缺失或篡改。模型只能原样复制一个候选的 `turn_index/quote/start/end`，`text_hash` 必须为 null，不再自行计算 Unicode 偏移。旗标为 true 时，访谈官必须用一个非二选一的开放问题中性澄清“哪些是外部材料、哪些是自己的判断、采纳了什么及为什么”，并返回 `focus_kind=source_ownership` 与 `mainline_relation=source_clarification`。缺 navigation、错 anchor、多问号、二选一或缺少内外来源两侧任一信号，都在 typed-call 的结构修复循环内失败并最多修复一次，不等到编排层才出错。澄清后回到最终选择、关键依据、实际行动、结果或调整。支线不机械限一轮，但下一问必须能增加对核心决策的理解。
+
+### `natural_interviewer_v6.2.3`
+
+该候选完整以 v6.2.1 为前缀，不修改旧 Prompt 文本。对方明确说出痛苦、哭泣、失落、害怕、不安、受伤或被背叛等脆弱经历时，先使用一句有其原话依据、克制而不套话的承接；尚无可定位真实事件时，以“如果你愿意”类选择权邀请帮助其从最近一次具体经历说起，不替用户设定事件、情绪或关系真相。正常 `continue` 必须恰好有一个明确问题；整句纠正、单题拒答或边界、没听懂、暂停可以 `continue` 且无新问题，而明确结束本次访谈、停止回答或生成报告的直接请求必须返回 `finish/user_requested`。来源澄清优先，不叠加情绪探查或第二个问题。服务端对正常单问题、明确结束、navigation、anchor 和来源澄清使用同一 typed-call 修复边界；评分、readiness、安全、40 次上限和报告合同均不变。
 
 ### `natural_evidence_attribution_v6.2.1`
 

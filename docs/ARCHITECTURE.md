@@ -6,7 +6,7 @@
 flowchart LR
     U["用户 / 可编辑文本输入"] --> C["知情同意与会话 API"]
     C --> S["V6 会话编排\n状态、幂等、安全、审计"]
-    S --> I["natural_interviewer_v6.2.1\n完整逐字稿 → 自然回应 + 私有主线审计"]
+    S --> I["natural_interviewer_v6.2.1 / v6.2.3\n完整逐字稿 → 自然回应 + 私有主线审计"]
     I --> S
     S --> D[("Session / Turns / Traces\nPrompt and model versions")]
     S -. "回复完成后异步" .-> O["EvidenceAttributionAgent\n精确 user spans"]
@@ -25,17 +25,17 @@ flowchart LR
 
 - 用户只看到“澄澄”、当前已完成的问答轮数和必要的输入提示，不接触六维、评分或后台审计字段；轮数不表示阶段、配额或上限。
 - 访谈期模型读完整逐字稿，只返回用户实际可见的自然回应及 `continue|finish`。它不接收目标维度、缺失维度、候选问题、coverage、阶段命令、每维预算或固定轮次。
-- 代码默认、开发示例与生产样例统一为 `NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1` 和 `EVIDENCE_ATTRIBUTION_MODE=enforce`；`v6.2.0` 及更早版本仍保留供显式回滚。每个会话按 `natural_opening` trace 绑定 Prompt 和归属模式，配置切换只影响新会话。
+- 代码默认、开发示例与生产样例统一为 `NATURAL_INTERVIEWER_PROMPT_VERSION=v6.2.1` 和 `EVIDENCE_ATTRIBUTION_MODE=enforce`；`v6.2.3 + enforce` 是显式语气候选，合并代码不会自动激活。每个会话按 `natural_opening` trace 绑定 Prompt 和归属模式，配置切换只影响新会话。
 - 访谈调用关闭思考模式，使用 512 tokens、首次 30 秒且全链路 80 秒封顶。归属与 span 评分分别使用独立的后台证据配置；它们在访谈回复持久化后启动，不占用回复或输入框等待链路。
-- 访谈官不读取证据覆盖，也不决定是否可以结束。V6.2.1 的内部 navigation 只引用真实 user span，记录决策锚点、当前焦点和 `core|branch|return|source_clarification|user_switch`，不携带维度或题库。
+- 访谈官不读取证据覆盖，也不决定是否可以结束。V6.2.1 与 v6.2.3 的内部 navigation 只引用真实 user span，记录决策锚点、当前焦点和 `core|branch|return|source_clarification|user_switch`，不携带维度或题库。
 - 服务端不相信归属器自报的评分资格：先验证 user role、偏移、精确切片、非重叠与 SHA-256，再按 owner/relation 计算资格。评分器看不到 context-only/uncertain span，只能引用同一检查中的 eligible ID。
 
 ## 发布模式与会话合同
 
-- 当前新会话发布合同为 `v6.2.1 + enforce`；生产启动只接受这一组合或“旧 Prompt + disabled”的显式回滚组合，并且两者都必须开启证据观察器。以下 `disabled|shadow` 路径只用于已绑定历史会话、显式回滚或审计对照，不得中途改写其开场合同。
+- 当前默认新会话发布合同为 `v6.2.1 + enforce`；`v6.2.3 + enforce` 只在明确激活后用于新会话。两个归属感知版本都必须开启证据观察器与 enforce；旧 Prompt 回滚仍使用 disabled。以下 `disabled|shadow` 路径只用于已绑定历史会话、显式回滚或审计对照，不得中途改写其开场合同。
 - `disabled`：保持 V6.2.0 的原始增量评分链，供旧合同与快速回滚。
 - `shadow`：另存归属 span 和 span-ID 评分对照，但参与者 readiness、报告与旧链完全一致；任何 shadow 失败都必须留下 trace，不能伪装成 enforce 成功。
-- `enforce`：只对开场 trace 已同时绑定 `v6.2.1 + enforce` 的新会话启用归属硬门。开场 trace 也冻结 attribution mode，因此 shadow 期间已创建的会话不会在部署切换后中途变成 enforce。归属、格式、指纹或 span 引用任一失败时该快照失败，不调用或回退原始整段评分；旧绑定会话继续旧链。
+- `enforce`：只对开场 trace 已同时绑定 `v6.2.1|v6.2.3 + enforce` 的新会话启用归属硬门。开场 trace 也冻结 attribution mode，因此配置切换不会让任一已创建会话中途换 Prompt 或归属模式。归属、格式、指纹或 span 引用任一失败时该快照失败，不调用或回退原始整段评分；旧绑定会话继续旧链。
 
 资产指纹包含归属 Prompt、紧凑 candidate-ID 分类 schema、服务端 span 候选规则、资格规则、span 评分 Prompt、模型配置、Rubric 与最低轮次规则。任务只能写入自己的逐字稿/资产行；陈旧或乱序结果不能覆盖当前快照。
 

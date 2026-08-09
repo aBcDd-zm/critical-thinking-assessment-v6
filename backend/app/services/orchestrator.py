@@ -63,6 +63,12 @@ from app.services.model_gateway import (
 FINALIZING_MESSAGE = "这段访谈已被冻结，正在仅依据你的原话整理报告。"
 SUGGEST_FINISH_ACTION = "suggest_finish"
 MODEL_NATURAL_CLOSE_REASONS = frozenset({"enough_understanding", "natural_closure"})
+ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS = frozenset(
+    {"v6.2.1", "v6.2.3"}
+)
+EVIDENCE_GATED_INTERVIEWER_PROMPT_VERSIONS = frozenset(
+    {"v6.2.0", *ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS}
+)
 CLOSURE_CONFIRMATION_CONSENT_VERSIONS = frozenset(
     {"v6-natural-interview-guidance-2026-08"}
 )
@@ -940,10 +946,16 @@ def _validated_navigation(
         if item.get("role") == "user"
     }
     if not user_turns:
-        if prompt_version == "v6.2.1" and navigation is not None:
+        if (
+            prompt_version in ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS
+            and navigation is not None
+        ):
             raise InterviewContractError("opening_navigation_must_be_null")
         return None
-    if prompt_version == "v6.2.1" and navigation is None:
+    if (
+        prompt_version in ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS
+        and navigation is None
+    ):
         raise InterviewContractError("v621_navigation_required")
     if navigation is None:
         return None
@@ -955,7 +967,7 @@ def _validated_navigation(
         raise InterviewContractError("navigation_anchor_offsets_out_of_bounds")
     if source[anchor.start:anchor.end] != anchor.quote:
         raise InterviewContractError("navigation_anchor_offsets_do_not_match_quote")
-    if prompt_version == "v6.2.1":
+    if prompt_version in ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS:
         candidates = build_interview_anchor_candidates(transcript)
         anchor_key = (anchor.turn_index, anchor.start, anchor.end, anchor.quote)
         candidate_keys = {
@@ -1067,7 +1079,7 @@ class InterviewOrchestrator:
             },
             "transcript": _transcript_rows(session),
         }
-        if prompt_version == "v6.2.1":
+        if prompt_version in ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS:
             payload["anchor_candidates"] = build_interview_anchor_candidates(
                 payload["transcript"]
             )
@@ -1085,7 +1097,10 @@ class InterviewOrchestrator:
             prompt_version=prompt_version,
             transcript=payload["transcript"],
         )
-        if result.prompt_version in {"v6.2.0", "v6.2.1"} and result.session_action == "finish":
+        if (
+            result.prompt_version in EVIDENCE_GATED_INTERVIEWER_PROMPT_VERSIONS
+            and result.session_action == "finish"
+        ):
             if result.finish_reason in MODEL_NATURAL_CLOSE_REASONS:
                 return replace(
                     result,
