@@ -1308,6 +1308,86 @@ def test_public_pdf_score_label_uses_a_hundred_point_presentation() -> None:
     ) == ("70 分", 2)
 
 
+@pytest.mark.parametrize("status", ["limited", "unmeasured"])
+def test_public_pdf_explains_limited_evidence_without_linking_it_to_pay(
+    monkeypatch, status: str
+) -> None:
+    built_stories: list[list[object]] = []
+
+    class CapturingDocument:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def build(self, story: list[object]) -> None:
+            built_stories.append(story)
+
+    monkeypatch.setattr(api_router, "SimpleDocTemplate", CapturingDocument)
+    api_router._report_pdf_bytes(
+        {
+            "summary": "本次报告摘要。",
+            "dimensions": [
+                {
+                    "dimension_key": "problem_definition",
+                    "dimension_name": "问题界定",
+                    "status": status,
+                    "score": None,
+                    "reason": "尚缺少可核验的原话。",
+                    "evidences": [],
+                }
+            ],
+        }
+    )
+
+    rendered_text = "\n".join(
+        element.getPlainText()
+        for element in built_stories[0]
+        if hasattr(element, "getPlainText")
+    )
+    assert "关于“证据有限”" in rendered_text
+    assert "不等于低分、能力不足或回答质量不高" in rendered_text
+    assert "不会按 0 分计入综合总分" in rendered_text
+    assert "不会单独决定是否付酬" in rendered_text
+    assert "报酬仍按活动参与规则核对" in rendered_text
+
+
+def test_public_pdf_omits_limited_evidence_notice_when_all_dimensions_are_scored(
+    monkeypatch,
+) -> None:
+    built_stories: list[list[object]] = []
+
+    class CapturingDocument:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def build(self, story: list[object]) -> None:
+            built_stories.append(story)
+
+    monkeypatch.setattr(api_router, "SimpleDocTemplate", CapturingDocument)
+    api_router._report_pdf_bytes(
+        {
+            "summary": "本次报告摘要。",
+            "dimensions": [
+                {
+                    "dimension_key": "problem_definition",
+                    "dimension_name": "问题界定",
+                    "status": "sufficient",
+                    "score": 4,
+                    "reason": "已有可核验的原话。",
+                    "evidences": [],
+                }
+            ],
+        }
+    )
+
+    rendered_text = "\n".join(
+        element.getPlainText()
+        for element in built_stories[0]
+        if hasattr(element, "getPlainText")
+    )
+    assert "关于“证据有限”" not in rendered_text
+    assert "不会单独决定是否付酬" not in rendered_text
+
+
 def test_short_or_self_evaluative_dialogue_leaves_dimensions_unmeasured(client) -> None:
     session_uuid = create_session(client)
     self_label = "我觉得自己很擅长证据评估和决策能力，而且逻辑一直很好很理性。"
@@ -2310,7 +2390,7 @@ def test_empty_model_response_has_a_distinct_recoverable_message_and_trace_stats
     assert failed_trace["output_contract"]["error_code"] == "model_empty_response"
 
 
-def test_fortieth_saved_turn_can_recover_with_the_same_id_after_model_failure(
+def test_fortieth_answer_returns_acknowledgement_without_model_call(
     client, monkeypatch
 ) -> None:
     session_uuid = create_session(client)
@@ -2326,26 +2406,139 @@ def test_fortieth_saved_turn_can_recover_with_the_same_id_after_model_failure(
         db.close()
 
     gateway = api_router.sessions.orchestrator.gateway
-    original = gateway.generate_interviewer
-    calls = {"count": 0}
+    model_calls = 0
 
-    def fail_once(payload, *, prompt_version=None):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            raise ModelGatewayError("test_fortieth_turn_failure")
-        return original(payload, prompt_version=prompt_version)
+    def must_not_call_interviewer(_payload, **_kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        raise AssertionError("the fortieth answer must not call the interviewer")
 
-    monkeypatch.setattr(gateway, "generate_interviewer", fail_once)
-    failed = send(client, session_uuid, "我还需要一点时间，也想继续把目前犹豫的原因整理得更清楚。", "client-turn-fortieth")
+    monkeypatch.setattr(gateway, "generate_interviewer", must_not_call_interviewer)
+    answer = "我还需要一点时间，也想继续把目前犹豫的原因整理得更清楚。"
+    response = send(client, session_uuid, answer, "client-turn-fortieth")
+    assert response.status_code == 200
+    events = parse_events(response)
+    assert [event["event"] for event in events] == [
+        "user_turn_saved",
+        "agent_started",
+        "agent_delta",
+        "agent_completed",
+    ]
+    completed = events[-1]["data"]
+    acknowledgement = completed["turn"]["content"]
+    assert completed["session_action"] == "continue"
+    assert completed["finish_reason"] is None
+    assert completed["session"]["phase"] == "interviewing"
+    assert completed["session"]["technical_turn_cap_reached"] is True
+    assert completed["turn"]["quality_flags"] == [
+        "technical_turn_cap_acknowledged"
+    ]
+    assert "谢谢你认真完成了本次访谈的 40 次回答" in acknowledgement
+    assert "不再继续提问" in acknowledgement
+    assert "不代表你的回答不充分、质量不高或能力不足" in acknowledgement
+    assert "?" not in acknowledgement
+    assert "？" not in acknowledgement
+    assert model_calls == 0
+
+    snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
+    assert snapshot["user_answer_count"] == 40
+    assert [turn["role"] for turn in snapshot["turns"]] == [
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+    db = __import__("tests.conftest", fromlist=["TestSession"]).TestSession()
+    try:
+        persisted_session = db.scalar(
+            select(AssessmentSession).where(AssessmentSession.uuid == session_uuid)
+        )
+        assert persisted_session
+        assert db.scalar(
+            select(func.count(EvidenceReadinessCheck.id)).where(
+                EvidenceReadinessCheck.session_id == persisted_session.id
+            )
+        ) == 1
+    finally:
+        db.close()
+
+    login_admin(client)
+    detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
+    cap_trace = next(
+        trace
+        for trace in detail["traces"]
+        if trace["action"] == "technical_turn_cap_acknowledgement"
+    )
+    assert cap_trace["model"] == "system/none"
+    assert cap_trace["prompt_template_id"] == "v6_technical_turn_cap"
+    assert cap_trace["latency_ms"] == 0
+    assert cap_trace["repair_used"] is False
+    assert cap_trace["output_contract"]["attempt_count"] == 0
+    assert cap_trace["output_contract"]["model_call_count"] == 0
+    assert cap_trace["output_contract"]["technical_turn_cap_reached"] is True
+
+    replay = send(client, session_uuid, answer, "client-turn-fortieth")
+    assert replay.status_code == 200
+    assert replay.text == response.text
+    assert model_calls == 0
+
+
+def test_failed_fortieth_submission_recovers_to_cap_acknowledgement(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    db = __import__("tests.conftest", fromlist=["TestSession"]).TestSession()
+    try:
+        session = db.scalar(
+            select(AssessmentSession).where(AssessmentSession.uuid == session_uuid)
+        )
+        assert session
+        session.user_answer_count = 39
+        db.commit()
+    finally:
+        db.close()
+
+    service = api_router.sessions
+    original_process = service.orchestrator.process
+    process_calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal process_calls
+        process_calls += 1
+        if process_calls == 1:
+            raise RuntimeError("test_fortieth_turn_processing_failure")
+        return original_process(*args, **kwargs)
+
+    def must_not_call_interviewer(_payload, **_kwargs):
+        raise AssertionError("cap recovery must not call the interviewer")
+
+    monkeypatch.setattr(service.orchestrator, "process", fail_once)
+    monkeypatch.setattr(
+        service.orchestrator.gateway,
+        "generate_interviewer",
+        must_not_call_interviewer,
+    )
+    answer = "我还需要一点时间，也想继续把目前犹豫的原因整理得更清楚。"
+    failed = send(client, session_uuid, answer, "client-turn-fortieth-recovery")
     assert failed.status_code == 200
     assert parse_events(failed)[-1]["event"] == "error"
-    assert client.get(f"/api/v1/sessions/{session_uuid}").json()["user_answer_count"] == 40
+    assert client.get(f"/api/v1/sessions/{session_uuid}").json()[
+        "user_answer_count"
+    ] == 40
 
-    replay = send(client, session_uuid, "我还需要一点时间，也想继续把目前犹豫的原因整理得更清楚。", "client-turn-fortieth")
+    replay = send(client, session_uuid, answer, "client-turn-fortieth-recovery")
     assert replay.status_code == 200
+    completed = parse_events(replay)[-1]["data"]
+    assert completed["turn"]["quality_flags"] == [
+        "technical_turn_cap_acknowledged"
+    ]
+    assert completed["session"]["phase"] == "interviewing"
+    assert process_calls == 2
+
     snapshot = client.get(f"/api/v1/sessions/{session_uuid}").json()
     assert snapshot["user_answer_count"] == 40
     assert sum(turn["role"] == "user" for turn in snapshot["turns"]) == 1
+    assert sum(turn["role"] == "assistant" for turn in snapshot["turns"]) == 2
 
 
 def test_persisted_assistant_turn_replays_after_event_rendering_interruption(
@@ -2386,6 +2579,46 @@ def test_safety_gate_stops_without_scoring(client) -> None:
     assert completed["turn"]["quality_flags"] == ["safety_stopped"]
     assert completed["finish_reason"] == "safety_stopped"
     assert client.post(f"/api/v1/sessions/{session_uuid}/finalize").status_code == 409
+
+
+def test_safety_gate_precedes_fortieth_answer_acknowledgement(
+    client, monkeypatch
+) -> None:
+    session_uuid = create_session(client)
+    db = __import__("tests.conftest", fromlist=["TestSession"]).TestSession()
+    try:
+        session = db.scalar(
+            select(AssessmentSession).where(AssessmentSession.uuid == session_uuid)
+        )
+        assert session
+        session.user_answer_count = 39
+        db.commit()
+    finally:
+        db.close()
+
+    def must_not_call_interviewer(_payload, **_kwargs):
+        raise AssertionError("the safety gate must not call the interviewer")
+
+    monkeypatch.setattr(
+        api_router.sessions.orchestrator.gateway,
+        "generate_interviewer",
+        must_not_call_interviewer,
+    )
+    response = send(
+        client,
+        session_uuid,
+        "我现在想自杀，已经准备吞药，而且我身边暂时没有可以求助的人。",
+        "client-turn-fortieth-safety",
+    )
+    assert response.status_code == 200
+    completed = parse_events(response)[-1]["data"]
+    assert completed["session"]["user_answer_count"] == 40
+    assert completed["session"]["phase"] == "safety_stopped"
+    assert completed["turn"]["quality_flags"] == ["safety_stopped"]
+    assert completed["finish_reason"] == "safety_stopped"
+    assert "technical_turn_cap_acknowledged" not in completed["turn"][
+        "quality_flags"
+    ]
 
 
 def test_harmful_interviewer_output_is_not_persisted_or_shown(client, monkeypatch) -> None:

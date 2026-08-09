@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ReportView from "./ReportView.vue";
 import { ApiError } from "@/api/http";
+import { DIMENSIONS } from "@/types/contracts";
 
 const mocks = vi.hoisted(() => ({
   getReport: vi.fn(),
@@ -53,6 +54,10 @@ describe("ReportView", () => {
     expect(wrapper.text()).toContain("证据充分");
     expect(wrapper.text()).toContain("证据有限");
     expect(wrapper.text()).toContain("未充分测得");
+    expect(wrapper.get(".report-evidence-note").text()).toContain("关于“证据有限”");
+    expect(wrapper.get(".report-evidence-note").text()).toContain("不等于低分、能力不足或回答质量不高");
+    expect(wrapper.get(".report-evidence-note").text()).toContain("不会按 0 分计入综合总分");
+    expect(wrapper.get(".report-evidence-note").text()).toContain("不会单独决定是否付酬");
     expect(wrapper.find(".coverage-number").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("置信度");
     expect(wrapper.text()).not.toContain("综合总分：");
@@ -66,6 +71,33 @@ describe("ReportView", () => {
     expect(wrapper.text()).not.toContain("第 15 次回答");
     expect(wrapper.text()).toContain("优势");
     expect(wrapper.text()).toContain("建议");
+  });
+
+  it("does not show the limited-evidence explanation when all six dimensions are sufficient", async () => {
+    mocks.getReport.mockResolvedValueOnce({
+      session_uuid: "session-v6",
+      summary: "六个维度均有可核对的原话证据。",
+      strengths: [],
+      priorities: [],
+      dimensions: DIMENSIONS.map((dimension) => ({
+        dimension_key: dimension.key,
+        dimension_name: dimension.name,
+        status: "sufficient",
+        score: 4,
+        reason: "有可核对的原话。",
+        suggestion: "继续保持。",
+        evidences: [],
+      })),
+      manual_review_recommended: false,
+      disclaimer: "仅供本次访谈参考。",
+    });
+
+    const wrapper = mount(ReportView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.find(".report-evidence-note").exists()).toBe(false);
   });
 
   it("retries while the final report is still being persisted", async () => {

@@ -8,7 +8,10 @@ type MockState = {
   answers: number;
   turns: Array<Record<string, unknown>>;
   payloads: Array<Record<string, unknown>>;
+  finalizePayloads: Array<Record<string, unknown>>;
   persistedClientIds: Set<string>;
+  technicalTurnCap: number | null;
+  forceInsufficientReadiness: boolean;
   closureSuggestion: null | {
     closure_turn_id: number;
     transcript_fingerprint: string;
@@ -17,6 +20,32 @@ type MockState = {
 };
 
 const INITIAL_QUESTION = "请想起最近一件真实、具体、需要认真权衡的事情：当时最难判断的是什么？";
+const CAP_THANK_YOU = "谢谢你认真完成了本次访谈的 40 次回答。为保障系统稳定，本次访谈已达到技术保护上限，我将不再继续提问。你已提交的内容均已保存；达到上限本身不代表你的回答不充分、质量不高或能力不足。很抱歉本次不能继续接收回答，感谢你的投入与理解。";
+
+function technicalCapTurns() {
+  const turns: Array<Record<string, unknown>> = [
+    { id: 1, turn_index: 0, role: "assistant", phase: "interviewing", content: INITIAL_QUESTION },
+  ];
+  for (let answer = 1; answer <= 40; answer += 1) {
+    turns.push({
+      id: turns.length + 1,
+      turn_index: turns.length,
+      role: "user",
+      phase: "interviewing",
+      content: `第${answer}次回答：我会核对信息、比较不同选择，并说明什么新反馈会改变我的判断。`,
+      client_turn_id: `cap-answer-${answer}`,
+      input_mode: "text",
+    });
+    turns.push({
+      id: turns.length + 1,
+      turn_index: turns.length,
+      role: "assistant",
+      phase: "interviewing",
+      content: answer === 40 ? CAP_THANK_YOU : `这是第 ${answer} 次回答后的追问。`,
+    });
+  }
+  return turns;
+}
 
 function transcriptFingerprint(state: MockState) {
   return String(Math.max(1, state.answers)).repeat(64).slice(0, 64);
@@ -32,6 +61,10 @@ function snapshot(state: MockState) {
     report_available: state.phase === "completed",
     manual_review_recommended: false,
     closure_suggestion: state.closureSuggestion,
+    ...(state.technicalTurnCap === null ? {} : {
+      technical_turn_cap: state.technicalTurnCap,
+      technical_turn_cap_reached: state.answers >= state.technicalTurnCap,
+    }),
   };
 }
 
@@ -46,9 +79,9 @@ function report() {
     dimensions: keys.map((dimension_key, index) => ({
       dimension_key,
       dimension_name: names[index],
-      status: index === 0 ? "sufficient" : "limited",
+      status: index === 0 ? "sufficient" : index === keys.length - 1 ? "unmeasured" : "limited",
       score: index === 0 ? 4 : null,
-      reason: index === 0 ? "有精确的用户原话。" : "证据有限。",
+      reason: index === 0 ? "有精确的用户原话。" : index === keys.length - 1 ? "未充分测得。" : "证据有限。",
       suggestion: "在相似情境中记录依据和改变条件。",
       evidences: index === 0 ? [{ quote: "我想先确认自己真正重视什么", source_type: "user", turn_index: 3 }] : [],
     })),
@@ -61,14 +94,20 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
-async function installMockBackend(page: Page) {
+async function installMockBackend(page: Page, options: { atTechnicalCap?: boolean } = {}) {
+  const atTechnicalCap = options.atTechnicalCap === true;
   const state: MockState = {
     phase: "interviewing",
-    answers: 0,
+    answers: atTechnicalCap ? 40 : 0,
     payloads: [],
+    finalizePayloads: [],
     persistedClientIds: new Set(),
+    technicalTurnCap: atTechnicalCap ? 40 : null,
+    forceInsufficientReadiness: atTechnicalCap,
     closureSuggestion: null,
-    turns: [{ id: 1, turn_index: 0, role: "assistant", phase: "interviewing", content: INITIAL_QUESTION }],
+    turns: atTechnicalCap
+      ? technicalCapTurns()
+      : [{ id: 1, turn_index: 0, role: "assistant", phase: "interviewing", content: INITIAL_QUESTION }],
   };
 
   await page.route("**/api/v1/**", async (route) => {
@@ -120,7 +159,7 @@ async function installMockBackend(page: Page) {
       return;
     }
     if (path === `/sessions/${UUID}/report-readiness` && request.method() === "POST") {
-      const ready = state.answers >= 8;
+      const ready = !state.forceInsufficientReadiness && state.answers >= 8;
       await fulfillJson(route, {
         status: ready ? "ready" : "insufficient",
         ready,
@@ -144,10 +183,11 @@ async function installMockBackend(page: Page) {
     }
     if (path === `/sessions/${UUID}/finalize` && request.method() === "POST") {
       const payload = request.postDataJSON() as Record<string, unknown>;
+      state.finalizePayloads.push(payload);
       if (
         payload.evidence_check_id !== state.answers
         || payload.expected_transcript_fingerprint !== transcriptFingerprint(state)
-        || payload.allow_incomplete !== false
+        || payload.allow_incomplete !== state.forceInsufficientReadiness
       ) {
         await fulfillJson(route, { detail: "snapshot mismatch" }, 409);
         return;
@@ -217,6 +257,48 @@ test("consent → natural conversation → evidence-ready snapshot → report", 
   expect(state.answers).toBe(8);
   expect(state.payloads).toHaveLength(8);
   expect(state.payloads.every((payload) => !JSON.stringify(payload).includes("coverage"))).toBe(true);
+});
+
+test("restored 40-answer session ends with thanks, explains the cap, and generates an incomplete report by confirmation", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("v6:tts-enabled", "false"));
+  const state = await installMockBackend(page, { atTechnicalCap: true });
+
+  await page.goto(`/assessment/session/${UUID}`);
+  await expect(page.getByText("已进行 40 轮问答", { exact: true })).toBeVisible();
+  await expect(page.getByText(CAP_THANK_YOU, { exact: true })).toBeVisible();
+  expect(state.turns.at(-1)?.content).toBe(CAP_THANK_YOU);
+
+  const capCard = page.locator(".technical-limit-card");
+  await expect(capCard).toBeVisible();
+  await expect(capCard).toContainText("达到 40 次回答的技术保护上限");
+  await expect(capCard).toContainText("不代表你的回答不充分、质量不高或能力不足");
+  await expect(capCard).toContainText("不会单独决定是否付酬");
+  await expect(page.getByLabel("你的回答")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "继续补充" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "根据已有回答生成报告" }).click();
+  const confirmation = page.getByRole("dialog", { name: "根据已有回答生成报告？" });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toContainText("尚未能从逐字稿中为所有观察角度找到足够、可核验的原话证据");
+  await expect(confirmation).toContainText("达到 40 次回答的技术保护上限");
+  await expect(confirmation).toContainText("“证据有限”不等于低分");
+  await expect(confirmation.getByRole("button", { name: "暂不生成" })).toBeFocused();
+
+  await confirmation.getByRole("button", { name: "仍然生成报告" }).click();
+  await expect(page).toHaveURL(new RegExp(`/assessment/report/${UUID}$`));
+  expect(state.finalizePayloads).toHaveLength(1);
+  expect(state.finalizePayloads[0]).toMatchObject({
+    evidence_check_id: 40,
+    expected_transcript_fingerprint: transcriptFingerprint(state),
+    allow_incomplete: true,
+  });
+
+  const evidenceNote = page.locator(".report-evidence-note");
+  await expect(evidenceNote).toBeVisible();
+  await expect(page.getByText("未充分测得", { exact: true })).toBeVisible();
+  await expect(evidenceNote).toContainText("关于“证据有限”");
+  await expect(evidenceNote).toContainText("不等于低分、能力不足或回答质量不高");
+  await expect(evidenceNote).toContainText("不会单独决定是否付酬");
 });
 
 test("mobile keeps the later 20-character requirement visible", async ({ page }) => {

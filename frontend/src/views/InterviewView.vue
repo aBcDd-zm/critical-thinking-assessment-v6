@@ -43,6 +43,9 @@ const voiceWasUsed = ref(false);
 const answerStartedAt = ref(Date.now());
 const transcriptEnd = ref<HTMLElement | null>(null);
 const answerInput = ref<HTMLTextAreaElement | null>(null);
+const technicalCapTrigger = ref<HTMLButtonElement | null>(null);
+const technicalCapCancelButton = ref<HTMLButtonElement | null>(null);
+const technicalCapConfirmButton = ref<HTMLButtonElement | null>(null);
 const voiceInputEnabled = import.meta.env.VITE_VOICE_INPUT_ENABLED === "true";
 const ttsEnabled = ref(localStorage.getItem("v6:tts-enabled") !== "false");
 const leaving = ref(false);
@@ -52,6 +55,9 @@ let savedWaitTimer: number | null = null;
 let extendedWaitTimer: number | null = null;
 let readinessPollTimer: number | null = null;
 let readinessPollGeneration = 0;
+const technicalCapConfirmationStatus = ref<"ready" | "insufficient" | null>(null);
+let technicalCapConfirmationResolver: ((confirmed: boolean) => void) | null = null;
+let technicalCapReturnFocus: HTMLElement | null = null;
 
 function clearInterviewWaitTimers() {
   if (savedWaitTimer !== null) window.clearTimeout(savedWaitTimer);
@@ -125,6 +131,7 @@ const technicalTurnCapReached = computed(() => (
     && savedAnswerCount.value >= session.value.technical_turn_cap
   )
 ));
+const technicalTurnCapCount = computed(() => session.value?.technical_turn_cap ?? 40);
 const isFirstAnswer = computed(() => savedAnswerCount.value === 0);
 const isUncertaintyAnswer = computed(() => isExplicitUncertaintyAnswer(draft.value));
 const meetsAnswerRequirement = computed(() => (
@@ -401,6 +408,45 @@ async function generateReport(
   }
 }
 
+function requestTechnicalCapConfirmation(status: "ready" | "insufficient"): Promise<boolean> {
+  if (technicalCapConfirmationResolver) technicalCapConfirmationResolver(false);
+  technicalCapReturnFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+    ? document.activeElement
+    : technicalCapTrigger.value;
+  technicalCapConfirmationStatus.value = status;
+  return new Promise((resolve) => {
+    technicalCapConfirmationResolver = resolve;
+    void nextTick(() => technicalCapCancelButton.value?.focus());
+  });
+}
+
+function closeTechnicalCapConfirmation(confirmed: boolean) {
+  const resolve = technicalCapConfirmationResolver;
+  technicalCapConfirmationResolver = null;
+  technicalCapConfirmationStatus.value = null;
+  if (confirmed) technicalCapReturnFocus = null;
+  resolve?.(confirmed);
+}
+
+function onTechnicalCapDialogKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeTechnicalCapConfirmation(false);
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const first = technicalCapCancelButton.value;
+  const last = technicalCapConfirmButton.value;
+  if (!first || !last) return;
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 async function confirmReportGeneration(): Promise<FinalizeSessionRequest | null> {
   checkingReadiness.value = true;
   error.value = "";
@@ -425,21 +471,24 @@ async function confirmReportGeneration(): Promise<FinalizeSessionRequest | null>
       allow_incomplete: false,
     };
     if (readiness.status === "ready" && readiness.ready === true) {
-      const shouldGenerate = window.confirm(
-        "按当前终评证据规则，现有回答已达到报告准备条件。现在结束访谈并生成报告吗？",
-      );
-      notice.value = shouldGenerate ? "" : "现有回答已达到报告准备条件，你可以继续说，也可以随时生成报告。";
-      return shouldGenerate ? baseRequest : null;
-    }
-    if (readiness.status === "insufficient" && readiness.ready === false) {
-      const message = technicalTurnCapReached.value
-        ? "按当前终评证据规则，现有回答可能还不足以支持完整报告。本次访谈已达到技术保护上限，你仍可根据已有回答生成报告，证据有限的部分会如实说明。是否仍然生成？"
-        : "现有回答尚不足以支持完整报告。你可以继续访谈，也可以现在生成报告，证据有限的部分会如实说明。是否仍然生成？";
-      const shouldGenerate = window.confirm(message);
+      const shouldGenerate = technicalTurnCapReached.value
+        ? await requestTechnicalCapConfirmation("ready")
+        : window.confirm("按当前终评证据规则，现有回答已达到报告准备条件。现在结束访谈并生成报告吗？");
       notice.value = shouldGenerate
         ? ""
         : technicalTurnCapReached.value
-          ? "本次访谈已达到技术保护上限；你仍可根据已有回答生成报告。"
+          ? "已暂不生成报告。你的回答均已保存，需要时可再次点击生成。"
+          : "现有回答已达到报告准备条件，你可以继续说，也可以随时生成报告。";
+      return shouldGenerate ? baseRequest : null;
+    }
+    if (readiness.status === "insufficient" && readiness.ready === false) {
+      const shouldGenerate = technicalTurnCapReached.value
+        ? await requestTechnicalCapConfirmation("insufficient")
+        : window.confirm("现有回答尚不足以支持完整报告。你可以继续访谈，也可以现在生成报告，证据有限的部分会如实说明。是否仍然生成？");
+      notice.value = shouldGenerate
+        ? ""
+        : technicalTurnCapReached.value
+          ? "已暂不生成报告。你的回答均已保存；“证据有限”不代表回答质量不高，也不会单独决定是否付酬。"
           : "建议继续访谈，补充更多可核对的具体经历、理由和判断依据。";
       return shouldGenerate
         ? { ...baseRequest, allow_incomplete: true }
@@ -450,6 +499,9 @@ async function confirmReportGeneration(): Promise<FinalizeSessionRequest | null>
     return null;
   } finally {
     checkingReadiness.value = false;
+    const returnFocus = technicalCapReturnFocus;
+    technicalCapReturnFocus = null;
+    if (returnFocus?.isConnected) void nextTick(() => returnFocus.focus());
   }
   return null;
 }
@@ -647,6 +699,8 @@ onBeforeUnmount(() => {
   clearInterviewWaitTimers();
   clearReadinessPolling();
   activeController?.abort();
+  technicalCapConfirmationResolver?.(false);
+  technicalCapConfirmationResolver = null;
 });
 </script>
 
@@ -715,6 +769,27 @@ onBeforeUnmount(() => {
         </div>
 
         <section
+          v-else-if="technicalTurnCapReached"
+          class="finalizing-card technical-limit-card"
+          aria-labelledby="technical-limit-title"
+          aria-describedby="technical-limit-description"
+        >
+          <div>
+            <strong id="technical-limit-title">本次访谈已达到 {{ technicalTurnCapCount }} 次回答的技术保护上限</strong>
+            <span id="technical-limit-description">
+              你此前提交的回答均已保存，系统不再接收新回答。这只是一项技术限制，不代表你的回答不充分、质量不高或能力不足；报告若标注“证据有限”，也不会单独决定是否付酬。很抱歉给你带来不便，感谢你的投入与理解。
+            </span>
+          </div>
+          <button
+            ref="technicalCapTrigger"
+            type="button"
+            class="primary-button"
+            :disabled="!canFinish"
+            @click="finishAndGenerate"
+          >{{ checkingReadiness ? "正在检查…" : finalizing ? "正在生成…" : "根据已有回答生成报告" }}</button>
+        </section>
+
+        <section
           v-else-if="evidenceReadiness?.status === 'ready' && evidenceReadiness.ready === true"
           class="closure-suggestion-card evidence-ready-card"
           aria-labelledby="evidence-ready-title"
@@ -737,16 +812,6 @@ onBeforeUnmount(() => {
             >{{ checkingReadiness ? "正在确认…" : finalizing ? "正在生成…" : "结束并生成报告" }}</button>
           </div>
         </section>
-
-        <div v-else-if="technicalTurnCapReached" class="finalizing-card technical-limit-card" role="status">
-          <div>
-            <strong>本次访谈已达到系统的技术保护上限</strong>
-            <span>你此前的回答均已保存。为避免对话过长影响稳定性，本次不再接收新回答；这不代表系统在判定证据已充分。你可以现在结束访谈，并根据已有内容生成报告。</span>
-          </div>
-          <button type="button" class="primary-button small" :disabled="!canFinish" @click="finishAndGenerate">
-            {{ checkingReadiness ? "正在检查…" : "结束并生成报告" }}
-          </button>
-        </div>
 
         <form v-else class="answer-composer" @submit.prevent="submitAnswer">
           <label for="answer-input">你的回答</label>
@@ -797,5 +862,41 @@ onBeforeUnmount(() => {
       </section>
     </section>
     <section v-else class="center-state error-state"><p>{{ error || "无法打开访谈。" }}</p><RouterLink class="secondary-button" to="/assessment">返回开始页</RouterLink></section>
+
+    <div v-if="technicalCapConfirmationStatus" class="confirmation-backdrop">
+      <section
+        class="confirmation-dialog technical-cap-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="technical-cap-dialog-title"
+        aria-describedby="technical-cap-dialog-description technical-cap-dialog-payment"
+        @keydown="onTechnicalCapDialogKeydown"
+      >
+        <h2 id="technical-cap-dialog-title">根据已有回答生成报告？</h2>
+        <p id="technical-cap-dialog-description" v-if="technicalCapConfirmationStatus === 'ready'">
+          现有回答已达到报告准备条件。本次访谈已达到 {{ technicalTurnCapCount }} 次回答的技术保护上限，系统不会再提出新问题。达到上限只是一项技术限制，不代表你的回答不充分、质量不高或能力不足。生成报告后将结束本次访谈。
+        </p>
+        <p id="technical-cap-dialog-description" v-else>
+          当前终评规则尚未能从逐字稿中为所有观察角度找到足够、可核验的原话证据。本次访谈已达到 {{ technicalTurnCapCount }} 次回答的技术保护上限，无法再补充。这不代表你的回答不充分、质量不高或能力不足。如果继续，报告会如实标注“证据有限”或“未充分测得”的部分。
+        </p>
+        <p id="technical-cap-dialog-payment" class="confirmation-note">
+          “证据有限”不等于低分，也不会按 0 分计入综合总分；该标记本身不会单独决定是否付酬，报酬仍按事先公布的参与规则核对。
+        </p>
+        <div class="confirmation-actions">
+          <button
+            ref="technicalCapCancelButton"
+            type="button"
+            class="secondary-button"
+            @click="closeTechnicalCapConfirmation(false)"
+          >暂不生成</button>
+          <button
+            ref="technicalCapConfirmButton"
+            type="button"
+            class="primary-button"
+            @click="closeTechnicalCapConfirmation(true)"
+          >{{ technicalCapConfirmationStatus === "insufficient" ? "仍然生成报告" : "生成报告" }}</button>
+        </div>
+      </section>
+    </div>
   </main>
 </template>
