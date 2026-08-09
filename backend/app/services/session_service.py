@@ -61,6 +61,7 @@ from app.services.orchestrator import (
     InterviewContractError,
     InterviewOrchestrator,
     SUGGEST_FINISH_ACTION,
+    TECHNICAL_TURN_CAP_ACKNOWLEDGEMENT_PROMPT_ID,
     transcript_fingerprint,
 )
 
@@ -748,6 +749,11 @@ class SessionService:
                     session,
                     user_turn,
                     prompt_version=bound_prompt_version,
+                    # The saved answer has already incremented this count.
+                    technical_turn_cap_reached=(
+                        (session.user_answer_count or 0)
+                        >= TECHNICAL_USER_TURN_CAP
+                    ),
                 )
                 assistant_turn = DialogueTurn(
                     # Attach through the relationship, not only the foreign
@@ -770,11 +776,15 @@ class SessionService:
                 # above replays this exact answer rather than generating a
                 # second one for the same client_turn_id.
                 submission.assistant_turn_id = assistant_turn.id
-                trace_action = (
-                    "natural_close_suggested"
-                    if result.session_action == SUGGEST_FINISH_ACTION
-                    else "natural_interview_turn"
-                )
+                if (
+                    result.prompt_template_id
+                    == TECHNICAL_TURN_CAP_ACKNOWLEDGEMENT_PROMPT_ID
+                ):
+                    trace_action = "technical_turn_cap_acknowledgement"
+                elif result.session_action == SUGGEST_FINISH_ACTION:
+                    trace_action = "natural_close_suggested"
+                else:
+                    trace_action = "natural_interview_turn"
                 db.add(
                     AgentTrace(
                         session_id=session.id,
@@ -792,6 +802,15 @@ class SessionService:
                             "model_finish_reason": result.model_finish_reason,
                             "quality_flags": result.quality_flags,
                             "attempt_count": result.attempt_count,
+                            **(
+                                {
+                                    "model_call_count": 0,
+                                    "technical_turn_cap_reached": True,
+                                }
+                                if trace_action
+                                == "technical_turn_cap_acknowledgement"
+                                else {}
+                            ),
                             **(
                                 {"navigation": result.navigation}
                                 if result.navigation is not None

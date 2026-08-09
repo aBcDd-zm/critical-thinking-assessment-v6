@@ -86,8 +86,9 @@
 
 - `409 session_not_accepting_turns`：状态不是 `interviewing`。
 - `409 idempotency_payload_mismatch`：同一键采用不同提交内容。
-- 会话快照通过 `technical_turn_cap` 与 `technical_turn_cap_reached` 显式告知前端技术保护上限状态；当前上限为 40 次已保存回答。达到上限不代表证据已充分。
-- `409 technical_turn_cap_reached`：已达 40 次技术保护上限，不再接收新回答；同一 `client_turn_id` 的已保存失败提交仍可恢复。
+- 会话快照通过 `technical_turn_cap` 与 `technical_turn_cap_reached` 显式告知前端技术保护上限状态；当前上限为 40 次已保存回答。达到上限本身不代表证据已充分、回答不充分或作答质量不高。
+- 第 40 次回答保存后仍先执行高风险安全门；非安全停止时不再请求访谈模型，而是持久化一条确定性系统致谢。会话保持 `interviewing`，便于最后一轮精确证据快照完成，再由用户确认生成报告或退出。
+- `409 technical_turn_cap_reached`：已达 40 次技术保护上限，不再接收第 41 次新回答；同一 `client_turn_id` 的已保存失败提交仍可恢复。
 - `409 stale_evidence_snapshot`：检查 ID、逐字稿指纹或评分资产不是当前精确版本。
 - `409 evidence_snapshot_processing`：最后一轮仍在后台整理；会话未冻结，可继续轮询同一任务。
 - `409 evidence_insufficient`：当前快照不足且请求未明确允许证据有限报告。

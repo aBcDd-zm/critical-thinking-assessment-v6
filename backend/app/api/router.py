@@ -73,6 +73,13 @@ _PUBLIC_DIMENSION_SUGGESTIONS = {
     "dynamic_adjustment": "继续提前写下会触发调整的信号和下一步行动。",
 }
 
+_PUBLIC_LIMITED_EVIDENCE_NOTICE = (
+    "“证据有限”或“未充分测得”只表示系统尚未从本次对话中找到足够、"
+    "可核验的原话来支持该维度出分；这不等于低分、能力不足或回答质量不高，"
+    "也不会按 0 分计入综合总分。该标记不会单独决定是否付酬；"
+    "报酬仍按活动参与规则核对。"
+)
+
 _ADMIN_SESSION_COOKIE = "admin_session"
 _ADMIN_CSRF_COOKIE = "cta_v6_admin_csrf"
 _ADMIN_SESSION_COOKIE_PATH = "/api/v1/admin"
@@ -619,6 +626,20 @@ def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
         Paragraph(escape(total_note), styles["Heading2"]),
         Spacer(1, 10),
     ]
+    if any(
+        item.get("status") in {"limited", "unmeasured"}
+        for item in dimensions
+    ):
+        story.extend(
+            [
+                Paragraph("关于“证据有限”", styles["Heading2"]),
+                Paragraph(
+                    escape(_PUBLIC_LIMITED_EVIDENCE_NOTICE),
+                    styles["BodyText"],
+                ),
+                Spacer(1, 10),
+            ]
+        )
     for item in dimensions:
         score_text = _public_score_label(item["score"]) if item.get("score") is not None else (
             "证据有限" if item.get("status") == "limited" else "未充分测得"

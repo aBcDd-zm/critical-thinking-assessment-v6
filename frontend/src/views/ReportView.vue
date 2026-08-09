@@ -58,6 +58,9 @@ const dimensions = computed<ReportDimension[]>(() => {
 
 const measuredDimensionCount = computed(() => dimensions.value.filter((item) => item.score !== null).length);
 const overallScore = computed(() => averageEvidenceScore(dimensions.value.map((item) => item.score)));
+const hasLimitedEvidence = computed(() => dimensions.value.some(
+  (item) => item.status === "limited" || item.status === "unmeasured",
+));
 
 async function loadReport() {
   loading.value = true;
@@ -129,6 +132,16 @@ onBeforeUnmount(() => {
           </div>
           <p class="report-score-note">分数按百分制呈现；证据不足的维度不按 0 分计入综合总分。</p>
           <p v-if="report.manual_review_recommended" class="report-caution">部分维度证据有限，暂不显示分数。</p>
+          <aside
+            v-if="hasLimitedEvidence"
+            class="report-evidence-note"
+            aria-labelledby="report-evidence-note-title"
+          >
+            <strong id="report-evidence-note-title">关于“证据有限”</strong>
+            <p>
+              这表示系统尚未从本次对话中找到足够、可核验的原话来支持该维度出分，不等于低分、能力不足或回答质量不高，也不会按 0 分计入综合总分。“证据有限”本身不会单独决定是否付酬；报酬仍按活动说明中的真实作答、完成流程及无重复提交等规则核对。
+            </p>
+          </aside>
         </div>
         <figure class="report-radar">
           <RadarChart :dimensions="dimensions" />

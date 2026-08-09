@@ -83,6 +83,14 @@ SAFETY_STOP_MESSAGE = (
     "现实中的即时支持；如果你或他人有立即危险，请联系当地紧急服务、身边可信的人，"
     "或尽快到安全的地方。我们先在这里停下。"
 )
+TECHNICAL_TURN_CAP_ACKNOWLEDGEMENT_MESSAGE = (
+    "谢谢你认真完成了本次访谈的 40 次回答。"
+    "为保障系统稳定，本次访谈已达到技术保护上限，我将不再继续提问。"
+    "你已提交的内容均已保存；达到上限本身不代表你的回答不充分、"
+    "质量不高或能力不足。很抱歉本次不能继续接收回答，感谢你的投入与理解。"
+    "你可以在下方根据已有内容生成报告，或选择退出不生成报告。"
+)
+TECHNICAL_TURN_CAP_ACKNOWLEDGEMENT_PROMPT_ID = "v6_technical_turn_cap"
 
 _PUBLIC_DIMENSION_SUGGESTIONS = {
     "problem_definition": "继续明确目标、范围和需要核实的边界。",
@@ -784,6 +792,7 @@ class InterviewOrchestrator:
         user_turn: DialogueTurn,
         *,
         prompt_version: str = NATURAL_INTERVIEWER_PROMPT_VERSION,
+        technical_turn_cap_reached: bool = False,
     ) -> InterviewResult:
         if is_immediate_high_risk(user_turn.content):
             session.phase = "safety_stopped"
@@ -802,6 +811,33 @@ class InterviewOrchestrator:
                 attempt_count=0,
                 quality_flags=["safety_stopped"],
                 input_fingerprint=hashlib.sha256(user_turn.content.encode("utf-8")).hexdigest(),
+                model_session_action=None,
+                model_finish_reason=None,
+                navigation=None,
+            )
+        # The safety gate above deliberately wins on the fortieth answer. For
+        # an ordinary answer, acknowledge the cap without asking the model for
+        # a question the participant would no longer be allowed to answer.
+        if technical_turn_cap_reached:
+            transcript = _transcript_rows(session)
+            return InterviewResult(
+                content=TECHNICAL_TURN_CAP_ACKNOWLEDGEMENT_MESSAGE,
+                session_action="continue",
+                finish_reason=None,
+                provider="system",
+                model="none",
+                prompt_template_id=TECHNICAL_TURN_CAP_ACKNOWLEDGEMENT_PROMPT_ID,
+                prompt_version="v6.0.0",
+                repair_used=False,
+                latency_ms=0,
+                attempt_count=0,
+                quality_flags=["technical_turn_cap_acknowledged"],
+                input_fingerprint=payload_fingerprint(
+                    {
+                        "technical_turn_cap_reached": True,
+                        "transcript": transcript,
+                    }
+                ),
                 model_session_action=None,
                 model_finish_reason=None,
                 navigation=None,

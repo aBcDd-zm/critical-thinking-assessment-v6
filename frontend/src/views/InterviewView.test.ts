@@ -54,6 +54,7 @@ const readyReadiness = {
 describe("InterviewView", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    document.body.innerHTML = "";
   });
 
   beforeEach(() => {
@@ -738,12 +739,29 @@ describe("InterviewView", () => {
     await flushPromises();
 
     expect(wrapper.get(".technical-limit-card").text()).toContain("技术保护上限");
+    expect(wrapper.get(".technical-limit-card").text()).toContain("40 次回答");
     expect(wrapper.get(".technical-limit-card").text()).toContain("回答均已保存");
-    expect(wrapper.get(".technical-limit-card").text()).toContain("不代表系统在判定证据已充分");
+    expect(wrapper.get(".technical-limit-card").text()).toContain("不代表你的回答不充分、质量不高或能力不足");
+    expect(wrapper.get(".technical-limit-card").text()).toContain("不会单独决定是否付酬");
+    expect(wrapper.get(".technical-limit-card button").text()).toContain("根据已有回答生成报告");
     expect(wrapper.find("textarea").exists()).toBe(false);
     expect(wrapper.find("button.send-button").exists()).toBe(false);
 
     await wrapper.get(".technical-limit-card button").trigger("click");
+    await flushPromises();
+
+    const dialog = wrapper.get(".technical-cap-dialog");
+    expect(dialog.attributes("role")).toBe("dialog");
+    expect(dialog.attributes("aria-modal")).toBe("true");
+    expect(dialog.text()).toContain("尚未能从逐字稿中为所有观察角度找到足够、可核验的原话证据");
+    expect(dialog.text()).toContain("不代表你的回答不充分、质量不高或能力不足");
+    expect(dialog.text()).toContain("不会单独决定是否付酬");
+    expect(dialog.get(".secondary-button").text()).toBe("暂不生成");
+    expect(dialog.get(".primary-button").text()).toBe("仍然生成报告");
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+
+    await dialog.get(".primary-button").trigger("click");
     await flushPromises();
 
     expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6", {
@@ -752,6 +770,58 @@ describe("InterviewView", () => {
       allow_incomplete: true,
     });
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+  });
+
+  it("prioritizes the technical-limit handoff over an evidence-ready card and restores focus after cancelling", async () => {
+    mocks.getSession.mockResolvedValue({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 40,
+      technical_turn_cap: 40,
+      technical_turn_cap_reached: true,
+      turns: [openingTurn],
+    });
+    mocks.checkReportReadiness.mockResolvedValue(readyReadiness);
+    const wrapper = mount(InterviewView, {
+      attachTo: document.body,
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.find(".technical-limit-card").exists()).toBe(true);
+    expect(wrapper.find(".evidence-ready-card").exists()).toBe(false);
+
+    const trigger = wrapper.get<HTMLButtonElement>(".technical-limit-card button");
+    await trigger.trigger("click");
+    await flushPromises();
+
+    let dialog = wrapper.get(".technical-cap-dialog");
+    const cancel = dialog.get<HTMLButtonElement>(".secondary-button");
+    expect(dialog.text()).toContain("现有回答已达到报告准备条件");
+    expect(dialog.text()).toContain("系统不会再提出新问题");
+    expect(cancel.element).toBe(document.activeElement);
+
+    await cancel.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".technical-cap-dialog").exists()).toBe(false);
+    expect(trigger.element).toBe(document.activeElement);
+    expect(wrapper.text()).toContain("已暂不生成报告");
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+
+    await trigger.trigger("click");
+    await flushPromises();
+    dialog = wrapper.get(".technical-cap-dialog");
+    expect(dialog.get(".primary-button").text()).toBe("生成报告");
+    await dialog.get(".primary-button").trigger("click");
+    await flushPromises();
+
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6", {
+      evidence_check_id: 8,
+      expected_transcript_fingerprint: transcriptFingerprint,
+      allow_incomplete: false,
+    });
+    wrapper.unmount();
   });
 
   it("drops an expired local recovery answer instead of submitting it", async () => {
