@@ -44,7 +44,15 @@ from app.services.model_gateway import (
     StructuredCallResult,
     resolve_natural_interviewer_prompt,
 )
-from app.services.orchestrator import _quality_flags, transcript_fingerprint
+from app.services.orchestrator import (
+    AMBIGUOUS_USER_FINISH_INTENT_MESSAGE,
+    EVIDENCE_GATE_CONTINUATION_MESSAGE,
+    USER_FINISH_INTENT_MESSAGE,
+    _quality_flags,
+    classify_user_finish_request,
+    is_explicit_user_finish_request,
+    transcript_fingerprint,
+)
 from tests.conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, TestSession
 
 
@@ -1713,18 +1721,29 @@ def test_v6_0_5_natural_close_preserves_the_existing_freeze_path(
     assert events[-1]["data"]["session"]["transcript_fingerprint"] is not None
 
 
+@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1"])
 def test_v6_2_explicit_finish_intent_still_waits_for_the_snapshot_control(
-    client, monkeypatch
+    client, monkeypatch, prompt_version: str
 ) -> None:
+    monkeypatch.setattr(settings, "natural_interviewer_prompt_version", prompt_version)
     session_uuid = create_session(client)
     gateway = api_router.sessions.orchestrator.gateway
 
-    def user_requested(_payload, **_kwargs):
+    def user_requested(payload, **_kwargs):
+        navigation = None
+        if prompt_version == "v6.2.1":
+            anchor = payload["anchor_candidates"][0]
+            navigation = {
+                "decision_anchor": anchor,
+                "focus_kind": "other",
+                "mainline_relation": "core",
+            }
         return StructuredCallResult(
             output=NaturalInterviewerOutput(
                 interviewer_message="好的，谢谢你愿意说这些，我们就先停在这里。",
                 session_action="finish",
                 finish_reason="user_requested",
+                navigation=navigation,
             ),
             provider="mock",
             model="user-requested-finish-test",
@@ -1739,8 +1758,251 @@ def test_v6_2_explicit_finish_intent_still_waits_for_the_snapshot_control(
     assert not any(item["event"] == "session_closure_suggested" for item in events)
     assert events[-1]["data"]["session_action"] == "continue"
     assert events[-1]["data"]["session"]["phase"] == "interviewing"
+    assert events[-1]["data"]["turn"]["content"] == USER_FINISH_INTENT_MESSAGE
     assert events[-1]["data"]["turn"]["quality_flags"] == [
         "user_finish_intent_requires_evidence_snapshot"
+    ]
+    with TestSession() as db:
+        session_id = db.scalar(
+            select(AssessmentSession.id).where(AssessmentSession.uuid == session_uuid)
+        )
+        trace = db.scalar(
+            select(AgentTrace)
+            .where(
+                AgentTrace.session_id == session_id,
+                AgentTrace.action == "natural_interview_turn",
+            )
+            .order_by(AgentTrace.id.desc())
+        )
+        assert trace is not None
+        assert trace.output_contract["session_action"] == "continue"
+        assert trace.output_contract["finish_reason"] is None
+        assert trace.output_contract["model_session_action"] == "finish"
+        assert trace.output_contract["model_finish_reason"] == "user_requested"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我现在想结束这次访谈，请就停在这里。",
+        "结束访谈",
+        "停止本次访谈",
+        "请结束本次访谈",
+        "我不想继续回答了",
+        "我已经不想继续回答了",
+        "我不想说了",
+        "我有点累了，不想说了",
+        "不聊了",
+        "退出",
+        "我想退出访谈",
+        "我想停了",
+        "我已经说完了，请结束本次访谈",
+        "麻烦停止提问",
+        "不要再问我了",
+        "本次访谈到这里吧",
+        "请帮我生成报告",
+        "请帮我产生报告",
+        "请输出报告",
+        "我現在想結束這次訪談",
+        "I want to end this interview",
+        "I’d like to end this interview",
+        "I don't want to continue",
+        "stop",
+        "quit",
+    ],
+)
+def test_explicit_finish_intent_guard_accepts_direct_requests(content: str) -> None:
+    assert is_explicit_user_finish_request(content) is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "对呀，你还有什么想问的吗，这件事算说完了吗？",
+        "是的，我准备出门遛弯了，下一个更乖怎么哒",
+        "请继续围绕这件事问我一个具体问题，我还不准备结束",
+        "我不提交",
+        "我不是要结束访谈",
+        "如果结束访谈会怎样？",
+        "项目到这里结束了，我后来做了复盘",
+        "朋友问我是不是想结束访谈",
+        "我不想继续回答这个问题，我们换一个",
+        "我不想回答",
+        "我生成报告",
+        "对话到这里了",
+        "“请结束本次访谈”",
+        "我想结束这次访谈？",
+        "我想结束这次访谈，但不生成报告",
+        "我不回答",
+        "不回答",
+        "不答",
+        "不说",
+        "我要走了，不想继续了",
+        "先这样吧",
+        "今天先到这儿",
+        "到此为止",
+        "对话到此为止",
+        "我想结束访谈，不提交报告",
+        "我不是要结束事情，我要结束访谈",
+        "「请结束本次访谈」",
+    ],
+)
+def test_explicit_finish_intent_guard_rejects_ambiguous_or_negated_text(
+    content: str,
+) -> None:
+    assert is_explicit_user_finish_request(content) is False
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "结束吧",
+        "够了",
+        "就这样吧",
+        "停一下",
+        "我不想回答",
+        "我生成报告",
+        "对话到这里了",
+        "“请结束本次访谈”",
+        "我想结束这次访谈？",
+        "我想结束这次访谈，但不生成报告",
+        "我不回答",
+        "不回答",
+        "不答",
+        "不说",
+        "我要走了，不想继续了",
+        "先这样吧",
+        "今天先到这儿",
+        "到此为止",
+        "对话到此为止",
+        "我想结束访谈，不提交报告",
+        "我不是要结束事情，我要结束访谈",
+        "「请结束本次访谈」",
+        "如果结束访谈会怎样？",
+        "朋友问我是不是想结束访谈",
+    ],
+)
+def test_finish_intent_guard_routes_uncertain_wording_to_confirmation(
+    content: str,
+) -> None:
+    assert classify_user_finish_request(content) == "ambiguous"
+
+
+@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1"])
+def test_v6_2_unconfirmed_finish_intent_is_suppressed_without_finalizing(
+    client, monkeypatch, prompt_version: str
+) -> None:
+    monkeypatch.setattr(settings, "natural_interviewer_prompt_version", prompt_version)
+    session_uuid = create_session(client)
+    gateway = api_router.sessions.orchestrator.gateway
+
+    def misclassified_user_request(payload, **_kwargs):
+        navigation = None
+        if prompt_version == "v6.2.1":
+            anchor = payload["anchor_candidates"][0]
+            navigation = {
+                "decision_anchor": anchor,
+                "focus_kind": "other",
+                "mainline_relation": "core",
+            }
+        return StructuredCallResult(
+            output=NaturalInterviewerOutput(
+                interviewer_message="好的，谢谢你愿意说这些，我们就先停在这里。",
+                session_action="finish",
+                finish_reason="user_requested",
+                navigation=navigation,
+            ),
+            provider="mock",
+            model="misclassified-user-request-test",
+            repair_used=False,
+            latency_ms=0,
+        )
+
+    monkeypatch.setattr(gateway, "generate_interviewer", misclassified_user_request)
+    response = send(
+        client,
+        session_uuid,
+        "对呀，你还有什么想问的吗，这件事算说完了吗？",
+        "client-turn-ambiguous-finish-intent",
+    )
+    events = parse_events(response)
+    assert not any(item["event"] == "session_finalizing" for item in events)
+    assert not any(item["event"] == "session_closure_suggested" for item in events)
+    assert events[-1]["data"]["session_action"] == "continue"
+    assert events[-1]["data"]["session"]["phase"] == "interviewing"
+    assert events[-1]["data"]["turn"]["content"] == EVIDENCE_GATE_CONTINUATION_MESSAGE
+    assert "结束并生成报告" not in events[-1]["data"]["turn"]["content"]
+    assert events[-1]["data"]["turn"]["quality_flags"] == [
+        "unconfirmed_user_finish_intent_suppressed"
+    ]
+    with TestSession() as db:
+        session_id = db.scalar(
+            select(AssessmentSession.id).where(AssessmentSession.uuid == session_uuid)
+        )
+        trace = db.scalar(
+            select(AgentTrace)
+            .where(
+                AgentTrace.session_id == session_id,
+                AgentTrace.action == "natural_interview_turn",
+            )
+            .order_by(AgentTrace.id.desc())
+        )
+        assert trace is not None
+        assert trace.output_contract["session_action"] == "continue"
+        assert trace.output_contract["finish_reason"] is None
+        assert trace.output_contract["model_session_action"] == "finish"
+        assert trace.output_contract["model_finish_reason"] == "user_requested"
+
+
+@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1"])
+def test_v6_2_ambiguous_finish_intent_uses_a_neutral_choice_without_finalizing(
+    client, monkeypatch, prompt_version: str
+) -> None:
+    monkeypatch.setattr(settings, "natural_interviewer_prompt_version", prompt_version)
+    session_uuid = create_session(client)
+    gateway = api_router.sessions.orchestrator.gateway
+
+    def ambiguous_user_request(payload, **_kwargs):
+        navigation = None
+        if prompt_version == "v6.2.1":
+            anchor = payload["anchor_candidates"][0]
+            navigation = {
+                "decision_anchor": anchor,
+                "focus_kind": "other",
+                "mainline_relation": "core",
+            }
+        return StructuredCallResult(
+            output=NaturalInterviewerOutput(
+                interviewer_message="好的，谢谢你愿意说这些，我们就先停在这里。",
+                session_action="finish",
+                finish_reason="user_requested",
+                navigation=navigation,
+            ),
+            provider="mock",
+            model="ambiguous-user-request-test",
+            repair_used=False,
+            latency_ms=0,
+        )
+
+    monkeypatch.setattr(gateway, "generate_interviewer", ambiguous_user_request)
+    response = send(
+        client,
+        session_uuid,
+        "我想结束这次访谈？",
+        "client-turn-ambiguous-finish-question",
+    )
+    events = parse_events(response)
+    assert not any(item["event"] == "session_finalizing" for item in events)
+    assert not any(item["event"] == "session_closure_suggested" for item in events)
+    assert events[-1]["data"]["session_action"] == "continue"
+    assert events[-1]["data"]["session"]["phase"] == "interviewing"
+    assert (
+        events[-1]["data"]["turn"]["content"]
+        == AMBIGUOUS_USER_FINISH_INTENT_MESSAGE
+    )
+    assert events[-1]["data"]["turn"]["content"].count("？") == 1
+    assert events[-1]["data"]["turn"]["quality_flags"] == [
+        "ambiguous_user_finish_intent_requires_confirmation"
     ]
 
 
