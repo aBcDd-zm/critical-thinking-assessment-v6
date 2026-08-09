@@ -89,7 +89,7 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
         )
 
 
-def test_v621_is_the_code_default_and_production_requires_enforcement(
+def test_v621_is_the_code_default_and_production_allows_staged_shadow_rollout(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("NATURAL_INTERVIEWER_PROMPT_VERSION", raising=False)
@@ -100,17 +100,22 @@ def test_v621_is_the_code_default_and_production_requires_enforcement(
 
     with pytest.raises(
         ValidationError,
-        match="EVIDENCE_ATTRIBUTION_MODE must be enforce",
+        match="EVIDENCE_ATTRIBUTION_MODE must be shadow or enforce",
     ):
         _production_settings(
             natural_interviewer_prompt_version="v6.2.1",
-            evidence_attribution_mode="shadow",
+            evidence_attribution_mode="disabled",
         )
-    production = _production_settings(
+    shadow_production = _production_settings(
+        natural_interviewer_prompt_version="v6.2.1",
+        evidence_attribution_mode="shadow",
+    )
+    enforce_production = _production_settings(
         natural_interviewer_prompt_version="v6.2.1",
         evidence_attribution_mode="enforce",
     )
-    assert production.evidence_attribution_mode == "enforce"
+    assert shadow_production.evidence_attribution_mode == "shadow"
+    assert enforce_production.evidence_attribution_mode == "enforce"
 
 
 def test_minimum_user_turn_guard_defaults_to_eight_and_stays_within_cap() -> None:
