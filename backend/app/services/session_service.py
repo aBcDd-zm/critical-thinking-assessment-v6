@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from collections.abc import Callable
 from collections import defaultdict
-from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -19,6 +21,7 @@ from app.models import (
     AgentTrace,
     AssessmentSession,
     DialogueTurn,
+    EvidenceAttributionSpan,
     EvidenceReadinessCheck,
     HumanReview,
     TechnicalAnomaly,
@@ -27,15 +30,29 @@ from app.models import (
 )
 from app.schemas import (
     MIN_ANSWER_VISIBLE_CHARACTERS,
+    AttributedFinalScorerOutput,
     CreateSessionRequest,
+    FinalScorerOutput,
+    FinalizeSessionRequest,
     SubmitTurnRequest,
     is_explicit_uncertainty_answer,
     visible_character_count,
 )
 from app.services.model_gateway import (
-    NATURAL_FINAL_SCORER_PROMPT_ID,
-    NATURAL_FINAL_SCORER_PROMPT_VERSION,
+    ATTRIBUTED_EVIDENCE_PROMPT_ID,
+    ATTRIBUTED_EVIDENCE_PROMPT_VERSION,
+    ATTRIBUTED_EVIDENCE_SCHEMA_VERSION,
+    ATTRIBUTED_EVIDENCE_SYSTEM_PROMPT,
+    EVIDENCE_ATTRIBUTION_PROMPT_ID,
+    EVIDENCE_ATTRIBUTION_PROMPT_VERSION,
+    EVIDENCE_ATTRIBUTION_SCHEMA_VERSION,
+    EVIDENCE_ATTRIBUTION_SYSTEM_PROMPT,
+    EVIDENCE_CANDIDATE_RULE_VERSION,
+    INCREMENTAL_EVIDENCE_SYSTEM_PROMPT,
+    INCREMENTAL_EVIDENCE_PROMPT_ID,
+    INCREMENTAL_EVIDENCE_PROMPT_VERSION,
     ModelGatewayError,
+    StructuredCallResult,
     resolve_natural_interviewer_prompt,
 )
 from app.services.orchestrator import (
@@ -57,20 +74,65 @@ class ServiceError(Exception):
 
 _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 TECHNICAL_USER_TURN_CAP = 40
-REPORT_READINESS_RULE_VERSION = "final-output-evidence-v1"
-REPORT_READINESS_LEASE_SECONDS = 15 * 60
+REPORT_READINESS_RULE_VERSION = "incremental-evidence-v3-min8-strict"
+EVIDENCE_ELIGIBILITY_RULE_VERSION = "participant-owned-reasoning-v1"
+# Shadow comparison has three sequential 15-second model budgets (attribution,
+# attributed scorer, and legacy scorer). Include commit grace before reclaim.
+REPORT_READINESS_LEASE_SECONDS = 60
 LEGACY_INTERVIEWER_PROMPT_VERSION = "v6.0.5"
+_evidence_executor = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="v6-evidence",
+)
 
 
-def _report_readiness_asset_fingerprint() -> str:
+def _lease_token(value: datetime) -> str:
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.isoformat()
+
+
+def _report_readiness_asset_fingerprint(
+    effective_mode: str | None = None,
+) -> str:
+    """Hash only assets that can affect this session's bound contract."""
+
+    mode = effective_mode or settings.evidence_attribution_mode
+    assets: dict[str, Any] = {
+        "gateway_mode": settings.model_gateway_mode,
+        "model": settings.deepseek_model,
+        "prompt_template_id": INCREMENTAL_EVIDENCE_PROMPT_ID,
+        "prompt_version": INCREMENTAL_EVIDENCE_PROMPT_VERSION,
+        "prompt_sha256": hashlib.sha256(
+            INCREMENTAL_EVIDENCE_SYSTEM_PROMPT.encode("utf-8")
+        ).hexdigest(),
+        "readiness_rule_version": REPORT_READINESS_RULE_VERSION,
+        "minimum_user_turns": settings.natural_interview_min_user_turns,
+    }
+    if mode in {"shadow", "enforce"}:
+        assets.update(
+            {
+                "effective_attribution_mode": mode,
+                "attribution_prompt_template_id": EVIDENCE_ATTRIBUTION_PROMPT_ID,
+                "attribution_prompt_version": EVIDENCE_ATTRIBUTION_PROMPT_VERSION,
+                "attribution_prompt_sha256": hashlib.sha256(
+                    EVIDENCE_ATTRIBUTION_SYSTEM_PROMPT.encode("utf-8")
+                ).hexdigest(),
+                "attribution_schema_version": EVIDENCE_ATTRIBUTION_SCHEMA_VERSION,
+                "evidence_candidate_rule_version": EVIDENCE_CANDIDATE_RULE_VERSION,
+                "eligibility_rule_version": EVIDENCE_ELIGIBILITY_RULE_VERSION,
+                "attributed_scorer_prompt_template_id": ATTRIBUTED_EVIDENCE_PROMPT_ID,
+                "attributed_scorer_prompt_version": ATTRIBUTED_EVIDENCE_PROMPT_VERSION,
+                "attributed_scorer_prompt_sha256": hashlib.sha256(
+                    ATTRIBUTED_EVIDENCE_SYSTEM_PROMPT.encode("utf-8")
+                ).hexdigest(),
+                "attributed_scorer_schema_version": (
+                    ATTRIBUTED_EVIDENCE_SCHEMA_VERSION
+                ),
+            }
+        )
     canonical = json.dumps(
-        {
-            "gateway_mode": settings.model_gateway_mode,
-            "model": settings.deepseek_model,
-            "prompt_template_id": NATURAL_FINAL_SCORER_PROMPT_ID,
-            "prompt_version": NATURAL_FINAL_SCORER_PROMPT_VERSION,
-            "readiness_rule_version": REPORT_READINESS_RULE_VERSION,
-        },
+        assets,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -79,16 +141,38 @@ def _report_readiness_asset_fingerprint() -> str:
 
 
 def serialize_report_readiness(
-    check: EvidenceReadinessCheck, *, cached: bool
+    check: EvidenceReadinessCheck, *, cached: bool, saved_user_answer_count: int
 ) -> dict[str, Any]:
     """Return only participant-safe aggregate readiness information."""
 
-    status = check.status if check.status in {"ready", "insufficient"} else "checking"
+    status = (
+        check.status
+        if check.status in {"ready", "insufficient", "failed"}
+        else "checking"
+    )
     return {
         "status": status,
         "ready": check.ready if status in {"ready", "insufficient"} else None,
         "cached": cached,
+        "check_id": check.id,
+        "transcript_fingerprint": check.transcript_fingerprint,
+        "minimum_turns_required": settings.natural_interview_min_user_turns,
+        "minimum_turns_met": (
+            saved_user_answer_count >= settings.natural_interview_min_user_turns
+        ),
     }
+
+
+def _session_transcript_rows(session: AssessmentSession) -> list[dict[str, Any]]:
+    return [
+        {
+            "turn_index": turn.turn_index,
+            "role": turn.role,
+            "content": turn.content,
+        }
+        for turn in sorted(session.turns, key=lambda item: item.turn_index)
+        if turn.role in {"user", "assistant"}
+    ]
 
 
 def serialize_turn(turn: DialogueTurn) -> dict[str, Any]:
@@ -255,6 +339,11 @@ class SessionService:
                     "finish_reason": opening.finish_reason,
                     "quality_flags": opening.quality_flags,
                     "attempt_count": opening.attempt_count,
+                    "evidence_attribution_mode": (
+                        settings.evidence_attribution_mode
+                        if opening.prompt_version == "v6.2.1"
+                        else "disabled"
+                    ),
                 },
                 renderer_status="repaired" if opening.repair_used else "accepted",
                 repair_used=opening.repair_used,
@@ -299,6 +388,32 @@ class SessionService:
         except ValueError:
             return LEGACY_INTERVIEWER_PROMPT_VERSION
         return candidate
+
+    @classmethod
+    def _effective_attribution_mode(
+        cls, db: Session, session_id: int
+    ) -> str:
+        """Never switch an existing pre-v6.2.1 session onto the new contract."""
+
+        opening_trace = db.scalar(
+            select(AgentTrace)
+            .where(
+                AgentTrace.session_id == session_id,
+                AgentTrace.action == "natural_opening",
+            )
+            .order_by(AgentTrace.id.asc())
+            .limit(1)
+        )
+        if opening_trace is None or opening_trace.prompt_version != "v6.2.1":
+            return "disabled"
+        bound = (opening_trace.output_contract or {}).get(
+            "evidence_attribution_mode"
+        )
+        if bound not in {"disabled", "shadow", "enforce"}:
+            # Rows created before the binding field existed remain legacy. A
+            # deployment switch must never reinterpret an open conversation.
+            return "disabled"
+        return str(bound)
 
     @staticmethod
     def _payload_hash(request: SubmitTurnRequest) -> str:
@@ -562,6 +677,11 @@ class SessionService:
                             "model_finish_reason": result.model_finish_reason,
                             "quality_flags": result.quality_flags,
                             "attempt_count": result.attempt_count,
+                            **(
+                                {"navigation": result.navigation}
+                                if result.navigation is not None
+                                else {}
+                            ),
                         },
                         renderer_status="repaired" if result.repair_used else "accepted",
                         repair_used=result.repair_used,
@@ -685,167 +805,700 @@ class SessionService:
                     db.commit()
                 raise
 
-    def report_readiness(
-        self, db: Session, session_uuid: str
-    ) -> dict[str, Any]:
-        """Run or reuse a non-blocking evidence-readiness preflight.
-
-        The database uniqueness constraint is the cross-worker idempotency
-        boundary.  A preflight never freezes the transcript and never writes
-        a ``ScoringRun``, ``EvidenceItem``, or ``AssessmentReport``.
-        """
-
-        with _locks[session_uuid]:
-            session = self.get(db, session_uuid)
-            if session.phase != "interviewing":
-                raise ServiceError(
-                    409,
-                    "session_not_open_for_readiness_check",
-                    "当前会话不需要再次检查报告准备度。",
+    def _claim_evidence_snapshot(
+        self,
+        db: Session,
+        session: AssessmentSession,
+        *,
+        retry_failed: bool = False,
+    ) -> tuple[
+        EvidenceReadinessCheck,
+        dict[str, Any] | None,
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        bool,
+    ]:
+        fingerprint = transcript_fingerprint(session)
+        effective_mode = self._effective_attribution_mode(db, session.id)
+        asset_fingerprint = _report_readiness_asset_fingerprint(effective_mode)
+        key_filter = (
+            EvidenceReadinessCheck.session_id == session.id,
+            EvidenceReadinessCheck.transcript_fingerprint == fingerprint,
+            EvidenceReadinessCheck.asset_fingerprint == asset_fingerprint,
+        )
+        existing = db.scalar(select(EvidenceReadinessCheck).where(*key_filter))
+        now = utcnow()
+        should_run = False
+        if existing is not None:
+            if existing.status in {"ready", "insufficient"}:
+                return existing, None, [], [], False
+            if existing.status == "failed" and not retry_failed:
+                return existing, None, [], [], False
+            if existing.status == "processing":
+                created_at = existing.created_at
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=now.tzinfo)
+                lease_expired = created_at < now - timedelta(
+                    seconds=REPORT_READINESS_LEASE_SECONDS
                 )
+                if not lease_expired:
+                    return existing, None, [], [], False
+            existing.status = "processing"
+            existing.ready = None
+            existing.sufficient_dimension_count = None
+            existing.model_provider = "pending"
+            existing.model_name = "pending"
+            existing.repair_used = False
+            existing.latency_ms = 0
+            existing.attempt_count = 0
+            existing.result_data = None
+            existing.error = None
+            existing.created_at = now
+            existing.completed_at = None
+            db.execute(
+                delete(EvidenceAttributionSpan).where(
+                    EvidenceAttributionSpan.readiness_check_id == existing.id
+                )
+            )
+            check = existing
+            should_run = True
+        else:
+            check = EvidenceReadinessCheck(
+                session_id=session.id,
+                transcript_fingerprint=fingerprint,
+                asset_fingerprint=asset_fingerprint,
+                status="processing",
+                prompt_template_id=INCREMENTAL_EVIDENCE_PROMPT_ID,
+                prompt_version=INCREMENTAL_EVIDENCE_PROMPT_VERSION,
+            )
+            db.add(check)
+            should_run = True
 
-            current_transcript_fingerprint = transcript_fingerprint(session)
-            asset_fingerprint = _report_readiness_asset_fingerprint()
-            key_filter = (
+        transcript = _session_transcript_rows(session)
+        latest_user_turn_index = max(
+            (
+                int(item["turn_index"])
+                for item in transcript
+                if item["role"] == "user"
+            ),
+            default=None,
+        )
+        check.last_user_turn_index = latest_user_turn_index
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            concurrent = db.scalar(select(EvidenceReadinessCheck).where(*key_filter))
+            if concurrent is None:
+                raise
+            return concurrent, None, [], [], False
+        db.refresh(check)
+
+        previous = db.scalar(
+            select(EvidenceReadinessCheck)
+            .where(
+                EvidenceReadinessCheck.session_id == session.id,
+                EvidenceReadinessCheck.asset_fingerprint == asset_fingerprint,
+                EvidenceReadinessCheck.id != check.id,
+                EvidenceReadinessCheck.status.in_({"ready", "insufficient"}),
+                EvidenceReadinessCheck.result_data.is_not(None),
+            )
+            .order_by(
+                EvidenceReadinessCheck.last_user_turn_index.desc(),
+                EvidenceReadinessCheck.completed_at.desc(),
+            )
+            .limit(1)
+        )
+        previous_index = (
+            previous.last_user_turn_index
+            if previous is not None and previous.last_user_turn_index is not None
+            else -1
+        )
+        new_user_turns = [
+            item
+            for item in transcript
+            if item["role"] == "user" and int(item["turn_index"]) > previous_index
+        ]
+        previous_snapshot = (
+            dict(previous.result_data)
+            if previous is not None and previous.result_data is not None
+            else None
+        )
+        return check, previous_snapshot, new_user_turns, transcript, should_run
+
+    def _execute_evidence_snapshot(
+        self,
+        session_factory: Callable[[], Session],
+        check_id: int,
+        previous_snapshot: dict[str, Any] | None,
+        new_user_turns: list[dict[str, Any]],
+        transcript: list[dict[str, Any]],
+        expected_lease_token: str | None = None,
+    ) -> None:
+        started = time.monotonic()
+        stage = "legacy_incremental_scoring"
+        failure_trace_recorded = False
+
+        def lease_is_current(check: EvidenceReadinessCheck | None) -> bool:
+            if check is None or check.status != "processing":
+                return False
+            if expected_lease_token is None:
+                return True
+            return _lease_token(check.created_at) == expected_lease_token
+
+        try:
+            with session_factory() as db:
+                check = db.get(EvidenceReadinessCheck, check_id)
+                if not lease_is_current(check):
+                    return
+                assert check is not None
+                effective_mode = self._effective_attribution_mode(
+                    db, check.session_id
+                )
+                expected_transcript_fingerprint = check.transcript_fingerprint
+                expected_asset_fingerprint = check.asset_fingerprint
+
+            attributed_assessment = None
+            attribution_error: Exception | None = None
+            if effective_mode in {"shadow", "enforce"}:
+                try:
+                    stage = "evidence_attribution"
+                    attribution = self.orchestrator.assess_evidence_attribution(
+                        transcript=transcript
+                    )
+                    with session_factory() as db:
+                        check = db.get(EvidenceReadinessCheck, check_id)
+                        if not lease_is_current(check):
+                            return
+                        assert check is not None
+                        user_turns = {
+                            turn.turn_index: turn
+                            for turn in db.scalars(
+                                select(DialogueTurn).where(
+                                    DialogueTurn.session_id == check.session_id,
+                                    DialogueTurn.role == "user",
+                                )
+                            )
+                        }
+                        db.execute(
+                            delete(EvidenceAttributionSpan).where(
+                                EvidenceAttributionSpan.readiness_check_id == check.id
+                            )
+                        )
+                        for validated in attribution.spans:
+                            source = user_turns.get(validated.output.turn_index)
+                            if source is None:
+                                raise FinalizationError(
+                                    "attribution_user_turn_missing_during_persist"
+                                )
+                            db.add(
+                                EvidenceAttributionSpan(
+                                    session_id=check.session_id,
+                                    user_turn_id=source.id,
+                                    readiness_check_id=check.id,
+                                    turn_index=validated.output.turn_index,
+                                    quote=validated.output.quote,
+                                    start=validated.output.start,
+                                    end=validated.output.end,
+                                    text_hash=validated.text_hash,
+                                    owner=validated.output.owner,
+                                    relation=validated.output.relation,
+                                    elicitation_level=validated.output.elicitation_level,
+                                    source_label=validated.output.source_label,
+                                    confidence=validated.output.confidence,
+                                    reason=validated.output.reason,
+                                    eligibility=validated.eligibility,
+                                    validation_status=validated.validation_status,
+                                    validation_reason=validated.validation_reason,
+                                    transcript_fingerprint=check.transcript_fingerprint,
+                                    asset_fingerprint=check.asset_fingerprint,
+                                    prompt_template_id=attribution.prompt_template_id,
+                                    prompt_version=attribution.prompt_version,
+                                    schema_version=attribution.schema_version,
+                                )
+                            )
+                        db.flush()
+                        eligibility_counts: dict[str, int] = defaultdict(int)
+                        for span in check.attribution_spans:
+                            eligibility_counts[span.eligibility] += 1
+                        db.add(
+                            AgentTrace(
+                                session_id=check.session_id,
+                                assistant_turn_id=None,
+                                action="evidence_attribution_snapshot",
+                                model_provider=attribution.provider,
+                                model_name=attribution.model,
+                                prompt_template_id=attribution.prompt_template_id,
+                                prompt_version=attribution.prompt_version,
+                                input_fingerprint=attribution.input_fingerprint,
+                                output_contract={
+                                    "status": "validated",
+                                    "readiness_check_id": check.id,
+                                    "transcript_fingerprint": check.transcript_fingerprint,
+                                    "asset_fingerprint": check.asset_fingerprint,
+                                    "schema_version": attribution.schema_version,
+                                    "candidate_rule_version": EVIDENCE_CANDIDATE_RULE_VERSION,
+                                    "eligibility_rule_version": EVIDENCE_ELIGIBILITY_RULE_VERSION,
+                                    "span_count": len(attribution.spans),
+                                    "eligibility_counts": dict(eligibility_counts),
+                                    "attempt_count": attribution.attempt_count,
+                                },
+                                renderer_status=(
+                                    "repaired"
+                                    if attribution.repair_used
+                                    else "accepted"
+                                ),
+                                repair_used=attribution.repair_used,
+                                latency_ms=attribution.latency_ms,
+                            )
+                        )
+                        db.commit()
+
+                    stage = "attributed_span_scoring"
+                    with session_factory() as db:
+                        check = db.get(EvidenceReadinessCheck, check_id)
+                        if not lease_is_current(check):
+                            return
+                        eligible_spans = list(
+                            db.scalars(
+                                select(EvidenceAttributionSpan)
+                                .where(
+                                    EvidenceAttributionSpan.readiness_check_id
+                                    == check_id,
+                                    EvidenceAttributionSpan.eligibility == "eligible",
+                                    EvidenceAttributionSpan.validation_status
+                                    == "validated",
+                                )
+                                .order_by(
+                                    EvidenceAttributionSpan.turn_index,
+                                    EvidenceAttributionSpan.start,
+                                )
+                            )
+                        )
+                        attributed_assessment = (
+                            self.orchestrator.assess_attributed_evidence(
+                                eligible_spans=eligible_spans,
+                                transcript=transcript,
+                                expected_check_id=check_id,
+                                expected_transcript_fingerprint=(
+                                    expected_transcript_fingerprint
+                                ),
+                                expected_asset_fingerprint=expected_asset_fingerprint,
+                            )
+                        )
+                        db.add(
+                            AgentTrace(
+                                session_id=check.session_id,
+                                assistant_turn_id=None,
+                                action=(
+                                    "attributed_evidence_snapshot_shadow"
+                                    if effective_mode == "shadow"
+                                    else "attributed_evidence_snapshot"
+                                ),
+                                model_provider=attributed_assessment.provider,
+                                model_name=attributed_assessment.model,
+                                prompt_template_id=(
+                                    attributed_assessment.prompt_template_id
+                                ),
+                                prompt_version=attributed_assessment.prompt_version,
+                                input_fingerprint=check.transcript_fingerprint,
+                                output_contract={
+                                    "status": "shadow" if effective_mode == "shadow" else "enforced",
+                                    "readiness_check_id": check.id,
+                                    "schema_version": ATTRIBUTED_EVIDENCE_SCHEMA_VERSION,
+                                    "ready": attributed_assessment.ready,
+                                    "sufficient_dimension_count": (
+                                        attributed_assessment.sufficient_dimension_count
+                                    ),
+                                    "attempt_count": attributed_assessment.attempt_count,
+                                    "result": attributed_assessment.output.model_dump(
+                                        mode="json"
+                                    ),
+                                },
+                                renderer_status=(
+                                    "repaired"
+                                    if attributed_assessment.repair_used
+                                    else "accepted"
+                                ),
+                                repair_used=attributed_assessment.repair_used,
+                                latency_ms=attributed_assessment.latency_ms,
+                            )
+                        )
+                        db.commit()
+                except Exception as exc:
+                    attribution_error = exc
+                    with session_factory() as db:
+                        check = db.get(EvidenceReadinessCheck, check_id)
+                        if not lease_is_current(check):
+                            return
+                        assert check is not None
+                        db.add(
+                            AgentTrace(
+                                session_id=check.session_id,
+                                assistant_turn_id=None,
+                                action=f"{stage}_failed",
+                                model_provider=(
+                                    "deepseek"
+                                    if settings.model_gateway_mode == "real"
+                                    else "mock"
+                                ),
+                                model_name=(
+                                    settings.deepseek_model
+                                    if settings.model_gateway_mode == "real"
+                                    else stage + "-mock-v6"
+                                ),
+                                prompt_template_id=(
+                                    EVIDENCE_ATTRIBUTION_PROMPT_ID
+                                    if stage == "evidence_attribution"
+                                    else ATTRIBUTED_EVIDENCE_PROMPT_ID
+                                ),
+                                prompt_version=(
+                                    EVIDENCE_ATTRIBUTION_PROMPT_VERSION
+                                    if stage == "evidence_attribution"
+                                    else ATTRIBUTED_EVIDENCE_PROMPT_VERSION
+                                ),
+                                input_fingerprint=check.transcript_fingerprint,
+                                output_contract={
+                                    "status": "failed",
+                                    "mode": effective_mode,
+                                    "readiness_check_id": check.id,
+                                    "schema_version": (
+                                        EVIDENCE_ATTRIBUTION_SCHEMA_VERSION
+                                        if stage == "evidence_attribution"
+                                        else ATTRIBUTED_EVIDENCE_SCHEMA_VERSION
+                                    ),
+                                    **(
+                                        {
+                                            "candidate_rule_version": EVIDENCE_CANDIDATE_RULE_VERSION
+                                        }
+                                        if stage == "evidence_attribution"
+                                        else {}
+                                    ),
+                                    "error_code": str(
+                                        getattr(exc, "error_code", type(exc).__name__)
+                                    ),
+                                    "attempt_count": int(
+                                        getattr(exc, "attempt_count", 0) or 0
+                                    ),
+                                },
+                                renderer_status="failed",
+                                repair_used=bool(
+                                    getattr(exc, "repair_used", False)
+                                ),
+                                fallback_used=effective_mode == "shadow",
+                                fallback_reason=f"{type(exc).__name__}: {str(exc)[:500]}",
+                                latency_ms=int(
+                                    getattr(exc, "latency_ms", 0) or 0
+                                ),
+                            )
+                        )
+                        db.commit()
+                        failure_trace_recorded = True
+                    if effective_mode == "enforce":
+                        raise
+
+            if effective_mode == "enforce":
+                if attributed_assessment is None:
+                    raise FinalizationError(
+                        "enforced_attribution_result_missing"
+                    ) from attribution_error
+                assessment = attributed_assessment
+                result_action = "attributed_evidence_snapshot_committed"
+            else:
+                stage = "legacy_incremental_scoring"
+                assessment = self.orchestrator.assess_incremental_evidence(
+                    previous_snapshot=previous_snapshot,
+                    new_user_turns=new_user_turns,
+                    transcript=transcript,
+                )
+                result_action = "incremental_evidence_snapshot"
+
+            with session_factory() as db:
+                check = db.get(EvidenceReadinessCheck, check_id)
+                if not lease_is_current(check):
+                    return
+                assert check is not None
+                check.status = "ready" if assessment.ready else "insufficient"
+                check.ready = assessment.ready
+                check.sufficient_dimension_count = assessment.sufficient_dimension_count
+                check.model_provider = assessment.provider
+                check.model_name = assessment.model
+                check.prompt_template_id = assessment.prompt_template_id
+                check.prompt_version = assessment.prompt_version
+                check.repair_used = assessment.repair_used
+                check.latency_ms = assessment.latency_ms
+                check.attempt_count = assessment.attempt_count
+                check.result_data = assessment.output.model_dump(mode="json")
+                check.completed_at = utcnow()
+                db.add(
+                    AgentTrace(
+                        session_id=check.session_id,
+                        assistant_turn_id=None,
+                        action=result_action,
+                        model_provider=assessment.provider,
+                        model_name=assessment.model,
+                        prompt_template_id=assessment.prompt_template_id,
+                        prompt_version=assessment.prompt_version,
+                        input_fingerprint=check.transcript_fingerprint,
+                        output_contract={
+                            "status": check.status,
+                            "ready": assessment.ready,
+                            "evidence_ready": assessment.evidence_ready,
+                            "sufficient_dimension_count": assessment.sufficient_dimension_count,
+                            "minimum_turns_required": assessment.minimum_turns_required,
+                            "minimum_turns_met": assessment.minimum_turns_met,
+                            "last_user_turn_index": check.last_user_turn_index,
+                            "attempt_count": assessment.attempt_count,
+                            "evidence_attribution_mode": effective_mode,
+                            **(
+                                {
+                                    "schema_version": (
+                                        ATTRIBUTED_EVIDENCE_SCHEMA_VERSION
+                                    )
+                                }
+                                if effective_mode == "enforce"
+                                else {}
+                            ),
+                        },
+                        renderer_status="repaired" if assessment.repair_used else "accepted",
+                        repair_used=assessment.repair_used,
+                        latency_ms=assessment.latency_ms,
+                    )
+                )
+                db.commit()
+        except Exception as exc:
+            with session_factory() as db:
+                check = db.get(EvidenceReadinessCheck, check_id)
+                if not lease_is_current(check):
+                    return
+                assert check is not None
+                check.status = "failed"
+                check.ready = None
+                check.error = f"{type(exc).__name__}: {str(exc)[:500]}"
+                elapsed_ms = max(1, int((time.monotonic() - started) * 1000))
+                check.latency_ms = max(
+                    elapsed_ms,
+                    int(getattr(exc, "latency_ms", 0) or 0),
+                )
+                check.attempt_count = max(
+                    1,
+                    int(getattr(exc, "attempt_count", 0) or 0),
+                )
+                check.completed_at = utcnow()
+                if (
+                    not failure_trace_recorded
+                    or stage == "legacy_incremental_scoring"
+                ):
+                    db.add(
+                        AgentTrace(
+                            session_id=check.session_id,
+                            assistant_turn_id=None,
+                            action=f"{stage}_failed",
+                            model_provider=(
+                                "deepseek"
+                                if settings.model_gateway_mode == "real"
+                                else "mock"
+                            ),
+                            model_name=(
+                                settings.deepseek_model
+                                if settings.model_gateway_mode == "real"
+                                else "natural-incremental-evidence-mock-v6"
+                            ),
+                            prompt_template_id=(
+                                EVIDENCE_ATTRIBUTION_PROMPT_ID
+                                if stage == "evidence_attribution"
+                                else (
+                                    ATTRIBUTED_EVIDENCE_PROMPT_ID
+                                    if stage == "attributed_span_scoring"
+                                    else INCREMENTAL_EVIDENCE_PROMPT_ID
+                                )
+                            ),
+                            prompt_version=(
+                                EVIDENCE_ATTRIBUTION_PROMPT_VERSION
+                                if stage == "evidence_attribution"
+                                else (
+                                    ATTRIBUTED_EVIDENCE_PROMPT_VERSION
+                                    if stage == "attributed_span_scoring"
+                                    else INCREMENTAL_EVIDENCE_PROMPT_VERSION
+                                )
+                            ),
+                            input_fingerprint=check.transcript_fingerprint,
+                            output_contract={
+                                "status": "failed",
+                                **(
+                                    {
+                                        "schema_version": (
+                                            EVIDENCE_ATTRIBUTION_SCHEMA_VERSION
+                                            if stage == "evidence_attribution"
+                                            else ATTRIBUTED_EVIDENCE_SCHEMA_VERSION
+                                        )
+                                    }
+                                    if stage
+                                    in {
+                                        "evidence_attribution",
+                                        "attributed_span_scoring",
+                                    }
+                                    else {}
+                                ),
+                                "error_code": str(
+                                    getattr(exc, "error_code", type(exc).__name__)
+                                ),
+                                "attempt_count": check.attempt_count,
+                            },
+                            renderer_status="failed",
+                            fallback_reason=check.error,
+                            latency_ms=check.latency_ms,
+                        )
+                    )
+                db.commit()
+
+    def schedule_evidence_snapshot(
+        self,
+        session_factory: Callable[[], Session],
+        session_uuid: str,
+        *,
+        retry_failed: bool = False,
+    ) -> None:
+        if not settings.evidence_observer_enabled:
+            return
+        with session_factory() as db:
+            with _locks[session_uuid]:
+                session = self.get(db, session_uuid)
+                if session.phase != "interviewing":
+                    return
+                check, previous, new_turns, transcript, should_run = (
+                    self._claim_evidence_snapshot(
+                        db,
+                        session,
+                        retry_failed=retry_failed,
+                    )
+                )
+        if not should_run:
+            return
+        args = (
+            session_factory,
+            check.id,
+            previous,
+            new_turns,
+            transcript,
+            _lease_token(check.created_at),
+        )
+        if settings.model_gateway_mode == "mock":
+            self._execute_evidence_snapshot(*args)
+        else:
+            _evidence_executor.submit(self._execute_evidence_snapshot, *args)
+
+    def report_readiness(
+        self,
+        db: Session,
+        session_uuid: str,
+        session_factory: Callable[[], Session],
+        *,
+        retry_failed: bool = False,
+    ) -> dict[str, Any]:
+        """Return the exact transcript's non-blocking evidence snapshot state."""
+
+        self.schedule_evidence_snapshot(
+            session_factory,
+            session_uuid,
+            retry_failed=retry_failed,
+        )
+        db.expire_all()
+        session = self.get(db, session_uuid)
+        if session.phase != "interviewing":
+            raise ServiceError(
+                409,
+                "session_not_open_for_readiness_check",
+                "当前会话不需要再次检查报告准备度。",
+            )
+        effective_mode = self._effective_attribution_mode(db, session.id)
+        check = db.scalar(
+            select(EvidenceReadinessCheck).where(
                 EvidenceReadinessCheck.session_id == session.id,
                 EvidenceReadinessCheck.transcript_fingerprint
-                == current_transcript_fingerprint,
-                EvidenceReadinessCheck.asset_fingerprint == asset_fingerprint,
+                == transcript_fingerprint(session),
+                EvidenceReadinessCheck.asset_fingerprint
+                == _report_readiness_asset_fingerprint(effective_mode),
             )
-            existing = db.scalar(select(EvidenceReadinessCheck).where(*key_filter))
-            check: EvidenceReadinessCheck | None = None
-            if existing:
-                if existing.status == "failed":
-                    raise ServiceError(
-                        503,
-                        "readiness_check_failed",
-                        "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
-                    )
-                if existing.status != "processing":
-                    return serialize_report_readiness(existing, cached=True)
-
-                # A worker may have stopped after atomically claiming a check.
-                # Reclaim only leases older than the scorer's bounded retry
-                # window; the conditional update keeps concurrent workers from
-                # issuing duplicate calls for the same transcript.
-                now = utcnow()
-                reclaimed = db.execute(
-                    update(EvidenceReadinessCheck)
-                    .where(
-                        EvidenceReadinessCheck.id == existing.id,
-                        EvidenceReadinessCheck.status == "processing",
-                        EvidenceReadinessCheck.created_at
-                        < now - timedelta(seconds=REPORT_READINESS_LEASE_SECONDS),
-                    )
-                    .values(
-                        created_at=now,
-                        completed_at=None,
-                        error=None,
-                    )
-                    .execution_options(synchronize_session=False)
-                )
-                db.commit()
-                if reclaimed.rowcount != 1:
-                    return serialize_report_readiness(existing, cached=True)
-                db.refresh(existing)
-                check = existing
-
-            if check is None:
-                check = EvidenceReadinessCheck(
-                    session_id=session.id,
-                    transcript_fingerprint=current_transcript_fingerprint,
-                    asset_fingerprint=asset_fingerprint,
-                    status="processing",
-                    prompt_template_id=NATURAL_FINAL_SCORER_PROMPT_ID,
-                    prompt_version=NATURAL_FINAL_SCORER_PROMPT_VERSION,
-                )
-                db.add(check)
-                try:
-                    db.commit()
-                except IntegrityError:
-                    # Another worker atomically claimed this exact transcript
-                    # and asset set. Reuse its result instead of issuing a
-                    # second model call.
-                    db.rollback()
-                    existing = db.scalar(
-                        select(EvidenceReadinessCheck).where(*key_filter)
-                    )
-                    if existing is None:
-                        raise ServiceError(
-                            503,
-                            "readiness_check_failed",
-                            "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
-                        )
-                    if existing.status == "failed":
-                        raise ServiceError(
-                            503,
-                            "readiness_check_failed",
-                            "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
-                        )
-                    return serialize_report_readiness(existing, cached=True)
-
-            check_id = check.id
-            try:
-                assessment = self.orchestrator.assess_report_readiness(session)
-                # The model call can outlive a concurrent request handled by
-                # another worker. End the read transaction and re-check the
-                # open transcript before presenting its aggregate result.
-                db.rollback()
-                current_session = self.get(db, session_uuid)
-                if (
-                    current_session.phase != "interviewing"
-                    or transcript_fingerprint(current_session)
-                    != current_transcript_fingerprint
-                ):
-                    stale = db.get(EvidenceReadinessCheck, check_id)
-                    if stale is not None:
-                        stale.status = "failed"
-                        stale.ready = None
-                        stale.error = "TranscriptChanged"
-                        stale.completed_at = utcnow()
-                        db.commit()
-                    return {
-                        "status": "checking",
-                        "ready": None,
-                        "cached": False,
-                    }
-                persisted = db.get(EvidenceReadinessCheck, check_id)
-                if persisted is None:
-                    raise RuntimeError("readiness_claim_missing")
-                persisted.status = "ready" if assessment.ready else "insufficient"
-                persisted.ready = assessment.ready
-                persisted.sufficient_dimension_count = (
-                    assessment.sufficient_dimension_count
-                )
-                persisted.model_provider = assessment.provider
-                persisted.model_name = assessment.model
-                persisted.prompt_template_id = assessment.prompt_template_id
-                persisted.prompt_version = assessment.prompt_version
-                persisted.repair_used = assessment.repair_used
-                persisted.latency_ms = assessment.latency_ms
-                persisted.completed_at = utcnow()
-                db.commit()
-                return serialize_report_readiness(persisted, cached=False)
-            except Exception as exc:
-                db.rollback()
-                failed = db.get(EvidenceReadinessCheck, check_id)
-                if failed is not None:
-                    failed.status = "failed"
-                    failed.ready = None
-                    failed.error = type(exc).__name__
-                    failed.completed_at = utcnow()
-                    db.commit()
-                raise ServiceError(
-                    503,
-                    "readiness_check_failed",
-                    "暂时无法检查报告准备度；你仍可按现有回答生成报告。",
-                ) from exc
+        )
+        if check is None:
+            raise ServiceError(
+                503,
+                "evidence_snapshot_unavailable",
+                "当前证据结果尚未整理完成，请稍后重试。",
+            )
+        return serialize_report_readiness(
+            check,
+            cached=check.status in {"ready", "insufficient"},
+            saved_user_answer_count=session.user_answer_count,
+        )
 
     def _run_finalization(
-        self, db: Session, session: AssessmentSession
+        self,
+        db: Session,
+        session: AssessmentSession,
+        check: EvidenceReadinessCheck | None = None,
     ) -> AssessmentSession:
         try:
-            return self.orchestrator.finalize(db, session)
+            precomputed: StructuredCallResult[
+                FinalScorerOutput | AttributedFinalScorerOutput
+            ] | None = None
+            attribution_spans: list[EvidenceAttributionSpan] | None = None
+            if check is not None:
+                if check.result_data is None:
+                    raise FinalizationError("evidence_snapshot_result_missing")
+                dimensions = check.result_data.get("dimensions")
+                is_attributed = bool(
+                    isinstance(dimensions, list)
+                    and dimensions
+                    and isinstance(dimensions[0], dict)
+                    and "evidence_refs" in dimensions[0]
+                )
+                output: FinalScorerOutput | AttributedFinalScorerOutput
+                if is_attributed:
+                    output = AttributedFinalScorerOutput.model_validate(
+                        check.result_data
+                    )
+                    attribution_spans = list(
+                        db.scalars(
+                            select(EvidenceAttributionSpan)
+                            .where(
+                                EvidenceAttributionSpan.readiness_check_id
+                                == check.id
+                            )
+                            .order_by(EvidenceAttributionSpan.id)
+                        )
+                    )
+                else:
+                    output = FinalScorerOutput.model_validate(check.result_data)
+                precomputed = StructuredCallResult(
+                    output=output,
+                    provider=check.model_provider,
+                    model=check.model_name,
+                    repair_used=check.repair_used,
+                    latency_ms=check.latency_ms,
+                    attempt_count=max(1, check.attempt_count),
+                )
+            return self.orchestrator.finalize(
+                db,
+                session,
+                precomputed=precomputed,
+                precomputed_prompt_template_id=(
+                    check.prompt_template_id if check is not None else None
+                ),
+                precomputed_prompt_version=(
+                    check.prompt_version if check is not None else None
+                ),
+                attribution_spans=attribution_spans,
+                readiness_check_id=(
+                    check.id if attribution_spans is not None and check is not None else None
+                ),
+                expected_asset_fingerprint=(
+                    check.asset_fingerprint
+                    if attribution_spans is not None and check is not None
+                    else None
+                ),
+            )
         except FinalizationError as exc:
             raise ServiceError(
                 503,
@@ -949,17 +1602,80 @@ class SessionService:
             db.refresh(session)
             return self._run_finalization(db, session)
 
-    def finalize(self, db: Session, session_uuid: str) -> AssessmentSession:
+    def finalize(
+        self,
+        db: Session,
+        session_uuid: str,
+        request: FinalizeSessionRequest | None = None,
+    ) -> AssessmentSession:
+        request = request or FinalizeSessionRequest()
         with _locks[session_uuid]:
             session = self.get(db, session_uuid)
             if session.report and session.phase == "completed":
                 return session
+            check: EvidenceReadinessCheck | None = None
+            effective_mode = self._effective_attribution_mode(db, session.id)
+            current_asset_fingerprint = _report_readiness_asset_fingerprint(
+                effective_mode
+            )
             if session.phase == "interviewing":
-                # This is the explicit user-controlled end, not an interviewer
-                # fallback. No synthetic question or scripted closing is added.
+                current_fingerprint = transcript_fingerprint(session)
+                if request.evidence_check_id is not None:
+                    check = db.get(
+                        EvidenceReadinessCheck,
+                        request.evidence_check_id,
+                    )
+                else:
+                    check = db.scalar(
+                        select(EvidenceReadinessCheck).where(
+                            EvidenceReadinessCheck.session_id == session.id,
+                            EvidenceReadinessCheck.transcript_fingerprint
+                            == current_fingerprint,
+                            EvidenceReadinessCheck.asset_fingerprint
+                            == current_asset_fingerprint,
+                        )
+                    )
+                if (
+                    check is None
+                    or check.session_id != session.id
+                    or check.transcript_fingerprint != current_fingerprint
+                    or check.asset_fingerprint != current_asset_fingerprint
+                    or (
+                        request.expected_transcript_fingerprint is not None
+                        and request.expected_transcript_fingerprint
+                        != current_fingerprint
+                    )
+                ):
+                    raise ServiceError(
+                        409,
+                        "stale_evidence_snapshot",
+                        "对话已更新，请等待当前回答的证据结果后再提交。",
+                    )
+                if check.status == "processing":
+                    raise ServiceError(
+                        409,
+                        "evidence_snapshot_processing",
+                        "正在整理最新一轮的证据，完成后即可生成报告。",
+                    )
+                if check.status == "failed" or check.result_data is None:
+                    raise ServiceError(
+                        503,
+                        "evidence_snapshot_failed",
+                        "当前证据结果暂未整理完成，请重试；会话不会被冻结。",
+                    )
+                if check.status == "insufficient" and not request.allow_incomplete:
+                    raise ServiceError(
+                        409,
+                        "evidence_insufficient",
+                        "现有回答尚不足以支持完整报告；确认后可生成证据有限的报告。",
+                    )
+                session.ended_early = (
+                    session.user_answer_count
+                    < settings.natural_interview_min_user_turns
+                )
                 session.phase = "finalizing"
                 session.finalization_state = "user_requested"
-                self.orchestrator.freeze_transcript(session)
+                frozen_fingerprint = self.orchestrator.freeze_transcript(session)
                 db.add(
                     AgentTrace(
                         session_id=session.id,
@@ -969,19 +1685,50 @@ class SessionService:
                         model_name="none",
                         prompt_template_id="v6_user_finalize",
                         prompt_version="v6.0.0",
-                        input_fingerprint=self.orchestrator.trace_input_fingerprint(session),
-                        output_contract={"session_action": "finish", "finish_reason": "user_requested"},
+                        input_fingerprint=frozen_fingerprint,
+                        output_contract={
+                            "session_action": "finish",
+                            "finish_reason": "user_requested",
+                            "evidence_check_id": check.id,
+                            "evidence_status": check.status,
+                            "allow_incomplete": request.allow_incomplete,
+                            "ended_early": session.ended_early,
+                            "saved_user_answer_count": session.user_answer_count,
+                            "minimum_turns_required": settings.natural_interview_min_user_turns,
+                            "transcript_fingerprint": frozen_fingerprint,
+                        },
                         renderer_status="accepted",
                     )
                 )
                 db.commit()
-            elif session.phase != "finalizing":
+            elif session.phase == "finalizing":
+                frozen_fingerprint = session.transcript_fingerprint
+                if frozen_fingerprint:
+                    check = db.scalar(
+                        select(EvidenceReadinessCheck).where(
+                            EvidenceReadinessCheck.session_id == session.id,
+                            EvidenceReadinessCheck.transcript_fingerprint
+                            == frozen_fingerprint,
+                            EvidenceReadinessCheck.asset_fingerprint
+                            == current_asset_fingerprint,
+                            EvidenceReadinessCheck.status.in_({"ready", "insufficient"}),
+                            EvidenceReadinessCheck.result_data.is_not(None),
+                        )
+                    )
+                bound_version = self._bound_interviewer_prompt_version(db, session.id)
+                if check is None and bound_version in {"v6.2.0", "v6.2.1"}:
+                    raise ServiceError(
+                        503,
+                        "evidence_snapshot_failed",
+                        "已冻结的对话缺少对应证据快照，请联系管理员恢复。",
+                    )
+            else:
                 raise ServiceError(
                     409,
                     "session_not_ready_for_finalization",
                     "当前会话不能生成报告。",
                 )
-            return self._run_finalization(db, session)
+            return self._run_finalization(db, session, check)
 
     def exit(self, db: Session, session_uuid: str, reason: str | None) -> AssessmentSession:
         with _locks[session_uuid]:

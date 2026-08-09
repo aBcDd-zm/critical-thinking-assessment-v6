@@ -39,6 +39,10 @@ frontend/coverage/
 # transient imports, exports and browser traces.
 artifacts/*
 !artifacts/SOURCE_SNAPSHOT_MANIFEST.md
+# Versioned gold-evaluation protocol assets are test fixtures, not runtime output.
+!artifacts/evidence_attribution_gold_README.md
+!artifacts/evidence_attribution_gold_template.jsonl
+!artifacts/real_deepseek_v621_mainline_uat_20260809.json
 !artifacts/source-v5/
 artifacts/source-v5/*
 !artifacts/source-v5/README.md

@@ -4,9 +4,7 @@ import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import InterviewerAvatar from "@/components/InterviewerAvatar.vue";
 import { ApiError } from "@/api/http";
 import {
-  acceptClosureSuggestion,
   checkReportReadiness,
-  closureSuggestionData,
   completedData,
   exitSession,
   finalizingSession,
@@ -16,10 +14,11 @@ import {
 } from "@/api/session";
 import { useSpeechPlayback, useVoiceInput } from "@/composables/useVoice";
 import type {
-  ClosureSuggestion,
   DialogueTurn,
   InputMode,
   InterviewerState,
+  FinalizeSessionRequest,
+  ReportReadinessResponse,
   SessionSnapshot,
   TurnRequest,
   TurnStreamEvent,
@@ -36,9 +35,7 @@ const loading = ref(true);
 const sending = ref(false);
 const finalizing = ref(false);
 const checkingReadiness = ref(false);
-const acceptingClosure = ref(false);
-const closureSuggestion = ref<ClosureSuggestion | null>(null);
-const dismissedClosureTurnId = ref<number | null>(null);
+const evidenceReadiness = ref<ReportReadinessResponse | null>(null);
 const error = ref("");
 const notice = ref("");
 const inputMode = ref<InputMode>("text");
@@ -53,12 +50,20 @@ const playback = useSpeechPlayback();
 let activeController: AbortController | null = null;
 let savedWaitTimer: number | null = null;
 let extendedWaitTimer: number | null = null;
+let readinessPollTimer: number | null = null;
+let readinessPollGeneration = 0;
 
 function clearInterviewWaitTimers() {
   if (savedWaitTimer !== null) window.clearTimeout(savedWaitTimer);
   if (extendedWaitTimer !== null) window.clearTimeout(extendedWaitTimer);
   savedWaitTimer = null;
   extendedWaitTimer = null;
+}
+
+function clearReadinessPolling() {
+  readinessPollGeneration += 1;
+  if (readinessPollTimer !== null) window.clearTimeout(readinessPollTimer);
+  readinessPollTimer = null;
 }
 
 function startInterviewWaitTimers() {
@@ -96,7 +101,7 @@ function isExplicitUncertaintyAnswer(value: string): boolean {
 const interviewerState = computed<InterviewerState>(() => {
   if (voice.listening.value) return "listening";
   if (playback.speaking.value) return "speaking";
-  if (sending.value || finalizing.value || checkingReadiness.value || acceptingClosure.value) return "thinking";
+  if (sending.value || finalizing.value || checkingReadiness.value) return "thinking";
   return "listening";
 });
 
@@ -146,7 +151,6 @@ const canSubmit = computed(() => (
   && meetsAnswerRequirement.value
   && isInterviewing.value
   && !technicalTurnCapReached.value
-  && !closureSuggestion.value
   && !sending.value
   && !checkingReadiness.value
   && !loading.value
@@ -156,7 +160,6 @@ const canFinish = computed(() => (
   && !sending.value
   && !finalizing.value
   && !checkingReadiness.value
-  && !acceptingClosure.value
   && !loading.value
 ));
 const pendingKey = computed(() => `v6:pending-turn:${uuid.value}`);
@@ -209,32 +212,6 @@ function updateTurns(nextTurns: DialogueTurn[]) {
     .sort((a, b) => a.turn_index - b.turn_index);
 }
 
-function isClosureSuggestion(value: unknown): value is ClosureSuggestion {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Partial<ClosureSuggestion>;
-  return (
-    typeof candidate.closure_turn_id === "number"
-    && Number.isInteger(candidate.closure_turn_id)
-    && candidate.closure_turn_id > 0
-    && typeof candidate.transcript_fingerprint === "string"
-    && /^[0-9a-f]{64}$/.test(candidate.transcript_fingerprint)
-    && (candidate.finish_reason === "natural_closure" || candidate.finish_reason === "enough_understanding")
-  );
-}
-
-function synchronizeClosureSuggestion(snapshot: SessionSnapshot) {
-  if (snapshot.phase !== "interviewing" || !isClosureSuggestion(snapshot.closure_suggestion)) {
-    closureSuggestion.value = null;
-    if (!snapshot.closure_suggestion) dismissedClosureTurnId.value = null;
-    return;
-  }
-  if (dismissedClosureTurnId.value === snapshot.closure_suggestion.closure_turn_id) {
-    closureSuggestion.value = null;
-    return;
-  }
-  closureSuggestion.value = snapshot.closure_suggestion;
-}
-
 function onDraftInput() {
   inputMode.value = voiceWasUsed.value ? "voice_edited" : "text";
   if (error.value === MIN_ANSWER_MESSAGE) error.value = "";
@@ -280,16 +257,8 @@ async function handleEvent(event: TurnStreamEvent) {
   if (event.event === "agent_delta") streamedText.value += eventDelta(event);
   if (event.event === "session_closure_suggested") {
     clearInterviewWaitTimers();
-    const suggestion = closureSuggestionData(event);
-    if (
-      !suggestion
-      || (suggestion.session_uuid && suggestion.session_uuid !== uuid.value)
-      || dismissedClosureTurnId.value === suggestion.closure_turn_id
-    ) return;
-    if (closureSuggestion.value?.closure_turn_id !== suggestion.closure_turn_id) {
-      closureSuggestion.value = suggestion;
-    }
-    notice.value = "澄澄认为当前内容可以在这里收束，请选择继续交流或结束并生成报告。";
+    // Historical natural-close events are deliberately not rendered in V6.2.
+    // Only the independent evidence snapshot may expose a finish entry.
     return;
   }
   if (event.event === "session_finalizing") {
@@ -303,7 +272,7 @@ async function handleEvent(event: TurnStreamEvent) {
       // existing transcript while reflecting its frozen state immediately.
       session.value = { ...session.value, phase: "finalizing" };
     }
-    notice.value = "这段对话已经自然收束，正在整理报告…";
+    notice.value = "对话已冻结，正在整理报告…";
     return;
   }
   if (event.event === "error") {
@@ -319,7 +288,6 @@ async function handleEvent(event: TurnStreamEvent) {
   if (completed.session) {
     session.value = completed.session;
     updateTurns(completed.session.turns ?? [...turns.value, completed.turn]);
-    synchronizeClosureSuggestion(completed.session);
   } else {
     updateTurns([...turns.value, completed.turn]);
   }
@@ -328,10 +296,8 @@ async function handleEvent(event: TurnStreamEvent) {
   answerStartedAt.value = Date.now();
   if (session.value?.phase === "safety_stopped") {
     notice.value = "本次对话已暂停，不会继续提问或自动生成报告。";
-  } else if (completed.session_action === "suggest_finish") {
-    notice.value = "澄澄认为当前内容可以在这里收束，请选择继续交流或结束并生成报告。";
   } else if (completed.session_action === "finish") {
-    notice.value = "澄澄觉得这段对话已经自然收束，正在整理报告…";
+    notice.value = "对话已冻结，正在整理报告…";
   }
   if (ttsEnabled.value) void playback.speak(completed.turn.content, completed.speech_url);
 }
@@ -340,17 +306,73 @@ async function synchronizeSession() {
   const snapshot = await getSession(uuid.value);
   session.value = snapshot;
   updateTurns(snapshot.turns ?? turns.value);
-  synchronizeClosureSuggestion(snapshot);
   return snapshot;
 }
 
-async function generateReport(automatic = false) {
+async function refreshEvidenceReadiness(generation = readinessPollGeneration) {
+  if (!isInterviewing.value || sending.value || leaving.value) return;
+  try {
+    const result = await checkReportReadiness(uuid.value);
+    if (generation !== readinessPollGeneration || !isInterviewing.value) return;
+    evidenceReadiness.value = result;
+    if (result.status === "failed") {
+      notice.value = "当前证据结果暂未整理完成，可以继续回答或稍后重试。";
+    }
+  } catch {
+    if (generation === readinessPollGeneration && isInterviewing.value) {
+      evidenceReadiness.value = null;
+    }
+  }
+}
+
+function startEvidenceReadinessPolling() {
+  clearReadinessPolling();
+  evidenceReadiness.value = null;
+  const generation = readinessPollGeneration;
+  const startedAt = Date.now();
+  const poll = async () => {
+    await refreshEvidenceReadiness(generation);
+    if (
+      generation !== readinessPollGeneration
+      || !isInterviewing.value
+      || evidenceReadiness.value?.status !== "checking"
+      || Date.now() - startedAt >= 20_000
+    ) return;
+    readinessPollTimer = window.setTimeout(() => void poll(), 1_500);
+  };
+  void poll();
+}
+
+async function waitForCurrentEvidenceSnapshot(): Promise<ReportReadinessResponse | null> {
+  const deadline = Date.now() + 16_000;
+  let retryFailed = evidenceReadiness.value?.status === "failed";
+  while (Date.now() < deadline) {
+    try {
+      const current = await checkReportReadiness(uuid.value, retryFailed);
+      retryFailed = false;
+      evidenceReadiness.value = current;
+      if (current.status !== "checking") return current;
+    } catch {
+      return null;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 750));
+  }
+  return evidenceReadiness.value?.status === "checking"
+    ? evidenceReadiness.value
+    : null;
+}
+
+async function generateReport(
+  automatic = false,
+  request: FinalizeSessionRequest = {},
+) {
   if (finalizing.value || leaving.value || !session.value) return;
+  clearReadinessPolling();
   finalizing.value = true;
   error.value = "";
   notice.value = automatic ? "正在使用已冻结的逐字稿生成报告…" : "正在结束访谈并生成报告…";
   try {
-    const result = await finalizeSession(uuid.value);
+    const result = await finalizeSession(uuid.value, request);
     session.value = result.session;
     if (result.session.phase === "completed" || result.report) {
       localStorage.removeItem("v6:last-session");
@@ -380,121 +402,74 @@ async function generateReport(automatic = false) {
   }
 }
 
-async function confirmReportGeneration(): Promise<boolean> {
+async function confirmReportGeneration(): Promise<FinalizeSessionRequest | null> {
   checkingReadiness.value = true;
   error.value = "";
-  notice.value = "正在检查现有回答能否支持完整报告…";
-  let shouldGenerate = false;
+  notice.value = "正在整理最新一轮的证据…";
   try {
-    const readiness = await checkReportReadiness(uuid.value);
+    const readiness = await waitForCurrentEvidenceSnapshot();
+    if (!readiness) {
+      notice.value = "当前证据结果暂未整理完成，请稍后重试。";
+      return null;
+    }
+    if (readiness.status === "checking") {
+      notice.value = "最新证据仍在整理中，完成后即可快速生成报告。";
+      return null;
+    }
+    if (readiness.status === "failed") {
+      notice.value = "当前证据结果暂未整理完成，请重试；已保存的回答不会丢失。";
+      return null;
+    }
+    const baseRequest: FinalizeSessionRequest = {
+      evidence_check_id: readiness.check_id,
+      expected_transcript_fingerprint: readiness.transcript_fingerprint,
+      allow_incomplete: false,
+    };
     if (readiness.status === "ready" && readiness.ready === true) {
-      shouldGenerate = window.confirm(
+      const shouldGenerate = window.confirm(
         "按当前终评证据规则，现有回答已达到报告准备条件。现在结束访谈并生成报告吗？",
       );
       notice.value = shouldGenerate ? "" : "现有回答已达到报告准备条件，你可以继续说，也可以随时生成报告。";
-    } else if (readiness.status === "insufficient" && readiness.ready === false) {
+      return shouldGenerate ? baseRequest : null;
+    }
+    if (readiness.status === "insufficient" && readiness.ready === false) {
       const message = technicalTurnCapReached.value
         ? "按当前终评证据规则，现有回答可能还不足以支持完整报告。本次访谈已达到技术保护上限，你仍可根据已有回答生成报告，证据有限的部分会如实说明。是否仍然生成？"
-        : "按当前终评证据规则，现有回答可能还不足以支持完整报告。建议继续访谈，补充更多可核对的具体经历、理由和判断依据；你也可以仍然按现有回答生成报告。是否仍然生成？";
-      shouldGenerate = window.confirm(message);
+        : "现有回答尚不足以支持完整报告。你可以继续访谈，也可以现在生成报告，证据有限的部分会如实说明。是否仍然生成？";
+      const shouldGenerate = window.confirm(message);
       notice.value = shouldGenerate
         ? ""
         : technicalTurnCapReached.value
           ? "本次访谈已达到技术保护上限；你仍可根据已有回答生成报告。"
           : "建议继续访谈，补充更多可核对的具体经历、理由和判断依据。";
-    } else {
-      shouldGenerate = window.confirm(
-        "报告准备度仍在检查中。你可以稍后再试，或仍然按现有回答生成报告。是否仍然生成？",
-      );
-      notice.value = shouldGenerate
-        ? ""
-        : "报告准备度仍在检查中，你可以继续访谈后再试。";
+      return shouldGenerate
+        ? { ...baseRequest, allow_incomplete: true }
+        : null;
     }
   } catch {
-    shouldGenerate = window.confirm(
-      "暂时无法完成报告准备度检查。你可以继续访谈，或仍然按现有回答生成报告。是否仍然生成？",
-    );
-    notice.value = shouldGenerate
-      ? ""
-      : "暂时无法完成报告准备度检查，你可以继续访谈后再试。";
+    notice.value = "当前证据结果暂未整理完成，请稍后重试。";
+    return null;
   } finally {
     checkingReadiness.value = false;
   }
-  return shouldGenerate;
+  return null;
 }
 
 async function finishAndGenerate() {
   if (!canFinish.value) return;
-  if (!(await confirmReportGeneration())) return;
+  const request = await confirmReportGeneration();
+  if (!request) return;
   draft.value = "";
   voice.stop();
   playback.stop();
-  await generateReport();
+  await generateReport(false, request);
 }
 
-function continueAfterClosureSuggestion() {
-  if (!closureSuggestion.value || sending.value || acceptingClosure.value) return;
-  dismissedClosureTurnId.value = closureSuggestion.value.closure_turn_id;
-  closureSuggestion.value = null;
-  notice.value = "你可以继续补充；此前的回答已经保存。";
+function continueAfterEvidenceReady() {
+  evidenceReadiness.value = null;
+  notice.value = "你可以继续补充；已提交的回答和证据结果都会保留。";
   answerStartedAt.value = Date.now();
   void nextTick(() => answerInput.value?.focus());
-}
-
-async function acceptSuggestedClosure() {
-  const suggestion = closureSuggestion.value;
-  if (!suggestion || !canFinish.value) return;
-  if (!(await confirmReportGeneration())) return;
-
-  acceptingClosure.value = true;
-  error.value = "";
-  notice.value = "正在确认结束并生成报告…";
-  draft.value = "";
-  voice.stop();
-  playback.stop();
-  try {
-    const result = await acceptClosureSuggestion(
-      uuid.value,
-      suggestion.closure_turn_id,
-      { expected_transcript_fingerprint: suggestion.transcript_fingerprint },
-    );
-    session.value = result.session;
-    updateTurns(result.session.turns ?? turns.value);
-    synchronizeClosureSuggestion(result.session);
-    if (result.session.phase === "completed" || result.report) {
-      localStorage.removeItem("v6:last-session");
-      await router.replace(`/assessment/report/${uuid.value}`);
-      return;
-    }
-    notice.value = result.session.phase === "finalizing"
-      ? "访谈已冻结，报告仍在整理中。你可以稍后安全重试。"
-      : "会话状态已更新，请根据当前状态继续操作。";
-  } catch (cause) {
-    error.value = cause instanceof ApiError
-      ? cause.message
-      : "暂时无法确认结束。已保存的访谈不会丢失，请根据当前状态重试。";
-    try {
-      const snapshot = await synchronizeSession();
-      if (snapshot.phase === "completed" || snapshot.report_available) {
-        localStorage.removeItem("v6:last-session");
-        await router.replace(`/assessment/report/${uuid.value}`);
-        return;
-      }
-      if (snapshot.phase === "finalizing") {
-        notice.value = snapshot.finalization_state === "failed"
-          ? "结束选择已保存，但报告生成失败；可以安全重试。"
-          : "结束选择已保存，报告仍在生成中；可以稍后安全重试。";
-      } else if (snapshot.closure_suggestion) {
-        notice.value = "收束建议仍然有效，你可以再次选择继续交流或结束并生成报告。";
-      } else {
-        notice.value = "对话已更新，原收束建议不再有效；你可以继续交流。";
-      }
-    } catch {
-      notice.value = "暂时无法同步会话状态；已保存的访谈不会丢失，请稍后刷新。";
-    }
-  } finally {
-    acceptingClosure.value = false;
-  }
 }
 
 async function sendPayload(payload: TurnRequest, restoring = false) {
@@ -545,6 +520,9 @@ async function sendPayload(payload: TurnRequest, restoring = false) {
     clearInterviewWaitTimers();
     activeController = null;
     sending.value = false;
+    if (isInterviewing.value && !leaving.value) {
+      startEvidenceReadinessPolling();
+    }
   }
 }
 
@@ -556,6 +534,8 @@ async function submitAnswer() {
     return;
   }
   if (voice.listening.value) voice.stop();
+  clearReadinessPolling();
+  evidenceReadiness.value = null;
   playback.stop();
   const payload: TurnRequest = {
     content,
@@ -588,6 +568,7 @@ async function leaveEarly() {
   if (!window.confirm("退出不会生成报告。已经提交的内容仍会按开始页说明保留，确定退出吗？")) return;
   leaving.value = true;
   clearInterviewWaitTimers();
+  clearReadinessPolling();
   activeController?.abort();
   activeController = null;
   playback.stop();
@@ -621,6 +602,9 @@ async function load() {
       return;
     }
     await recoverPending();
+    if (snapshot.phase === "interviewing" && !hasPending.value && savedAnswerCount.value > 0) {
+      startEvidenceReadinessPolling();
+    }
   } catch (cause) {
     error.value = cause instanceof ApiError ? cause.message : "无法恢复访谈，请确认本地服务已启动。";
   } finally {
@@ -652,6 +636,7 @@ onBeforeRouteLeave(async (to) => {
   if (!window.confirm("离开将退出当前访谈且不生成报告，确定继续吗？")) return false;
   leaving.value = true;
   clearInterviewWaitTimers();
+  clearReadinessPolling();
   activeController?.abort();
   playback.stop();
   voice.stop();
@@ -661,6 +646,7 @@ onBeforeRouteLeave(async (to) => {
 });
 onBeforeUnmount(() => {
   clearInterviewWaitTimers();
+  clearReadinessPolling();
   activeController?.abort();
 });
 </script>
@@ -729,6 +715,30 @@ onBeforeUnmount(() => {
           <RouterLink class="quiet-link" to="/assessment">开始新访谈</RouterLink>
         </div>
 
+        <section
+          v-else-if="evidenceReadiness?.status === 'ready' && evidenceReadiness.ready === true"
+          class="closure-suggestion-card evidence-ready-card"
+          aria-labelledby="evidence-ready-title"
+        >
+          <div>
+            <strong id="evidence-ready-title">现有回答已足够生成完整报告</strong>
+          </div>
+          <div class="closure-suggestion-actions">
+            <button
+              type="button"
+              class="secondary-button"
+              :disabled="sending || checkingReadiness || finalizing"
+              @click="continueAfterEvidenceReady"
+            >继续补充</button>
+            <button
+              type="button"
+              class="primary-button"
+              :disabled="!canFinish"
+              @click="finishAndGenerate"
+            >{{ checkingReadiness ? "正在确认…" : finalizing ? "正在生成…" : "结束并生成报告" }}</button>
+          </div>
+        </section>
+
         <div v-else-if="technicalTurnCapReached" class="finalizing-card technical-limit-card" role="status">
           <div>
             <strong>本次访谈已达到系统的技术保护上限</strong>
@@ -738,31 +748,6 @@ onBeforeUnmount(() => {
             {{ checkingReadiness ? "正在检查…" : "结束并生成报告" }}
           </button>
         </div>
-
-        <section
-          v-else-if="closureSuggestion"
-          class="closure-suggestion-card"
-          aria-labelledby="closure-suggestion-title"
-        >
-          <div>
-            <strong id="closure-suggestion-title">这段对话可以在这里收束</strong>
-            <span>澄澄认为当前内容已形成一个自然停点。你可以继续补充，也可以确认结束并生成报告；无论怎样选择，已提交的回答都会保留。</span>
-          </div>
-          <div class="closure-suggestion-actions">
-            <button
-              type="button"
-              class="secondary-button"
-              :disabled="sending || checkingReadiness || acceptingClosure"
-              @click="continueAfterClosureSuggestion"
-            >继续交流</button>
-            <button
-              type="button"
-              class="primary-button"
-              :disabled="!canFinish"
-              @click="acceptSuggestedClosure"
-            >{{ checkingReadiness ? "正在检查…" : acceptingClosure ? "正在生成…" : "结束并生成报告" }}</button>
-          </div>
-        </section>
 
         <form v-else class="answer-composer" @submit.prevent="submitAnswer">
           <label for="answer-input">你的回答</label>
@@ -774,7 +759,7 @@ onBeforeUnmount(() => {
             maxlength="4000"
             :placeholder="answerPlaceholder"
             aria-describedby="answer-requirement"
-            :disabled="sending || finalizing || checkingReadiness || acceptingClosure"
+            :disabled="sending || finalizing || checkingReadiness"
             @input="onDraftInput"
             @keydown="onAnswerKeydown"
           />
@@ -784,7 +769,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="mic-button"
                 :class="{ recording: voice.listening.value }"
-                :disabled="!voice.supported.value || sending || finalizing || checkingReadiness || acceptingClosure"
+                :disabled="!voice.supported.value || sending || finalizing || checkingReadiness"
                 :aria-pressed="voice.listening.value"
                 @click="toggleVoice"
               >

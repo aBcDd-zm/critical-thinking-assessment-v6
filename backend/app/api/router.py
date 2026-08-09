@@ -47,6 +47,7 @@ from app.schemas import (
     CreateSessionRequest,
     ExitRequest,
     ExpertScoresRequest,
+    FinalizeSessionRequest,
     ReviewRequest,
     SubmitTurnRequest,
 )
@@ -357,6 +358,8 @@ def _run_turn_submission(
     session_uuid: str,
     request: SubmitTurnRequest,
 ) -> None:
+    user_turn_saved = False
+
     def publish(kind: str, payload: Any) -> None:
         try:
             loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
@@ -365,19 +368,69 @@ def _run_turn_submission(
             # Delivery can stop, but the worker must still finish persistence.
             pass
 
+    def emit_event(event: dict[str, Any]) -> None:
+        nonlocal user_turn_saved
+        if event.get("event") == "user_turn_saved":
+            user_turn_saved = True
+        publish("event", event)
+
     try:
         with session_factory() as worker_db:
             sessions.submit(
                 worker_db,
                 session_uuid,
                 request,
-                emit=lambda event: publish("event", event),
+                emit=emit_event,
             )
     except ServiceError as exc:
         publish("service_error", exc)
     except Exception as exc:
         publish("exception", exc)
     finally:
+        if user_turn_saved:
+            try:
+                # submit() holds the per-session lock until it returns or
+                # unwinds. Schedule only afterwards, including the failure
+                # path, so a saved answer is never skipped or deadlocked.
+                sessions.schedule_evidence_snapshot(session_factory, session_uuid)
+            except Exception as snapshot_exc:
+                # Snapshot diagnostics are independent of the authoritative
+                # interview stream. A scheduling failure must not replace a
+                # persisted interviewer result or its original error.
+                try:
+                    with session_factory() as anomaly_db:
+                        persisted_session = anomaly_db.scalar(
+                            select(AssessmentSession).where(
+                                AssessmentSession.uuid == session_uuid
+                            )
+                        )
+                        if persisted_session is not None:
+                            saved_turn_id = anomaly_db.scalar(
+                                select(DialogueTurn.id).where(
+                                    DialogueTurn.session_id
+                                    == persisted_session.id,
+                                    DialogueTurn.role == "user",
+                                    DialogueTurn.client_turn_id
+                                    == request.client_turn_id,
+                                )
+                            )
+                            anomaly_db.add(
+                                TechnicalAnomaly(
+                                    session_id=persisted_session.id,
+                                    turn_id=saved_turn_id,
+                                    category="evidence_snapshot_schedule_failure",
+                                    detail=(
+                                        f"{type(snapshot_exc).__name__}: "
+                                        f"{str(snapshot_exc)[:900]}"
+                                    ),
+                                    recoverable=True,
+                                )
+                            )
+                            anomaly_db.commit()
+                except Exception:
+                    # Persistence can share the same infrastructure failure;
+                    # either way the interview stream remains authoritative.
+                    pass
         publish("done", None)
 
 
@@ -450,9 +503,13 @@ async def submit_turn_stream(
 
 
 @router.post("/sessions/{session_uuid}/finalize")
-def finalize_session(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+def finalize_session(
+    session_uuid: str,
+    request: FinalizeSessionRequest = Body(default_factory=FinalizeSessionRequest),
+    db: Session = Depends(get_db),
+) -> Any:
     try:
-        session = sessions.finalize(db, session_uuid)
+        session = sessions.finalize(db, session_uuid, request)
         return {"session": session_snapshot(session), "report": serialize_report(session)}
     except ServiceError as exc:
         return _service_error(exc)
@@ -480,11 +537,21 @@ def accept_closure_suggestion(
 
 
 @router.post("/sessions/{session_uuid}/report-readiness")
-def report_readiness(session_uuid: str, db: Session = Depends(get_db)) -> Any:
+def report_readiness(
+    session_uuid: str,
+    retry_failed: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    worker_session_factory: Callable[[], Session] = Depends(get_session_factory),
+) -> Any:
     """Check aggregate evidence readiness without freezing or scoring a session."""
 
     try:
-        result = sessions.report_readiness(db, session_uuid)
+        result = sessions.report_readiness(
+            db,
+            session_uuid,
+            worker_session_factory,
+            retry_failed=retry_failed,
+        )
         return JSONResponse(
             status_code=202 if result["status"] == "checking" else 200,
             content=result,
@@ -858,6 +925,56 @@ def admin_session_detail(
         session = sessions.get(db, session_uuid)
         snapshot = session_snapshot(session)
         turn_index = {turn.id: turn.turn_index for turn in session.turns}
+        ordered_turns = sorted(session.turns, key=lambda item: item.turn_index)
+        preceding_question_by_user_index: dict[int, str | None] = {}
+        latest_assistant: str | None = None
+        for turn in ordered_turns:
+            if turn.role == "assistant":
+                latest_assistant = turn.content
+            elif turn.role == "user":
+                preceding_question_by_user_index[turn.turn_index] = latest_assistant
+        final_dimensions_by_span: dict[int, set[str]] = {}
+        for evidence in session.evidence_items:
+            if evidence.attribution_span_id is not None:
+                final_dimensions_by_span.setdefault(
+                    evidence.attribution_span_id, set()
+                ).add(evidence.dimension_key)
+        snapshot_dimensions_by_span: dict[int, set[str]] = {}
+        latest_attribution_check = max(
+            session.readiness_checks,
+            key=lambda item: item.id,
+            default=None,
+        )
+        latest_attribution_check_id = (
+            latest_attribution_check.id
+            if latest_attribution_check is not None
+            else None
+        )
+        latest_attribution_spans = [
+            span
+            for span in session.evidence_attribution_spans
+            if latest_attribution_check_id is not None
+            and span.readiness_check_id == latest_attribution_check_id
+        ]
+        if (
+            latest_attribution_check is not None
+            and isinstance(latest_attribution_check.result_data, dict)
+        ):
+            for dimension in latest_attribution_check.result_data.get(
+                "dimensions", []
+            ):
+                if not isinstance(dimension, dict):
+                    continue
+                dimension_key = dimension.get("dimension_key")
+                for reference in dimension.get("evidence_refs", []):
+                    if (
+                        isinstance(reference, dict)
+                        and isinstance(reference.get("attribution_span_id"), int)
+                        and isinstance(dimension_key, str)
+                    ):
+                        snapshot_dimensions_by_span.setdefault(
+                            reference["attribution_span_id"], set()
+                        ).add(dimension_key)
         snapshot.update(
             {
                 "review_status": session.review.status if session.review else "pending",
@@ -877,8 +994,58 @@ def admin_session_detail(
                         "quote_start": evidence.quote_start,
                         "quote_end": evidence.quote_end,
                         "confidence": evidence.confidence,
+                        "attribution_span_id": evidence.attribution_span_id,
+                        "readiness_check_id": evidence.readiness_check_id,
+                        "validation_status": evidence.validation_status,
+                        "validation_reason": evidence.validation_reason,
+                        "source_type": "user",
+                        "status": "sufficient",
+                        "active_for_scoring": True,
                     }
                     for evidence in sorted(session.evidence_items, key=lambda item: item.id)
+                ],
+                "evidence_attributions": [
+                    {
+                        "id": span.id,
+                        "span_id": span.id,
+                        "readiness_check_id": span.readiness_check_id,
+                        "turn_index": span.turn_index,
+                        "quote": span.quote,
+                        "start": span.start,
+                        "end": span.end,
+                        "text_hash": span.text_hash,
+                        "owner": span.owner,
+                        "relation": span.relation,
+                        "source_label": span.source_label,
+                        "elicitation_level": span.elicitation_level,
+                        "confidence": span.confidence,
+                        "reason": span.reason,
+                        "eligibility": span.eligibility,
+                        "validation_status": span.validation_status,
+                        "validation_reason": span.validation_reason,
+                        "eliciting_question": preceding_question_by_user_index.get(
+                            span.turn_index
+                        ),
+                        "used_dimension_keys": sorted(
+                            final_dimensions_by_span.get(span.id, set())
+                        ),
+                        "final_scoring_dimension_keys": sorted(
+                            final_dimensions_by_span.get(span.id, set())
+                        ),
+                        "snapshot_used_dimension_keys": sorted(
+                            snapshot_dimensions_by_span.get(span.id, set())
+                        ),
+                        "transcript_fingerprint": span.transcript_fingerprint,
+                        "asset_fingerprint": span.asset_fingerprint,
+                        "prompt_template_id": span.prompt_template_id,
+                        "prompt_version": span.prompt_version,
+                        "schema_version": span.schema_version,
+                        "created_at": span.created_at.isoformat(),
+                    }
+                    for span in sorted(
+                        latest_attribution_spans,
+                        key=lambda item: (item.turn_index, item.start, item.id),
+                    )
                 ],
                 "scoring_runs": [
                     {

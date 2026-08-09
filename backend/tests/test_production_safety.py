@@ -79,7 +79,7 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
         natural_interviewer_prompt_version="v6.1.1",
     )
 
-    assert default_config.natural_interviewer_prompt_version == "v6.0.5"
+    assert default_config.natural_interviewer_prompt_version == "v6.2.0"
     assert rollback_config.natural_interviewer_prompt_version == "v6.0.3"
     assert candidate_config.natural_interviewer_prompt_version == "v6.1.1"
     with pytest.raises(ValidationError):
@@ -87,6 +87,42 @@ def test_interviewer_prompt_version_is_explicit_and_rejects_unknown_values() -> 
             _env_file=None,
             natural_interviewer_prompt_version="v6.0.2",
         )
+
+
+def test_v621_is_the_code_default_and_production_requires_enforcement(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("NATURAL_INTERVIEWER_PROMPT_VERSION", raising=False)
+    monkeypatch.delenv("EVIDENCE_ATTRIBUTION_MODE", raising=False)
+    default_config = Settings(_env_file=None)
+    assert default_config.natural_interviewer_prompt_version == "v6.2.1"
+    assert default_config.evidence_attribution_mode == "shadow"
+
+    with pytest.raises(
+        ValidationError,
+        match="EVIDENCE_ATTRIBUTION_MODE must be enforce",
+    ):
+        _production_settings(
+            natural_interviewer_prompt_version="v6.2.1",
+            evidence_attribution_mode="shadow",
+        )
+    production = _production_settings(
+        natural_interviewer_prompt_version="v6.2.1",
+        evidence_attribution_mode="enforce",
+    )
+    assert production.evidence_attribution_mode == "enforce"
+
+
+def test_minimum_user_turn_guard_defaults_to_eight_and_stays_within_cap() -> None:
+    assert Settings(_env_file=None).natural_interview_min_user_turns == 8
+    assert Settings(
+        _env_file=None,
+        natural_interview_min_user_turns=40,
+    ).natural_interview_min_user_turns == 40
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, natural_interview_min_user_turns=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, natural_interview_min_user_turns=41)
 
 
 def test_v6_0_3_rollback_selects_the_preserved_prompt_in_a_fresh_process() -> None:

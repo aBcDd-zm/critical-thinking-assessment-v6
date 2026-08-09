@@ -266,6 +266,36 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 .natural-audit-row { display: grid; grid-template-columns: 130px repeat(4, minmax(0, 1fr)); gap: 10px 16px; border-top: 1px solid #ebe8e0; padding: 15px 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .natural-audit-row > strong { color: var(--forest); }
 .natural-audit-row > small { grid-column: 1 / -1; color: var(--muted); }
+.attribution-card { border: 1px solid var(--line); background: var(--paper); }
+.attribution-card > .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; border-bottom: 1px solid var(--line); padding: 24px 28px; }
+.attribution-card > .section-heading h2 { margin: 4px 0 0; font-size: 20px; }
+.attribution-card > .section-heading p { max-width: 680px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.attribution-list { display: grid; gap: 16px; padding: 22px; }
+.attribution-row { border: 1px solid #e7e2d8; border-left: 4px solid #a98969; background: #fffefb; padding: 18px 20px; }
+.attribution-row.owner-participant_owned { border-left-color: var(--forest); }
+.attribution-row.owner-external_quoted, .attribution-row.owner-external_paraphrased { border-left-color: #a95b4d; }
+.attribution-row.owner-uncertain { border-left-color: #aa852d; }
+.attribution-row.attribution-rejected { background: #fdf8f5; }
+.attribution-row > header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.attribution-row > header > strong { margin-right: auto; color: var(--forest); font-size: 13px; }
+.attribution-badge { display: inline-block; border-radius: 999px; background: #f0e5d9; padding: 5px 9px; color: #6e4c31; font-size: 11px; white-space: nowrap; }
+.attribution-badge.participant_owned { background: #dceadf; color: var(--forest); }
+.attribution-badge.external_quoted, .attribution-badge.external_paraphrased { background: #f3dfd7; color: #813d31; }
+.attribution-badge.uncertain { background: #f0e8cf; color: #785f20; }
+.attribution-badge.relation { background: #eceeea; color: var(--ink); }
+.eliciting-question, .attribution-usage, .attribution-reason { display: grid; grid-template-columns: 74px 1fr; gap: 12px; margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.eliciting-question strong, .attribution-usage strong, .attribution-reason strong { color: var(--ink); }
+.attribution-row blockquote { display: grid; gap: 8px; margin: 15px 0; border: 0; padding: 0; }
+.attribution-span { width: fit-content; border-radius: 2px; background: #e0eee2; padding: 7px 9px; color: var(--ink); font-style: normal; line-height: 1.75; white-space: pre-wrap; }
+.attribution-span.external_quoted, .attribution-span.external_paraphrased { background: #f5e4dd; }
+.attribution-span.uncertain { background: #f4edcf; }
+.attribution-row blockquote small { color: var(--muted); font-size: 11px; }
+.attribution-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.attribution-meta > div { border-top: 1px solid #ebe8e0; padding-top: 10px; }
+.attribution-meta dt { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.attribution-meta dd { margin: 5px 0 0; font-size: 12px; }
+.attribution-reason { border-top: 1px dashed #e2d8ce; padding-top: 11px; color: #813d31; }
+.attribution-empty { margin: 0; }
 .evidence-table-card h2 { padding: 24px 24px 0; font-size: 20px; }
 .trace-review { padding: 0; }
 .trace-stack { display: grid; gap: 18px; }
@@ -441,6 +471,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
   .closure-suggestion-actions { display: grid; grid-template-columns: 1fr; }
   .closure-suggestion-actions .primary-button, .closure-suggestion-actions .secondary-button { width: 100%; }
   .natural-audit-row { grid-template-columns: 1fr; }
+  .attribution-card > .section-heading { align-items: start; flex-direction: column; padding: 20px; }
+  .attribution-list { padding: 14px; }
+  .attribution-row { padding: 16px; }
+  .attribution-meta { grid-template-columns: 1fr 1fr; }
+  .eliciting-question, .attribution-usage, .attribution-reason { grid-template-columns: 1fr; gap: 3px; }
   .admin-login-page { place-items: start center; padding: 18px; }
   .admin-login-card { padding: 28px 22px; }
   .admin-login-card h1 { font-size: 31px; }

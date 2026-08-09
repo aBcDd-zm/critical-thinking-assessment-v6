@@ -1,5 +1,7 @@
 # Natural Interviewer v6.1.1 引导与结束确认候选决策记录
 
+> 历史记录：以下“当前默认”描述仅对应 V6.1.1 决策当时。V6.2 已改为证据驱动结束，当前默认与运行合同见 [V6 Prompt 交接](V6_PROMPT_HANDOFF.md)。
+
 记录日期：2026-08-07
 
 当前默认：`natural_interviewer_v6.0.5`

@@ -149,19 +149,29 @@ export interface FinalizeResponse {
   report?: AssessmentReport | null;
 }
 
-export type ReportReadinessStatus = "ready" | "insufficient" | "checking";
+export interface FinalizeSessionRequest {
+  evidence_check_id?: number;
+  expected_transcript_fingerprint?: string;
+  allow_incomplete?: boolean;
+}
+
+export type ReportReadinessStatus = "ready" | "insufficient" | "checking" | "failed";
 
 /**
  * Participant-safe report readiness result.
  *
  * Dimension names, scores, quotes, and internal scoring details deliberately
- * stay out of this contract: the check only supports an optional soft gate
- * before a participant manually ends the interview.
+ * stay out of this contract. The exact check id and transcript fingerprint
+ * are an optimistic-concurrency boundary for finalizing this same snapshot.
  */
 export interface ReportReadinessResponse {
   status: ReportReadinessStatus;
   ready: boolean | null;
   cached: boolean;
+  check_id: number;
+  transcript_fingerprint: string;
+  minimum_turns_required?: number;
+  minimum_turns_met?: boolean;
 }
 
 /** Administrative contracts stay intentionally separate from participant UI. */
@@ -245,6 +255,66 @@ export interface TechnicalAnomaly {
 
 export type ReviewStatus = "pending" | "in_review" | "approved" | "needs_followup";
 
+export type EvidenceAttributionOwner =
+  | "participant_owned"
+  | "external_quoted"
+  | "external_paraphrased"
+  | "uncertain";
+export type EvidenceAttributionRelation =
+  | "own_reasoning"
+  | "endorses"
+  | "critiques"
+  | "rejects"
+  | "quotes_only"
+  | "asks_or_requests";
+export type EvidenceElicitationLevel = "spontaneous" | "open_probe" | "focused_probe" | "strong_scaffold";
+export type EvidenceEligibilityStatus = "eligible" | "context_only" | "manual_review";
+export type EvidenceAttributionValidationStatus =
+  | "pending"
+  | "validated"
+  | "rejected"
+  | "manual_review"
+  | "legacy_unclassified";
+
+/**
+ * Administrator-only source attribution for an exact participant-input span.
+ * This contract must not be added to SessionSnapshot or participant report APIs.
+ */
+export interface EvidenceAttribution {
+  id?: number | string;
+  span_id?: number | string;
+  user_turn_id?: number | string;
+  readiness_check_id?: number | string | null;
+  turn_index: number;
+  quote: string;
+  start: number;
+  end: number;
+  text_hash?: string;
+  owner: EvidenceAttributionOwner;
+  relation: EvidenceAttributionRelation;
+  source_label?: string | null;
+  elicitation_level: EvidenceElicitationLevel;
+  confidence?: number | null;
+  reason?: string | null;
+  /** Canonical V6.2.1 wire field. */
+  eligibility?: EvidenceEligibilityStatus;
+  /** Accepted during the rollout transition for compatible API producers. */
+  eligibility_status?: EvidenceEligibilityStatus;
+  validation_status?: EvidenceAttributionValidationStatus;
+  validation_reason?: string | null;
+  final_scoring_dimension_keys?: string[];
+  snapshot_used_dimension_keys?: string[];
+  /** Legacy merged usage field; prefer the two explicit fields above. */
+  used_dimension_keys?: string[];
+  eliciting_question?: string | null;
+  transcript_fingerprint?: string;
+  asset_fingerprint?: string;
+  prompt_template_id?: string;
+  prompt_version?: string;
+  schema_version?: string;
+  created_at?: string;
+}
+
 export interface ExpertScore {
   dimension_key: string;
   score: number | null;
@@ -269,6 +339,13 @@ export interface AdminEvidenceItem {
   source_type?: "user" | string;
   status?: EvidenceStatus;
   active_for_scoring?: boolean;
+  quote_start?: number;
+  quote_end?: number;
+  confidence?: number | null;
+  attribution_span_id?: number | string | null;
+  readiness_check_id?: number | string | null;
+  validation_status?: EvidenceAttributionValidationStatus;
+  validation_reason?: string | null;
 }
 
 export interface AdminSessionDetail extends SessionSnapshot {
@@ -276,6 +353,7 @@ export interface AdminSessionDetail extends SessionSnapshot {
   review_notes?: string;
   reviewer?: string;
   reviewed_at?: string | null;
+  evidence_attributions?: EvidenceAttribution[];
   evidence_items?: AdminEvidenceItem[];
   traces?: AgentTrace[];
   scoring_runs?: ScoringRun[];

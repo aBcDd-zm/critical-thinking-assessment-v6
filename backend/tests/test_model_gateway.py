@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import httpx
@@ -7,7 +8,14 @@ import pytest
 
 from app.core.config import settings
 from app.schemas import FinalScorerOutput, NaturalInterviewerOutput
-from app.services.model_gateway import ModelGatewayError, ModelGatewayService
+from app.services.model_gateway import (
+    INCREMENTAL_EVIDENCE_PROMPT_ID,
+    INCREMENTAL_EVIDENCE_PROMPT_VERSION,
+    INCREMENTAL_EVIDENCE_SYSTEM_PROMPT,
+    INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0,
+    ModelGatewayError,
+    ModelGatewayService,
+)
 
 
 class EmptyModelResponse:
@@ -144,6 +152,49 @@ def test_interviewer_uses_low_latency_non_thinking_profile(
     assert captured["total_timeout_seconds"] == 25.0
 
 
+def test_incremental_evidence_uses_its_own_bounded_non_thinking_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "model_gateway_mode", "real")
+    monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
+    captured: dict[str, object] = {}
+
+    def fake_typed_call(self: ModelGatewayService, **kwargs: object) -> object:
+        captured.update(kwargs)
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr(ModelGatewayService, "_typed_call", fake_typed_call)
+
+    with pytest.raises(RuntimeError, match="captured"):
+        ModelGatewayService().generate_incremental_evidence(
+            {"previous_snapshot": None, "new_user_turns": []}
+        )
+
+    assert captured["max_tokens"] == 2000
+    assert captured["thinking"] == "disabled"
+    assert captured["primary_timeout_seconds"] == 8.0
+    assert captured["total_timeout_seconds"] == 15.0
+
+
+def test_v6_2_1_incremental_prompt_preserves_old_text_and_requires_direct_behavior() -> None:
+    assert INCREMENTAL_EVIDENCE_PROMPT_ID == "natural_incremental_evidence_v6.2.1"
+    assert INCREMENTAL_EVIDENCE_PROMPT_VERSION == "v6.2.1"
+    assert INCREMENTAL_EVIDENCE_SYSTEM_PROMPT.startswith(
+        INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0
+    )
+    assert hashlib.sha256(
+        INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0.encode("utf-8")
+    ).hexdigest() == "057a11c05588bfd5d430f11591bd2a691b89b28ea573df8a81ddd0e61e55ba51"
+    compact = "".join(INCREMENTAL_EVIDENCE_SYSTEM_PROMPT.split())
+    assert "没有展示机会、没有谈到、没有说明行动或没有说明调整" in compact
+    assert "不能把这些缺失当成低水平行为并给1分" in compact
+    assert "数字分数只能由用户直接表达的具体行为支持" in compact
+    assert "不能同时使多个维度sufficient=true" in compact
+    assert "综合决策必须至少直接呈现实际选择" in compact
+    assert "动态调整必须直接呈现已经如何调整" in compact
+    assert "证据缺失永远不等于低能力" in compact
+
+
 def test_two_empty_model_outputs_raise_distinct_terminal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -249,3 +300,101 @@ def test_final_scorer_bounds_overlong_summary_lists() -> None:
 
     assert output.strengths == ["一", "二"]
     assert output.priorities == ["甲", "乙"]
+
+
+def test_interviewer_normalizes_provider_json_null_string() -> None:
+    output = NaturalInterviewerOutput.model_validate(
+        {
+            "interviewer_message": "当时哪条信息最影响你的判断？",
+            "session_action": "continue",
+            "finish_reason": "null",
+        }
+    )
+
+    assert output.finish_reason is None
+
+
+def test_final_scorer_normalizes_dimension_keyed_object() -> None:
+    dimension_map = {
+        key: {
+            "score": None,
+            "quotes": [],
+            "reason": "证据有限，未充分测得该视角。",
+            "confidence": 0.0,
+            "sufficient": False,
+        }
+        for key in (
+            "problem_definition",
+            "evidence_evaluation",
+            "reasoning_argumentation",
+            "multiple_perspectives",
+            "integrative_decision",
+            "dynamic_adjustment",
+        )
+    }
+
+    output = FinalScorerOutput.model_validate(
+        {
+            "dimensions": dimension_map,
+            "strengths": [],
+            "priorities": [],
+        }
+    )
+
+    assert [item.dimension_key for item in output.dimensions] == list(dimension_map)
+
+
+@pytest.mark.parametrize("alias", ["name", "dimension", "key"])
+def test_final_scorer_normalizes_provider_dimension_alias(alias: str) -> None:
+    dimension_keys = (
+        "problem_definition",
+        "evidence_evaluation",
+        "reasoning_argumentation",
+        "multiple_perspectives",
+        "integrative_decision",
+        "dynamic_adjustment",
+    )
+    dimensions = [
+        {
+            alias: key,
+            "score": None,
+            "quotes": [],
+            "reason": "证据有限，未充分测得该视角。",
+            "confidence": 0.0,
+            "sufficient": False,
+        }
+        for key in dimension_keys
+    ]
+
+    output = FinalScorerOutput.model_validate(
+        {"dimensions": dimensions, "strengths": [], "priorities": []}
+    )
+
+    assert [item.dimension_key for item in output.dimensions] == list(dimension_keys)
+
+
+def test_final_scorer_normalizes_provider_observation_alias() -> None:
+    dimensions = [
+        {
+            "dimension_key": key,
+            "score": None,
+            "quotes": [],
+            "observation": "证据有限，未充分测得该视角。",
+            "confidence": 0.0,
+            "sufficient": False,
+        }
+        for key in (
+            "problem_definition",
+            "evidence_evaluation",
+            "reasoning_argumentation",
+            "multiple_perspectives",
+            "integrative_decision",
+            "dynamic_adjustment",
+        )
+    ]
+
+    output = FinalScorerOutput.model_validate(
+        {"dimensions": dimensions, "strengths": [], "priorities": []}
+    )
+
+    assert all(item.reason == "证据有限，未充分测得该视角。" for item in output.dimensions)

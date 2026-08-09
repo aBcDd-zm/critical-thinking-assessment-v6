@@ -34,12 +34,19 @@ mkdir -p "$BACKUP_DIR"
 chmod 0700 "$BACKUP_DIR"
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-snapshot_path="/tmp/cta-v6-backup-${timestamp}.db"
+snapshot_path="/app/data/.cta-v6-backup-${timestamp}.db"
 backup_path="$BACKUP_DIR/cta-v6-${timestamp}.sqlite3"
 
 # sqlite3.Connection.backup creates a consistent snapshot without stopping the
-# interview service. The temporary source is inside the backend's tmpfs, not
-# the persistent database volume.
+# interview service. Docker cannot reliably copy a file out of this container's
+# tmpfs, so the short-lived snapshot is placed beside the database and removed
+# after docker cp (or on any interrupted/failed backup attempt).
+cleanup_snapshot() {
+  docker compose --project-directory "$PROJECT_ROOT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T backend \
+    sh -ceu 'rm -f -- "$1"' sh "$snapshot_path" >/dev/null 2>&1 || true
+}
+trap cleanup_snapshot 0 1 2 15
+
 docker compose --project-directory "$PROJECT_ROOT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T backend \
   python - "$snapshot_path" <<'PY'
 import sqlite3
@@ -55,8 +62,8 @@ finally:
 PY
 
 docker cp "$container_id:$snapshot_path" "$backup_path"
-docker compose --project-directory "$PROJECT_ROOT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T backend \
-  sh -ceu 'rm -f -- "$1"' sh "$snapshot_path"
+cleanup_snapshot
+trap - 0 1 2 15
 
 [ -s "$backup_path" ] || die "the snapshot file is empty"
 chmod 0600 "$backup_path"

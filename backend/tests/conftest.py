@@ -10,6 +10,11 @@ from argon2 import PasswordHasher
 os.environ["DATABASE_URL"] = "sqlite:////tmp/critical-thinking-v6-pytest.db"
 os.environ["AUTO_CREATE_DB"] = "false"
 os.environ["MODEL_GATEWAY_MODE"] = "mock"
+# The historical regression suite remains pinned to its shipped contract.
+# V6.2.1 tests opt in explicitly so a global default change does not silently
+# reinterpret legacy sessions.
+os.environ["NATURAL_INTERVIEWER_PROMPT_VERSION"] = "v6.2.0"
+os.environ["EVIDENCE_ATTRIBUTION_MODE"] = "disabled"
 os.environ["DEEPSEEK_API_KEY"] = ""
 os.environ["TTS_MODE"] = "fake"
 os.environ["DOUBAO_TTS_API_KEY"] = ""

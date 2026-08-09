@@ -5,7 +5,6 @@ import InterviewView from "./InterviewView.vue";
 const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
   checkReportReadiness: vi.fn(),
-  acceptClosureSuggestion: vi.fn(),
   finalizeSession: vi.fn(),
   exitSession: vi.fn(),
   submitTurnStream: vi.fn(),
@@ -19,7 +18,6 @@ vi.mock("@/api/session", async (importOriginal) => {
     ...actual,
     getSession: mocks.getSession,
     checkReportReadiness: mocks.checkReportReadiness,
-    acceptClosureSuggestion: mocks.acceptClosureSuggestion,
     finalizeSession: mocks.finalizeSession,
     exitSession: mocks.exitSession,
     submitTurnStream: mocks.submitTurnStream,
@@ -33,6 +31,25 @@ vi.mock("vue-router", () => ({
 
 const openingTurn = { id: 1, turn_index: 0, role: "assistant" as const, phase: "interviewing", content: "你想从哪里开始聊？" };
 const validAnswer = "我正在认真比较这个选择，也想把影响决定的现实条件想清楚。";
+const transcriptFingerprint = "a".repeat(64);
+const insufficientReadiness = {
+  status: "insufficient" as const,
+  ready: false,
+  cached: true,
+  check_id: 7,
+  transcript_fingerprint: transcriptFingerprint,
+  minimum_turns_required: 8,
+  minimum_turns_met: false,
+};
+const readyReadiness = {
+  status: "ready" as const,
+  ready: true,
+  cached: true,
+  check_id: 8,
+  transcript_fingerprint: transcriptFingerprint,
+  minimum_turns_required: 8,
+  minimum_turns_met: true,
+};
 
 describe("InterviewView", () => {
   afterEach(() => {
@@ -50,16 +67,9 @@ describe("InterviewView", () => {
       user_answer_count: 0,
       turns: [openingTurn],
     });
-    mocks.checkReportReadiness.mockResolvedValue({
-      status: "ready",
-      ready: true,
-      cached: false,
-    });
+    mocks.checkReportReadiness.mockResolvedValue(insufficientReadiness);
     mocks.finalizeSession.mockResolvedValue({
       session: { uuid: "session-v6", phase: "completed", turns: [], report_available: true },
-    });
-    mocks.acceptClosureSuggestion.mockResolvedValue({
-      session: { uuid: "session-v6", phase: "completed", turns: [], report_available: true, closure_suggestion: null },
     });
   });
 
@@ -87,15 +97,18 @@ describe("InterviewView", () => {
     await wrapper.get("button.compact-action").trigger("click");
     await flushPromises();
 
-    expect(mocks.checkReportReadiness).toHaveBeenCalledWith("session-v6");
-    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+    expect(mocks.checkReportReadiness).toHaveBeenCalledWith("session-v6", false);
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6", {
+      evidence_check_id: 7,
+      expected_transcript_fingerprint: transcriptFingerprint,
+      allow_incomplete: true,
+    });
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
   });
 
   it("recommends continuing when evidence is insufficient without exposing scoring details", async () => {
     mocks.checkReportReadiness.mockResolvedValueOnce({
-      status: "insufficient",
-      ready: false,
+      ...insufficientReadiness,
       cached: false,
     });
     vi.mocked(window.confirm).mockReturnValueOnce(false);
@@ -107,7 +120,7 @@ describe("InterviewView", () => {
     await wrapper.get("button.compact-action").trigger("click");
     await flushPromises();
 
-    expect(mocks.checkReportReadiness).toHaveBeenCalledWith("session-v6");
+    expect(mocks.checkReportReadiness).toHaveBeenCalledWith("session-v6", false);
     expect(mocks.finalizeSession).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("建议继续访谈");
     expect(wrapper.text()).not.toContain("问题界定");
@@ -116,11 +129,7 @@ describe("InterviewView", () => {
   });
 
   it("allows a participant to generate a report despite insufficient evidence", async () => {
-    mocks.checkReportReadiness.mockResolvedValueOnce({
-      status: "insufficient",
-      ready: false,
-      cached: true,
-    });
+    mocks.checkReportReadiness.mockResolvedValueOnce(insufficientReadiness);
 
     const wrapper = mount(InterviewView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
@@ -129,11 +138,15 @@ describe("InterviewView", () => {
     await wrapper.get("button.compact-action").trigger("click");
     await flushPromises();
 
-    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6", {
+      evidence_check_id: 7,
+      expected_transcript_fingerprint: transcriptFingerprint,
+      allow_incomplete: true,
+    });
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
   });
 
-  it("fails open when readiness cannot be checked and the participant confirms", async () => {
+  it("keeps the interview open when the current evidence snapshot cannot be checked", async () => {
     mocks.checkReportReadiness.mockRejectedValueOnce(new Error("readiness unavailable"));
 
     const wrapper = mount(InterviewView, {
@@ -143,17 +156,25 @@ describe("InterviewView", () => {
     await wrapper.get("button.compact-action").trigger("click");
     await flushPromises();
 
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("仍然按现有回答生成报告"));
-    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("当前证据结果暂未整理完成");
   });
 
   it("does not misdescribe an in-progress check as insufficient evidence", async () => {
     mocks.checkReportReadiness.mockResolvedValueOnce({
       status: "checking",
       ready: null,
-      cached: true,
+      cached: false,
+      check_id: 9,
+      transcript_fingerprint: transcriptFingerprint,
+    }).mockResolvedValueOnce({
+      status: "failed",
+      ready: null,
+      cached: false,
+      check_id: 9,
+      transcript_fingerprint: transcriptFingerprint,
     });
-    vi.mocked(window.confirm).mockReturnValueOnce(false);
 
     const wrapper = mount(InterviewView, {
       global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
@@ -162,9 +183,13 @@ describe("InterviewView", () => {
     await wrapper.get("button.compact-action").trigger("click");
     await flushPromises();
 
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("仍在检查中"));
+    await new Promise((resolve) => window.setTimeout(resolve, 800));
+    await flushPromises();
+
+    expect(window.confirm).not.toHaveBeenCalled();
     expect(mocks.finalizeSession).not.toHaveBeenCalled();
     expect(wrapper.text()).not.toContain("证据不足");
+    expect(wrapper.text()).toContain("请重试");
   });
 
   it("shows the editable voice-input controls only when the build flag is explicitly enabled", async () => {
@@ -210,7 +235,7 @@ describe("InterviewView", () => {
     expect(wrapper.text()).toContain("语音播报");
   });
 
-  it("restores a persisted close suggestion after refresh and lets the participant continue", async () => {
+  it("ignores a persisted legacy natural-close suggestion and keeps the composer open", async () => {
     const fingerprint = "c".repeat(64);
     mocks.getSession.mockResolvedValueOnce({
       uuid: "session-v6",
@@ -233,24 +258,14 @@ describe("InterviewView", () => {
     });
     await flushPromises();
 
-    expect(wrapper.get(".closure-suggestion-card").text()).toContain("继续交流");
-    expect(wrapper.get(".closure-suggestion-card").text()).toContain("结束并生成报告");
-    expect(wrapper.find("textarea").exists()).toBe(false);
-    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
-    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
-    expect(mocks.finalizeSession).not.toHaveBeenCalled();
-
-    await wrapper.get(".closure-suggestion-card .secondary-button").trigger("click");
-    await flushPromises();
-
     expect(wrapper.find(".closure-suggestion-card").exists()).toBe(false);
     expect(wrapper.find("textarea").exists()).toBe(true);
-    expect(wrapper.text()).toContain("你可以继续补充");
-    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
-    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
+    expect(wrapper.text()).not.toContain("自然停点");
+    expect(mocks.checkReportReadiness).toHaveBeenCalledWith("session-v6");
+    expect(mocks.finalizeSession).not.toHaveBeenCalled();
   });
 
-  it("replays one close suggestion idempotently and only accepts it after participant confirmation", async () => {
+  it("ignores duplicated legacy close events and lets evidence readiness control the end card", async () => {
     const fingerprint = "d".repeat(64);
     const suggestedSession = {
       uuid: "session-v6",
@@ -301,23 +316,86 @@ describe("InterviewView", () => {
     await wrapper.get("form").trigger("submit");
     await flushPromises();
 
-    expect(wrapper.findAll(".closure-suggestion-card")).toHaveLength(1);
-    expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
-    expect(mocks.acceptClosureSuggestion).not.toHaveBeenCalled();
+    expect(wrapper.find(".closure-suggestion-card").exists()).toBe(false);
+    expect(wrapper.find("textarea").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("自然停点");
+    expect(mocks.checkReportReadiness).toHaveBeenCalled();
     expect(mocks.finalizeSession).not.toHaveBeenCalled();
+  });
 
-    await wrapper.get(".closure-suggestion-card .primary-button").trigger("click");
+  it("shows the end card only when the exact evidence snapshot is fully ready", async () => {
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 8,
+      turns: [openingTurn, { id: 2, turn_index: 1, role: "user", content: validAnswer }],
+    });
+    mocks.checkReportReadiness.mockResolvedValueOnce(readyReadiness);
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
     await flushPromises();
 
-    expect(mocks.checkReportReadiness).toHaveBeenCalledTimes(1);
-    expect(mocks.acceptClosureSuggestion).toHaveBeenCalledTimes(1);
-    expect(mocks.acceptClosureSuggestion).toHaveBeenCalledWith(
-      "session-v6",
-      3,
-      { expected_transcript_fingerprint: fingerprint },
-    );
-    expect(mocks.finalizeSession).not.toHaveBeenCalled();
-    expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
+    expect(wrapper.get(".evidence-ready-card").text()).toContain("现有回答已足够生成完整报告");
+    expect(wrapper.text()).not.toContain("自然停点");
+    expect(wrapper.find("textarea").exists()).toBe(false);
+
+    await wrapper.get(".evidence-ready-card .secondary-button").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".evidence-ready-card").exists()).toBe(false);
+    expect(wrapper.find("textarea").exists()).toBe(true);
+  });
+
+  it("does not show the end card before eight saved answers even if evidence is broad", async () => {
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 7,
+      turns: [openingTurn, { id: 2, turn_index: 1, role: "user", content: validAnswer }],
+    });
+    mocks.checkReportReadiness.mockResolvedValueOnce({
+      ...insufficientReadiness,
+      minimum_turns_met: false,
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.find(".evidence-ready-card").exists()).toBe(false);
+    expect(wrapper.find("textarea").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("至少 8 轮");
+    expect(wrapper.text()).not.toContain("六维");
+  });
+
+  it("keeps the composer available while the background evidence task is checking", async () => {
+    vi.useFakeTimers();
+    mocks.getSession.mockResolvedValueOnce({
+      uuid: "session-v6",
+      phase: "interviewing",
+      user_answer_count: 1,
+      turns: [openingTurn, { id: 2, turn_index: 1, role: "user", content: validAnswer }],
+    });
+    mocks.checkReportReadiness.mockResolvedValue({
+      status: "checking",
+      ready: null,
+      cached: false,
+      check_id: 10,
+      transcript_fingerprint: transcriptFingerprint,
+    });
+
+    const wrapper = mount(InterviewView, {
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(wrapper.find(".evidence-ready-card").exists()).toBe(false);
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    expect(wrapper.find("button.send-button").exists()).toBe(true);
+    wrapper.unmount();
+    vi.useRealTimers();
   });
 
   it("keeps the legacy automatic report path for older prompt versions that already froze the session", async () => {
@@ -352,7 +430,7 @@ describe("InterviewView", () => {
     await wrapper.get("form").trigger("submit");
     await flushPromises();
 
-    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6", {});
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
     expect(mocks.checkReportReadiness).not.toHaveBeenCalled();
   });
@@ -668,7 +746,11 @@ describe("InterviewView", () => {
     await wrapper.get(".technical-limit-card button").trigger("click");
     await flushPromises();
 
-    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6");
+    expect(mocks.finalizeSession).toHaveBeenCalledWith("session-v6", {
+      evidence_check_id: 7,
+      expected_transcript_fingerprint: transcriptFingerprint,
+      allow_incomplete: true,
+    });
     expect(mocks.replace).toHaveBeenCalledWith("/assessment/report/session-v6");
   });
 
