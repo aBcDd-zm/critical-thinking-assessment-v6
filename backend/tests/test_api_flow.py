@@ -1543,21 +1543,33 @@ def test_each_session_keeps_the_prompt_version_recorded_by_its_opening(
     } == {"v6.1.1"}
 
 
+@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1", "v6.2.3"])
 def test_v6_2_evidence_gate_overrides_legacy_guided_consent_closure(
-    client, monkeypatch
+    client, monkeypatch, prompt_version: str
 ) -> None:
+    monkeypatch.setattr(
+        settings, "natural_interviewer_prompt_version", prompt_version
+    )
     session_uuid = create_session(
         client,
         consent_version="v6-natural-interview-guidance-2026-08",
     )
     gateway = api_router.sessions.orchestrator.gateway
 
-    def terminal_natural_close(_payload, **_kwargs):
+    def terminal_natural_close(payload, **_kwargs):
+        navigation = None
+        if prompt_version in {"v6.2.1", "v6.2.3"}:
+            navigation = {
+                "decision_anchor": payload["anchor_candidates"][0],
+                "focus_kind": "other",
+                "mainline_relation": "core",
+            }
         return StructuredCallResult(
             output=NaturalInterviewerOutput(
                 interviewer_message="访谈已经结束，正在生成报告。",
                 session_action="finish",
                 finish_reason="natural_closure",
+                navigation=navigation,
             ),
             provider="mock",
             model="guided-consent-close-test",
@@ -1801,7 +1813,7 @@ def test_v6_0_5_natural_close_preserves_the_existing_freeze_path(
     assert events[-1]["data"]["session"]["transcript_fingerprint"] is not None
 
 
-@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1"])
+@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1", "v6.2.3"])
 def test_v6_2_explicit_finish_intent_still_waits_for_the_snapshot_control(
     client, monkeypatch, prompt_version: str
 ) -> None:
@@ -1811,7 +1823,7 @@ def test_v6_2_explicit_finish_intent_still_waits_for_the_snapshot_control(
 
     def user_requested(payload, **_kwargs):
         navigation = None
-        if prompt_version == "v6.2.1":
+        if prompt_version in {"v6.2.1", "v6.2.3"}:
             anchor = payload["anchor_candidates"][0]
             navigation = {
                 "decision_anchor": anchor,
@@ -1968,7 +1980,7 @@ def test_finish_intent_guard_routes_uncertain_wording_to_confirmation(
     assert classify_user_finish_request(content) == "ambiguous"
 
 
-@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1"])
+@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1", "v6.2.3"])
 def test_v6_2_unconfirmed_finish_intent_is_suppressed_without_finalizing(
     client, monkeypatch, prompt_version: str
 ) -> None:
@@ -1978,7 +1990,7 @@ def test_v6_2_unconfirmed_finish_intent_is_suppressed_without_finalizing(
 
     def misclassified_user_request(payload, **_kwargs):
         navigation = None
-        if prompt_version == "v6.2.1":
+        if prompt_version in {"v6.2.1", "v6.2.3"}:
             anchor = payload["anchor_candidates"][0]
             navigation = {
                 "decision_anchor": anchor,
@@ -2034,7 +2046,7 @@ def test_v6_2_unconfirmed_finish_intent_is_suppressed_without_finalizing(
         assert trace.output_contract["model_finish_reason"] == "user_requested"
 
 
-@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1"])
+@pytest.mark.parametrize("prompt_version", ["v6.2.0", "v6.2.1", "v6.2.3"])
 def test_v6_2_ambiguous_finish_intent_uses_a_neutral_choice_without_finalizing(
     client, monkeypatch, prompt_version: str
 ) -> None:
@@ -2044,7 +2056,7 @@ def test_v6_2_ambiguous_finish_intent_uses_a_neutral_choice_without_finalizing(
 
     def ambiguous_user_request(payload, **_kwargs):
         navigation = None
-        if prompt_version == "v6.2.1":
+        if prompt_version in {"v6.2.1", "v6.2.3"}:
             anchor = payload["anchor_candidates"][0]
             navigation = {
                 "decision_anchor": anchor,
@@ -2736,6 +2748,32 @@ def test_invalid_scorer_quote_fails_then_finalize_retries(client, monkeypatch) -
     )
     assert recovered.status_code == 200
     assert recovered.json()["session"]["phase"] == "completed"
+
+
+@pytest.mark.parametrize("prompt_version", ["v6.2.1", "v6.2.3"])
+def test_frozen_evidence_gated_session_requires_its_bound_snapshot(
+    client, monkeypatch, prompt_version: str
+) -> None:
+    monkeypatch.setattr(
+        settings, "natural_interviewer_prompt_version", prompt_version
+    )
+    monkeypatch.setattr(settings, "evidence_attribution_mode", "enforce")
+    session_uuid = create_session(client)
+    with TestSession() as db:
+        session = db.scalar(
+            select(AssessmentSession).where(
+                AssessmentSession.uuid == session_uuid
+            )
+        )
+        assert session is not None
+        session.phase = "finalizing"
+        session.finalization_state = "frozen"
+        session.transcript_fingerprint = transcript_fingerprint(session)
+        db.commit()
+
+    failed = client.post(f"/api/v1/sessions/{session_uuid}/finalize")
+    assert failed.status_code == 503
+    assert failed.json()["code"] == "evidence_snapshot_failed"
 
 
 def test_interviewer_text_cannot_be_used_as_final_scoring_evidence(client, monkeypatch) -> None:

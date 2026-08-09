@@ -55,6 +55,7 @@ from app.services.orchestrator import (
     validate_attribution_output,
 )
 from app.services.session_service import (
+    SessionService,
     _lease_token,
     _report_readiness_lease_seconds,
     _report_readiness_asset_fingerprint,
@@ -1055,7 +1056,10 @@ def test_attributed_scorer_refs_are_revalidated(
         )
 
 
-def test_v621_navigation_requires_exact_user_anchor_and_returns_from_source_branch() -> None:
+@pytest.mark.parametrize("prompt_version", ["v6.2.1", "v6.2.3"])
+def test_attribution_aware_navigation_requires_exact_user_anchor_and_returns_from_source_branch(
+    prompt_version: str,
+) -> None:
     transcript = [
         {"turn_index": 0, "role": "assistant", "content": "当时最难判断的是什么？"},
         {"turn_index": 1, "role": "user", "content": "AI说直接上线，但我觉得要先核实数据。"},
@@ -1067,7 +1071,7 @@ def test_v621_navigation_requires_exact_user_anchor_and_returns_from_source_bran
                 session_action="continue",
                 finish_reason=None,
             ),
-            prompt_version="v6.2.1",
+            prompt_version=prompt_version,
             transcript=transcript,
         )
 
@@ -1075,7 +1079,7 @@ def test_v621_navigation_requires_exact_user_anchor_and_returns_from_source_bran
     first_payload = _interview_payload(transcript)
     assert first_payload["source_clarification_required"] is True
     first = gateway.generate_interviewer(
-        first_payload, prompt_version="v6.2.1"
+        first_payload, prompt_version=prompt_version
     ).output
     assert first.navigation.mainline_relation == "source_clarification"
     assert "哪些是外部材料" in first.interviewer_message
@@ -1100,7 +1104,7 @@ def test_v621_navigation_requires_exact_user_anchor_and_returns_from_source_bran
     ]
     returned = gateway.generate_interviewer(
         _interview_payload(returned_transcript),
-        prompt_version="v6.2.1",
+        prompt_version=prompt_version,
     ).output
     assert source_clarification_required(returned_transcript) is False
     assert returned.navigation.mainline_relation == "return"
@@ -1119,7 +1123,7 @@ def test_v621_navigation_requires_exact_user_anchor_and_returns_from_source_bran
     with pytest.raises(InterviewContractError, match="do_not_match_quote"):
         _validated_navigation(
             bad,
-            prompt_version="v6.2.1",
+            prompt_version=prompt_version,
             transcript=returned_transcript,
         )
 
@@ -1145,7 +1149,7 @@ def test_v621_navigation_requires_exact_user_anchor_and_returns_from_source_bran
     with pytest.raises(InterviewContractError, match="not_in_server_candidates"):
         _validated_navigation(
             non_candidate,
-            prompt_version="v6.2.1",
+            prompt_version=prompt_version,
             transcript=returned_transcript,
         )
 
@@ -1753,6 +1757,42 @@ def test_session_binds_attribution_mode_at_opening(client, monkeypatch) -> None:
                 EvidenceAttributionSpan.session_id == disabled_session.id
             )
         )
+
+
+@pytest.mark.parametrize("prompt_version", ["v6.2.1", "v6.2.3"])
+def test_attribution_aware_session_binding_is_version_isolated(
+    client, monkeypatch, prompt_version: str
+) -> None:
+    monkeypatch.setattr(
+        settings, "natural_interviewer_prompt_version", prompt_version
+    )
+    monkeypatch.setattr(settings, "evidence_attribution_mode", "shadow")
+    session_uuid = _create_session(client)
+
+    # A later deployment switch must not reinterpret an in-flight session.
+    monkeypatch.setattr(settings, "natural_interviewer_prompt_version", "v6.0.5")
+    monkeypatch.setattr(settings, "evidence_attribution_mode", "enforce")
+    with TestSession() as db:
+        session = db.scalar(
+            select(AssessmentSession).where(
+                AssessmentSession.uuid == session_uuid
+            )
+        )
+        assert session is not None
+        opening = db.scalar(
+            select(AgentTrace).where(
+                AgentTrace.session_id == session.id,
+                AgentTrace.action == "natural_opening",
+            )
+        )
+        assert opening is not None
+        assert opening.prompt_version == prompt_version
+        assert opening.output_contract["evidence_attribution_mode"] == "shadow"
+        assert (
+            SessionService._bound_interviewer_prompt_version(db, session.id)
+            == prompt_version
+        )
+        assert SessionService._effective_attribution_mode(db, session.id) == "shadow"
 
 
 def test_readiness_lease_covers_enforce_and_historical_shadow_budgets(

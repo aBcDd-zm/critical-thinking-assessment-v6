@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Literal, Optional, TypeVar
 
@@ -496,6 +497,227 @@ def _validate_v621_opening_contract(output: NaturalInterviewerOutput) -> None:
         raise ValueError("opening_navigation_must_be_null")
 
 
+def _v623_allows_non_question_continue(payload: dict[str, Any]) -> bool:
+    """Allow space only for an explicit interaction repair or participant boundary.
+
+    Keep this classifier deliberately narrow. Ordinary distress or uncertainty still
+    receives one gentle, concrete question; only language directed at the interview
+    interaction itself may produce a question-free ``continue`` response.
+    """
+
+    transcript = payload.get("transcript") or []
+    latest_user = next(
+        (
+            str(item.get("content") or "").strip()
+            for item in reversed(transcript)
+            if isinstance(item, dict) and item.get("role") == "user"
+        ),
+        "",
+    )
+    normalized = re.sub(r"\s+", "", latest_user)
+    if not normalized:
+        return False
+
+    bare = normalized.rstrip("。！!？?")
+    exact_repair_or_boundary = {
+        "不对",
+        "不是",
+        "不是这样",
+        "不是这个意思",
+        "你理解错了",
+        "你误会了",
+        "我没听懂",
+        "我没听明白",
+        "我不明白你的问题",
+        "请解释一下",
+        "先停一下",
+        "暂停一下",
+        "等一下",
+        "让我缓缓",
+        "让我缓一缓",
+        "我想缓一缓",
+        "休息一下",
+        "我不想回答这个",
+        "我不愿回答这个",
+        "我不方便回答",
+        "这个不方便说",
+        "别问这个",
+        "换个问题",
+        "不想聊这个",
+        "先不聊这个",
+    }
+    if bare in exact_repair_or_boundary:
+        return True
+
+    # A correction may need a few words to state the repaired meaning. Anchor the
+    # entire utterance and cap its tail so a later narrative is never exempted.
+    correction = re.fullmatch(
+        r"(?:你理解错了|你误会了|纠正一下)[，,:]?(?:我说的是|"
+        r"不是我说的|(?:我并?)?没有说)?[^,，。！!？?]{0,24}",
+        bare,
+    )
+    misunderstanding = re.fullmatch(
+        r"(?:我(?:没听懂|没听明白|不明白)(?:你(?:刚才)?(?:的问题|这句话))?"
+        r"|你(?:刚才)?(?:的问题|这句话)是什么意思"
+        r"|(?:能|请)解释一下你(?:刚才)?(?:的问题|这句话))",
+        bare,
+    )
+    return correction is not None or misunderstanding is not None
+
+
+def _v623_is_explicit_finish_request(payload: dict[str, Any]) -> bool:
+    """Recognize only a direct, declarative request to end this interview.
+
+    This intentionally duplicates only the narrow candidate-side contract instead
+    of importing the orchestrator and creating a service-layer cycle. Ambiguous
+    wording remains for the orchestrator's richer choice handling.
+    """
+
+    transcript = payload.get("transcript") or []
+    latest_user = next(
+        (
+            str(item.get("content") or "").strip()
+            for item in reversed(transcript)
+            if isinstance(item, dict) and item.get("role") == "user"
+        ),
+        "",
+    )
+    raw = unicodedata.normalize("NFKC", latest_user).strip().casefold()
+    if not raw or any(mark in raw for mark in ("?", "？")):
+        return False
+    quote_pairs = (
+        ("“", "”"),
+        ('"', '"'),
+        ("‘", "’"),
+        ("'", "'"),
+        ("「", "」"),
+        ("『", "』"),
+    )
+    if any(raw.startswith(left) and raw.endswith(right) for left, right in quote_pairs):
+        return False
+    compact = re.sub(r"[\s,，。.!！…]+", "", raw).translate(
+        str.maketrans(
+            {
+                "結": "结",
+                "訪": "访",
+                "談": "谈",
+                "對": "对",
+                "話": "话",
+                "這": "这",
+                "請": "请",
+                "幫": "帮",
+                "繼": "继",
+                "續": "续",
+                "問": "问",
+                "報": "报",
+                "產": "产",
+                "願": "愿",
+                "說": "说",
+                "裡": "里",
+            }
+        )
+    )
+    if re.search(
+        r"(?:如果|假如|要是|假设|if).{0,24}"
+        r"(?:结束|停止|退出|生成报告|end|stop|quit)",
+        compact,
+    ):
+        return False
+    if re.search(
+        r"(?:他|她|朋友|同学|老师|用户|he|she|they|myfriend).{0,12}"
+        r"(?:说|问|要求|建议|said|asked|told).{0,16}"
+        r"(?:结束|停止|退出|报告|end|stop|quit|report)",
+        compact,
+    ):
+        return False
+    patterns = (
+        r"(?:(?:请|麻烦)(?:帮我)?(?:现在|立即|就)?)?(?:结束|停止|退出)"
+        r"(?:这次|本次|当前)?(?:访谈|对话|问答)(?:吧|谢谢|多谢)?",
+        r"(?:我|本人)(?:现在|这次|本次|已经|就|真的|确实)*"
+        r"(?:想|要|希望|决定|准备|打算)(?:现在|立即|就)?"
+        r"(?:结束|停止|退出)(?:这次|本次|当前)?(?:访谈|对话|问答)(?:了|吧|啦)?",
+        r"(?:(?:请|麻烦)(?:让我)?|(?:我|本人)(?:现在|已经)?"
+        r"(?:想|要|希望|决定|准备|打算))?(?:结束|停止)"
+        r"(?:继续)?回答(?:了|吧|啦)?",
+        r"(?:我|本人)(?:现在|已经|真的|确实)*"
+        r"(?:不想|不愿意|不愿|不准备|不打算)(?:再|继续)"
+        r"(?:回答|参与|进行|聊|说)?(?:这次|本次|当前)?"
+        r"(?:访谈|对话|问答)?(?:了|啦|吧)?",
+        r"(?:(?:请|麻烦)(?:你)?|我(?:希望|想让)你)?(?:别|不要|不用|停止)"
+        r"(?:再|继续)?(?:问|提问|追问)(?:我)?(?:了|啦|吧)?",
+        r"(?:这次|本次|当前)(?:访谈|对话|问答)(?:就)?到这里(?:吧|了)?",
+        r"(?:(?:我|本人)(?:现在|这次|本次)?(?:想|要|希望|决定|准备|打算)|"
+        r"(?:请|麻烦)(?:帮我)?(?:现在|立即|就)?)"
+        r"(?:结束(?:这次|本次|当前)?(?:访谈|对话|问答)(?:并|然后)?)?"
+        r"(?:生成|产生|输出|提交)(?:这次|本次|当前)?报告(?:吧|谢谢|多谢)?",
+        r"退出",
+        r"(?:quit|stop)",
+        r"(?:(?:i(?:want|wouldlike|dlike|need|havedecided)to|please))"
+        r"(?:end|stop|quit)(?:this|the)?(?:interview|conversation|assessment)(?:now)?",
+        r"(?:end|stop)(?:this|the)?(?:interview|conversation|assessment)(?:now)?",
+        r"i(?:do(?:not|nt)|dont)wanttocontinue"
+        r"(?:answering|thisinterview|theinterview|thisconversation|theconversation)?",
+        r"please(?:stop|quit)(?:asking(?:me)?|theinterview|thisinterview)?",
+    )
+    return any(re.fullmatch(pattern, compact) is not None for pattern in patterns)
+
+
+def _validate_v623_interviewer_contract(
+    output: NaturalInterviewerOutput,
+    payload: dict[str, Any],
+) -> None:
+    """Extend v6.2.1 audit guarantees with a clear-question contract."""
+
+    explicit_finish = _v623_is_explicit_finish_request(payload)
+    v621_payload = payload
+    if explicit_finish and payload.get("source_clarification_required") is True:
+        # A direct stop boundary wins over mixed-source clarification in v6.2.3.
+        v621_payload = {**payload, "source_clarification_required": False}
+    _validate_v621_interviewer_contract(output, v621_payload)
+    if explicit_finish:
+        if output.session_action == "finish" and output.finish_reason == "user_requested":
+            return
+        raise ValueError(
+            "v623_explicit_finish_request_requires_finish_user_requested:"
+            "用户明确要求结束本次访谈时，必须返回 "
+            "session_action=finish 且 finish_reason=user_requested"
+        )
+    if output.session_action != "continue":
+        return
+    question_count = output.interviewer_message.count("？") + output.interviewer_message.count(
+        "?"
+    )
+    # Source clarification is already a strict V6.2.1 navigation contract.  A
+    # correction phrase inside the same mixed-source answer must not turn that
+    # required open clarification into a question-free acknowledgement.
+    if payload.get("source_clarification_required") is True:
+        if question_count == 1:
+            return
+        raise ValueError(
+            "v623_source_clarification_requires_one_explicit_question:"
+            "来源澄清必须保留一个明确的开放问题和一个问号"
+        )
+    if question_count == 1 or _v623_allows_non_question_continue(payload):
+        return
+    raise ValueError(
+        "v623_normal_continue_requires_one_explicit_question:"
+        "正常探查必须保留一个明确的开放问题和一个问号；"
+        "只有用户明确纠正、拒答、没听懂、要求停顿或设定边界时"
+        "才可以不附加问题"
+    )
+
+
+def _validate_v623_opening_contract(output: NaturalInterviewerOutput) -> None:
+    """Keep the candidate opening inviting, singular, and actionable."""
+
+    _validate_v621_opening_contract(output)
+    question_count = output.interviewer_message.count("？") + output.interviewer_message.count(
+        "?"
+    )
+    if question_count != 1:
+        raise ValueError("v623_opening_requires_one_explicit_question")
+
+
 def _dimension_contract() -> str:
     return "\n".join(
         f"- {item.key}（{item.name}）：{item.description}" for item in DIMENSIONS
@@ -827,6 +1049,40 @@ V6.2.1 决策主线与来源澄清：
 开场时 navigation 必须为 null。所有非开场回合 navigation 必须完整，不得把它写进用户可见文案。"""
 
 
+NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_2_3 = NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_2_1 + """
+
+V6.2.3 自然承接与清晰单问题：
+- 本段只细化用户可见的表达方式，不改变 V6.2.1 的决策主线、真实原文锚点、
+  来源澄清、navigation 或结束合同。source_clarification_required=true 时，
+  除以下明确结束请求外，仍只做来源澄清，不额外叠加情绪探查或第二个问题；即使最新回答
+  同时在纠正误解，可见回应也必须是恰好一个开放问题并以问号结尾，不得只做陈述。
+- 对方明确说出痛苦、哭泣、失落、害怕、不安、受伤、被背叛或其他脆弱经历时，
+  正常情况下先用一句有其原话依据、温和但不套话的承接，再自然进入一个问题。
+  若感受只是从措辞中推测，必须用“似乎”“可能”等试探语气，不得替对方确定情绪、
+  动机、关系真相或心理状态；不做心理诊断、咨询式干预或行动建议。
+- 若尚未形成一件可定位的真实事件，不要立刻裸问“为什么”“哪些具体事情”
+  或“最难判断的是什么”。用保留选择权的自然邀请把话题落到最近一次具体经历，
+  例如“如果你愿意，可以从最近一次让你有这种感受的事情说起”，然后只问一个
+  容易着手的问题。不得给答案示例、替用户设定事件或诱导其认同某个解释。
+- 正常探查的 interviewer_message 必须恰好包含一个明确、开放的问题和一个问号。
+  只有 source_clarification_required=false，且对方正在纠正误解、明确拒答或设定边界、
+  表示没听懂或要求停顿时，才可以不附加问题。明确、非疑问、非假设、非转述的结束本次访谈、
+  停止回答或生成报告请求，必须返回 session_action=finish 且
+  finish_reason=user_requested，不得以 continue 的无问句回应代替。安全约束始终优先。
+- 检查紧邻的上一个访谈者问句；不要连续用“为什么”“哪些具体事情”
+  “最难判断的是什么”这类裸问句盘问。先承接本轮新信息，再从其原话中选一个
+  有信息价值的切口往前。若上一轮已经承接过同一感受，本轮没有新的明确情绪、
+  关注、价值、关系意义或边界时，不重复同义安慰。
+- 最终输出前再自检：若 source_clarification_required=true 且对方未明确要求结束，
+  不论最新回答是否包含纠正、拒答、没听懂或停顿表达，continue 回应都必须只保留一个
+  合并后的开放问题和一个问号，同时澄清外部来源、本人判断与采纳理由。可使用这种单问句形式：
+  “这里同时有外部材料和你的判断。请区分哪些来自外部、哪些是你自己的判断，并说说你采纳了什么及理由？”
+  不得拆成二选一、第二个问题或只有陈述的回应。"""
+
+
+_V6_2_NAVIGATION_PROMPT_VERSIONS = frozenset({"v6.2.1", "v6.2.3"})
+
+
 _NATURAL_INTERVIEWER_PROMPTS: dict[str, tuple[str, str]] = {
     "v6.0.3": (
         "natural_interviewer_v6.0.3",
@@ -851,6 +1107,10 @@ _NATURAL_INTERVIEWER_PROMPTS: dict[str, tuple[str, str]] = {
     "v6.2.1": (
         "natural_interviewer_v6.2.1",
         NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_2_1,
+    ),
+    "v6.2.3": (
+        "natural_interviewer_v6.2.3",
+        NATURAL_INTERVIEWER_SYSTEM_PROMPT_V6_2_3,
     ),
 }
 
@@ -1022,12 +1282,19 @@ class ModelGatewayService:
             prompt_version=selected_version,
         )
         output_validator: Callable[[NaturalInterviewerOutput], None] | None = None
-        if selected_version == "v6.2.1":
-            output_validator = (
-                (lambda output: _validate_v621_interviewer_contract(output, payload))
-                if payload.get("transcript")
-                else _validate_v621_opening_contract
-            )
+        if selected_version in _V6_2_NAVIGATION_PROMPT_VERSIONS:
+            if selected_version == "v6.2.3":
+                output_validator = (
+                    (lambda output: _validate_v623_interviewer_contract(output, payload))
+                    if payload.get("transcript")
+                    else _validate_v623_opening_contract
+                )
+            else:
+                output_validator = (
+                    (lambda output: _validate_v621_interviewer_contract(output, payload))
+                    if payload.get("transcript")
+                    else _validate_v621_opening_contract
+                )
         _, _, system_prompt = resolve_natural_interviewer_prompt(selected_version)
         if self.mode == "mock":
             started = time.monotonic()
@@ -1035,7 +1302,7 @@ class ModelGatewayService:
                 payload,
                 prompt_version=selected_version,
             )
-            if selected_version == "v6.2.1" and payload["transcript"]:
+            if selected_version in _V6_2_NAVIGATION_PROMPT_VERSIONS and payload["transcript"]:
                 output = NaturalInterviewerOutput.model_validate(
                     {
                         **output.model_dump(mode="json"),
@@ -1236,7 +1503,7 @@ class ModelGatewayService:
                 raise ModelGatewayError("invalid_transcript_turn")
             if not isinstance(item.get("content"), str):
                 raise ModelGatewayError("invalid_transcript_content")
-        if prompt_version != "v6.2.1":
+        if prompt_version not in _V6_2_NAVIGATION_PROMPT_VERSIONS:
             if "anchor_candidates" in payload or "source_clarification_required" in payload:
                 raise ModelGatewayError("legacy_interview_payload_has_v621_navigation_inputs")
             return
@@ -1663,7 +1930,7 @@ class ModelGatewayService:
         if not transcript:
             name = str(participant.get("display_name") or "").strip()
             greeting = f"你好，{name}。" if name else "你好。"
-            if prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1"}:
+            if prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1", "v6.2.3"}:
                 return NaturalInterviewerOutput(
                     interviewer_message=(
                         greeting
@@ -1698,8 +1965,10 @@ class ModelGatewayService:
                 session_action="continue",
                 finish_reason=None,
             )
-        user_requested = (
-            any(
+        if prompt_version == "v6.2.3":
+            user_requested = _v623_is_explicit_finish_request(payload)
+        elif prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1"}:
+            user_requested = any(
                 marker in normalized
                 for marker in (
                     "结束访谈",
@@ -1712,12 +1981,11 @@ class ModelGatewayService:
                     "生成报告",
                 )
             )
-            if prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1"}
-            else any(
+        else:
+            user_requested = any(
                 marker in normalized
                 for marker in ("结束", "到这里", "不想继续", "先这样")
             )
-        )
         if user_requested:
             return NaturalInterviewerOutput(
                 interviewer_message="好，谢谢你把这些想法说出来。我们就先停在这里。",
@@ -1742,7 +2010,7 @@ class ModelGatewayService:
             for item in transcript
         )
         if (
-            prompt_version == "v6.2.1"
+            prompt_version in _V6_2_NAVIGATION_PROMPT_VERSIONS
             and (mixed_source or payload.get("source_clarification_required") is True)
             and not source_already_clarified
         ):
@@ -1754,13 +2022,38 @@ class ModelGatewayService:
                 session_action="continue",
                 finish_reason=None,
             )
+        if prompt_version == "v6.2.3" and any(
+            marker in normalized
+            for marker in (
+                "痛苦",
+                "失恋",
+                "哭",
+                "呜呜",
+                "难过",
+                "伤心",
+                "害怕",
+                "不安",
+                "受伤",
+                "背叛",
+                "崩溃",
+                "委屈",
+            )
+        ):
+            return NaturalInterviewerOutput(
+                interviewer_message=(
+                    "这听起来让你很不好受。如果你愿意，可以从最近一次"
+                    "让你有这种感受的具体事情说起——当时发生了什么？"
+                ),
+                session_action="continue",
+                finish_reason=None,
+            )
         prior_probe = any(
             item.get("role") == "assistant"
             and "最可能让你改变现在的决定" in str(item.get("content") or "")
             for item in transcript
         )
         if prior_probe:
-            if prompt_version in {"v6.2.0", "v6.2.1"}:
+            if prompt_version in {"v6.2.0", "v6.2.1", "v6.2.3"}:
                 return NaturalInterviewerOutput(
                     interviewer_message=(
                         "我们再把这次经历往深处看一点：还有哪条重要依据、权衡或变化，"
@@ -1798,12 +2091,14 @@ class ModelGatewayService:
                 session_action="continue",
                 finish_reason=None,
             )
+        if prompt_version == "v6.2.3":
+            interviewer_message = "顺着这件事往下看，你当时主要在权衡什么？"
+        elif prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1"}:
+            interviewer_message = "先把焦点放回这件具体经历：当时你真正需要作出的判断是什么？"
+        else:
+            interviewer_message = "听起来这件事对你确实很重要。此刻你最想先厘清的是什么？"
         return NaturalInterviewerOutput(
-            interviewer_message=(
-                "先把焦点放回这件具体经历：当时你真正需要作出的判断是什么？"
-                if prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1"}
-                else "听起来这件事对你确实很重要。此刻你最想先厘清的是什么？"
-            ),
+            interviewer_message=interviewer_message,
             session_action="continue",
             finish_reason=None,
         )

@@ -57,6 +57,8 @@ from app.services.model_gateway import (
     resolve_natural_interviewer_prompt,
 )
 from app.services.orchestrator import (
+    ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS,
+    EVIDENCE_GATED_INTERVIEWER_PROMPT_VERSIONS,
     FinalizationError,
     InterviewContractError,
     InterviewOrchestrator,
@@ -457,7 +459,8 @@ class SessionService:
                     "attempt_count": opening.attempt_count,
                     "evidence_attribution_mode": (
                         settings.evidence_attribution_mode
-                        if opening.prompt_version == "v6.2.1"
+                        if opening.prompt_version
+                        in ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS
                         else "disabled"
                     ),
                 },
@@ -509,7 +512,7 @@ class SessionService:
     def _effective_attribution_mode(
         cls, db: Session, session_id: int
     ) -> str:
-        """Never switch an existing pre-v6.2.1 session onto the new contract."""
+        """Never switch an existing legacy session onto attribution midstream."""
 
         opening_trace = db.scalar(
             select(AgentTrace)
@@ -520,7 +523,11 @@ class SessionService:
             .order_by(AgentTrace.id.asc())
             .limit(1)
         )
-        if opening_trace is None or opening_trace.prompt_version != "v6.2.1":
+        if (
+            opening_trace is None
+            or opening_trace.prompt_version
+            not in ATTRIBUTION_AWARE_INTERVIEWER_PROMPT_VERSIONS
+        ):
             return "disabled"
         bound = (opening_trace.output_contract or {}).get(
             "evidence_attribution_mode"
@@ -1882,7 +1889,10 @@ class SessionService:
                         )
                     )
                 bound_version = self._bound_interviewer_prompt_version(db, session.id)
-                if check is None and bound_version in {"v6.2.0", "v6.2.1"}:
+                if (
+                    check is None
+                    and bound_version in EVIDENCE_GATED_INTERVIEWER_PROMPT_VERSIONS
+                ):
                     raise ServiceError(
                         503,
                         "evidence_snapshot_failed",

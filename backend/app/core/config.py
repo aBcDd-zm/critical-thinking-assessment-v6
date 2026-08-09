@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Prompt selection is explicit so a deployment can roll back conversational
     # style without changing code or losing the version recorded in traces.
     natural_interviewer_prompt_version: Literal[
-        "v6.0.3", "v6.0.4", "v6.0.5", "v6.1.1", "v6.2.0", "v6.2.1"
+        "v6.0.3", "v6.0.4", "v6.0.5", "v6.1.1", "v6.2.0", "v6.2.1", "v6.2.3"
     ] = "v6.2.1"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
@@ -97,16 +97,16 @@ class Settings(BaseSettings):
             violations.append("MODEL_GATEWAY_MODE must be real")
         if not self.evidence_observer_enabled:
             violations.append("EVIDENCE_OBSERVER_ENABLED must be true")
-        if self.natural_interviewer_prompt_version == "v6.2.1":
+        if self.natural_interviewer_prompt_version in {"v6.2.1", "v6.2.3"}:
             if self.evidence_attribution_mode != "enforce":
                 violations.append(
                     "EVIDENCE_ATTRIBUTION_MODE must be enforce when "
-                    "NATURAL_INTERVIEWER_PROMPT_VERSION is v6.2.1"
+                    "NATURAL_INTERVIEWER_PROMPT_VERSION is v6.2.1 or v6.2.3"
                 )
         elif self.evidence_attribution_mode != "disabled":
             violations.append(
                 "EVIDENCE_ATTRIBUTION_MODE must be disabled when "
-                "NATURAL_INTERVIEWER_PROMPT_VERSION is not v6.2.1"
+                "NATURAL_INTERVIEWER_PROMPT_VERSION is not v6.2.1 or v6.2.3"
             )
         if not self.deepseek_api_key.strip():
             violations.append("DEEPSEEK_API_KEY must be non-empty")
