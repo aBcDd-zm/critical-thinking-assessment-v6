@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { downloadBlob } from "@/api/http";
 import { getAnonymousExport, importExpertScores, listAdminSessions } from "@/api/admin";
 import type { AdminSessionSummary } from "@/types/contracts";
+import { formatBeijingDateTime } from "@/utils/dateTime";
 
 const filters = reactive({ phase: "", review_status: "", manual_review_recommended: "", q: "" });
 const sessions = ref<AdminSessionSummary[]>([]);
@@ -92,10 +93,6 @@ async function importCsv(event: Event) {
   }
 }
 
-function formatDate(value?: string) {
-  return value ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
-}
-
 watch(() => route.fullPath, async () => {
   applyRouteFilters();
   await load();
@@ -128,7 +125,7 @@ onMounted(() => {
       <div class="table-meta"><span>共 {{ total }} 个会话</span><button class="quiet-button" @click="load">刷新</button></div>
       <div class="admin-table-wrap">
         <table class="admin-table">
-          <thead><tr><th>会话</th><th>状态</th><th>已保存回答</th><th>建议人工复核</th><th>复核状态</th><th>更新时间</th><th /></tr></thead>
+          <thead><tr><th>会话</th><th>状态</th><th>已保存回答</th><th>建议人工复核</th><th>复核状态</th><th>更新时间（北京时间）</th><th /></tr></thead>
           <tbody>
             <tr v-if="loading"><td colspan="7" class="empty-cell">正在读取…</td></tr>
             <tr v-else-if="!sessions.length"><td colspan="7" class="empty-cell">暂无符合条件的会话</td></tr>
@@ -138,7 +135,7 @@ onMounted(() => {
               <td>{{ item.user_answer_count ?? 0 }}</td>
               <td><span :class="item.manual_review_recommended ? 'fallback-yes' : 'fallback-no'">{{ item.manual_review_recommended ? "是" : "否" }}</span></td>
               <td><span class="review-badge" :class="item.review_status || 'pending'">{{ reviewLabel[item.review_status || "pending"] }}</span></td>
-              <td>{{ formatDate(item.updated_at || item.created_at) }}</td>
+              <td>{{ formatBeijingDateTime(item.updated_at || item.created_at) }}</td>
               <td><RouterLink class="row-link" :to="`/admin/sessions/${item.uuid}`">打开复核 →</RouterLink></td>
             </tr>
           </tbody>
