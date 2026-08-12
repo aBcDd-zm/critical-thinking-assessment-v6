@@ -792,6 +792,10 @@ class SessionService:
                     trace_action = "natural_close_suggested"
                 else:
                     trace_action = "natural_interview_turn"
+                visibility_fallback_used = (
+                    "server_interviewer_visibility_fallback_after_leak_exhaustion"
+                    in result.quality_flags
+                )
                 db.add(
                     AgentTrace(
                         session_id=session.id,
@@ -810,6 +814,11 @@ class SessionService:
                             "quality_flags": result.quality_flags,
                             "attempt_count": result.attempt_count,
                             **(
+                                {"fallback_used": True}
+                                if visibility_fallback_used
+                                else {}
+                            ),
+                            **(
                                 {
                                     "model_call_count": 0,
                                     "technical_turn_cap_reached": True,
@@ -824,7 +833,11 @@ class SessionService:
                                 else {}
                             ),
                         },
-                        renderer_status="repaired" if result.repair_used else "accepted",
+                        renderer_status=(
+                            "fallback"
+                            if visibility_fallback_used
+                            else ("repaired" if result.repair_used else "accepted")
+                        ),
                         repair_used=result.repair_used,
                         latency_ms=result.latency_ms,
                     )
