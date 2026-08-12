@@ -1567,6 +1567,10 @@ class InterviewOrchestrator:
         transcript: list[dict[str, Any]] | None = None,
     ) -> InterviewResult:
         quality_flags = _validate_interviewer_output(call.output, latest_user_text)
+        if call.fallback_used:
+            quality_flags.append(
+                "server_interviewer_visibility_fallback_after_leak_exhaustion"
+            )
         prompt_template_id, resolved_version, _ = resolve_natural_interviewer_prompt(
             prompt_version
         )

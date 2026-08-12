@@ -127,6 +127,7 @@ class StructuredCallResult(Generic[T]):
     repair_used: bool
     latency_ms: int
     attempt_count: int = 1
+    fallback_used: bool = False
 
 
 class EvidenceAttributionSelection(BaseModel):
@@ -486,6 +487,96 @@ def _validate_v621_interviewer_contract(
         for term in ("自己", "你的判断", "本人", "你采纳", "你的理由", "采纳理由")
     ):
         raise ValueError("v621_source_clarification_participant_signal_missing")
+
+
+_PUBLIC_INTERVIEWER_LEAK_TERMS = (
+    "系统提示",
+    "prompt",
+    "评分",
+    "测评维度",
+    "覆盖率",
+    "target_dimension",
+    "考试",
+    "测验",
+)
+
+
+def _validate_public_interviewer_visibility(output: NaturalInterviewerOutput) -> None:
+    """Keep internal/scoring language inside the typed model repair loop."""
+
+    message = output.interviewer_message.strip().casefold()
+    if any(term.casefold() in message for term in _PUBLIC_INTERVIEWER_LEAK_TERMS):
+        raise ValueError("internal_or_scoring_leak")
+
+
+def _exception_chain_contains(error: BaseException, marker: str) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if marker in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _interviewer_visibility_fallback(
+    payload: dict[str, Any],
+    *,
+    prompt_version: str,
+) -> NaturalInterviewerOutput:
+    """Return one safe, audited response after repeated visibility violations."""
+
+    candidates = payload.get("anchor_candidates") or []
+    if not candidates:
+        raise ModelGatewayError("interviewer_visibility_fallback_requires_anchor")
+    selected_anchor = candidates[-1]
+    navigation = {
+        "decision_anchor": selected_anchor,
+        "focus_kind": "basis",
+        "mainline_relation": "core",
+    }
+
+    if prompt_version == "v6.2.3" and _v623_is_explicit_finish_request(payload):
+        return NaturalInterviewerOutput.model_validate(
+            {
+                "interviewer_message": "好的，谢谢你说明。我们就到这里。",
+                "session_action": "finish",
+                "finish_reason": "user_requested",
+                "navigation": navigation,
+            }
+        )
+    if payload.get("source_clarification_required") is True:
+        navigation.update(
+            focus_kind="source_ownership",
+            mainline_relation="source_clarification",
+        )
+        message = (
+            "为了准确理解这段回答，请区分其中哪些来自外部材料、"
+            "哪些是你自己的判断，并说明你最终采纳了什么及理由？"
+        )
+    elif prompt_version == "v6.2.3" and _v623_allows_non_question_continue(payload):
+        message = "好的，我先停一下，按你的意思不继续这个问题。"
+    else:
+        prior_assistant_count = sum(
+            1
+            for turn in payload.get("transcript") or []
+            if isinstance(turn, dict) and turn.get("role") == "assistant"
+        )
+        questions = (
+            "回到你刚才说的这件事，哪一项事实最影响你最后的判断？",
+            "在这件事里，什么变化最可能让你重新考虑原来的决定？",
+            "事情后来有什么结果，又怎样影响了你接下来的做法？",
+        )
+        message = questions[prior_assistant_count % len(questions)]
+    return NaturalInterviewerOutput.model_validate(
+        {
+            "interviewer_message": message,
+            "session_action": "continue",
+            "finish_reason": None,
+            "navigation": navigation,
+        }
+    )
 
 
 def _validate_v621_opening_contract(output: NaturalInterviewerOutput) -> None:
@@ -1281,20 +1372,25 @@ class ModelGatewayService:
             payload,
             prompt_version=selected_version,
         )
-        output_validator: Callable[[NaturalInterviewerOutput], None] | None = None
+        navigation_validator: Callable[[NaturalInterviewerOutput], None] | None = None
         if selected_version in _V6_2_NAVIGATION_PROMPT_VERSIONS:
             if selected_version == "v6.2.3":
-                output_validator = (
+                navigation_validator = (
                     (lambda output: _validate_v623_interviewer_contract(output, payload))
                     if payload.get("transcript")
                     else _validate_v623_opening_contract
                 )
             else:
-                output_validator = (
+                navigation_validator = (
                     (lambda output: _validate_v621_interviewer_contract(output, payload))
                     if payload.get("transcript")
                     else _validate_v621_opening_contract
                 )
+
+        def output_validator(output: NaturalInterviewerOutput) -> None:
+            _validate_public_interviewer_visibility(output)
+            if navigation_validator is not None:
+                navigation_validator(output)
         _, _, system_prompt = resolve_natural_interviewer_prompt(selected_version)
         if self.mode == "mock":
             started = time.monotonic()
@@ -1309,8 +1405,7 @@ class ModelGatewayService:
                         "navigation": self._mock_navigation(payload),
                     }
                 )
-            if output_validator is not None:
-                output_validator(output)
+            output_validator(output)
             return StructuredCallResult(
                 output=output,
                 provider="mock",
@@ -1318,18 +1413,44 @@ class ModelGatewayService:
                 repair_used=False,
                 latency_ms=int((time.monotonic() - started) * 1000),
             )
-        return self._typed_call(
-            system_prompt=system_prompt,
-            payload=payload,
-            schema=NaturalInterviewerOutput,
-            max_tokens=settings.deepseek_interview_max_tokens,
-            thinking=settings.deepseek_interview_thinking,
-            total_timeout_seconds=settings.deepseek_interview_total_timeout_seconds,
-            primary_timeout_seconds=settings.deepseek_interview_primary_timeout_seconds,
-            output_validator=output_validator,
-            retry_strategy=self._RETRY_INTERVIEW_RESILIENT,
-            max_attempts=3,
-        )
+        try:
+            return self._typed_call(
+                system_prompt=system_prompt,
+                payload=payload,
+                schema=NaturalInterviewerOutput,
+                max_tokens=settings.deepseek_interview_max_tokens,
+                thinking=settings.deepseek_interview_thinking,
+                total_timeout_seconds=settings.deepseek_interview_total_timeout_seconds,
+                primary_timeout_seconds=settings.deepseek_interview_primary_timeout_seconds,
+                output_validator=output_validator,
+                retry_strategy=self._RETRY_INTERVIEW_RESILIENT,
+                max_attempts=3,
+            )
+        except ModelGatewayError as exc:
+            visibility_exhausted = _exception_chain_contains(
+                exc,
+                "internal_or_scoring_leak",
+            )
+            if not (
+                selected_version in _V6_2_NAVIGATION_PROMPT_VERSIONS
+                and bool(payload.get("transcript"))
+                and visibility_exhausted
+            ):
+                raise
+            fallback = _interviewer_visibility_fallback(
+                payload,
+                prompt_version=selected_version,
+            )
+            output_validator(fallback)
+            return StructuredCallResult(
+                output=fallback,
+                provider="deepseek",
+                model=settings.deepseek_model,
+                repair_used=True,
+                latency_ms=exc.latency_ms,
+                attempt_count=exc.attempt_count,
+                fallback_used=True,
+            )
 
     def generate_final_scorer(
         self, payload: dict[str, Any]

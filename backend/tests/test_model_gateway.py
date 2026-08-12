@@ -17,6 +17,8 @@ from app.services.model_gateway import (
     INCREMENTAL_EVIDENCE_SYSTEM_PROMPT_V6_2_0,
     ModelGatewayError,
     ModelGatewayService,
+    build_interview_anchor_candidates,
+    source_clarification_required,
 )
 
 
@@ -207,6 +209,112 @@ def test_v621_opening_semantics_are_repaired_inside_the_typed_call(
     assert result.repair_used is True
     assert result.output.session_action == "continue"
     assert "opening_must_invite_and_continue" in calls[1][-1]["content"]
+
+
+def _v623_interview_payload() -> dict[str, object]:
+    transcript = [
+        {
+            "turn_index": 0,
+            "role": "assistant",
+            "content": "你愿意从哪件具体的事情说起？",
+        },
+        {
+            "turn_index": 1,
+            "role": "user",
+            "content": "我比较了两个供应方案，最后选择了交付更稳定的那个。",
+        },
+    ]
+    return {
+        "participant": {},
+        "transcript": transcript,
+        "anchor_candidates": build_interview_anchor_candidates(transcript),
+        "source_clarification_required": source_clarification_required(transcript),
+    }
+
+
+def test_interviewer_visibility_leak_is_repaired_inside_same_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "model_gateway_mode", "real")
+    monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
+    payload = _v623_interview_payload()
+    anchor = payload["anchor_candidates"][-1]
+    calls: list[list[dict[str, str]]] = []
+
+    def respond(
+        _self: ModelGatewayService,
+        messages: list[dict[str, str]],
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        calls.append(json.loads(json.dumps(messages, ensure_ascii=False)))
+        return {
+            "interviewer_message": (
+                "为了补齐评分覆盖率，你还能补充什么？"
+                if len(calls) == 1
+                else "哪一项事实最影响你最后的判断？"
+            ),
+            "session_action": "continue",
+            "finish_reason": None,
+            "navigation": {
+                "decision_anchor": anchor,
+                "focus_kind": "basis",
+                "mainline_relation": "core",
+            },
+        }
+
+    monkeypatch.setattr(ModelGatewayService, "_post_json", respond)
+    result = ModelGatewayService().generate_interviewer(
+        payload,
+        prompt_version="v6.2.3",
+    )
+
+    assert result.attempt_count == 2
+    assert result.repair_used is True
+    assert result.fallback_used is False
+    assert "internal_or_scoring_leak" in calls[1][-1]["content"]
+    assert "评分" not in result.output.interviewer_message
+
+
+def test_interviewer_visibility_leak_exhaustion_uses_safe_audited_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "model_gateway_mode", "real")
+    monkeypatch.setattr(settings, "deepseek_api_key", "test-key")
+    payload = _v623_interview_payload()
+    anchor = payload["anchor_candidates"][-1]
+    calls = 0
+
+    def always_leaks(
+        _self: ModelGatewayService,
+        _messages: list[dict[str, str]],
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "interviewer_message": "下面继续询问目标测评维度，可以吗？",
+            "session_action": "continue",
+            "finish_reason": None,
+            "navigation": {
+                "decision_anchor": anchor,
+                "focus_kind": "basis",
+                "mainline_relation": "core",
+            },
+        }
+
+    monkeypatch.setattr(ModelGatewayService, "_post_json", always_leaks)
+    result = ModelGatewayService().generate_interviewer(
+        payload,
+        prompt_version="v6.2.3",
+    )
+
+    assert calls == 2
+    assert result.attempt_count == 2
+    assert result.repair_used is True
+    assert result.fallback_used is True
+    assert result.output.navigation is not None
+    assert "测评" not in result.output.interviewer_message
+    assert result.output.interviewer_message.count("？") == 1
 
 
 def test_incremental_evidence_uses_its_own_bounded_non_thinking_profile(
