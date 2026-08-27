@@ -1,0 +1,674 @@
+{
+  "branch": "system/v6-natural-interview-demo",
+  "code_commit": "4cc01c1b438025fd3a42b691253d43f45d638196",
+  "created_at": "2026-08-27T21:37:51+08:00",
+  "model_calls": {
+    "by_tool": {
+      "attribute_evidence": 1,
+      "generate_report": 0,
+      "score_six_dimensions": 1
+    },
+    "mode": "real",
+    "total": 2
+  },
+  "protocol_version": "2025-11-25",
+  "test_results": {
+    "backend_full": "498 passed in 12.17s",
+    "browser_e2e": "3 passed in 5.6s",
+    "frontend_build": "PASSED (57 modules, 439ms)",
+    "frontend_typecheck": "PASSED",
+    "frontend_unit": "10 files, 57 tests passed in 1.81s",
+    "mcp_specific": "5 passed in 0.26s",
+    "real_stack_e2e": "5 passed in 6.5s",
+    "status": "PASSED"
+  },
+  "tools": [
+    {
+      "input_schema": {
+        "$defs": {
+          "TranscriptTurn": {
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "enum": [
+                  "user",
+                  "assistant"
+                ],
+                "title": "Role",
+                "type": "string"
+              },
+              "text": {
+                "maxLength": 12000,
+                "minLength": 1,
+                "title": "Text",
+                "type": "string"
+              },
+              "turn_no": {
+                "minimum": 0,
+                "title": "Turn No",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "turn_no",
+              "role",
+              "text"
+            ],
+            "title": "TranscriptTurn",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "transcript_turns": {
+            "items": {
+              "$ref": "#/$defs/TranscriptTurn"
+            },
+            "title": "Transcript Turns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "transcript_turns"
+        ],
+        "title": "attribute_evidenceArguments",
+        "type": "object"
+      },
+      "name": "attribute_evidence",
+      "output_schema": {
+        "$defs": {
+          "EvidenceSpan": {
+            "additionalProperties": false,
+            "properties": {
+              "candidate_id": {
+                "maxLength": 69,
+                "minLength": 69,
+                "pattern": "^span_[0-9a-f]{64}$",
+                "title": "Candidate Id",
+                "type": "string"
+              },
+              "eligibility": {
+                "enum": [
+                  "eligible",
+                  "context_only",
+                  "manual_review"
+                ],
+                "title": "Eligibility",
+                "type": "string"
+              },
+              "end": {
+                "exclusiveMinimum": 0,
+                "title": "End",
+                "type": "integer"
+              },
+              "hash": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Hash",
+                "type": "string"
+              },
+              "owner": {
+                "enum": [
+                  "participant_owned",
+                  "external_quoted",
+                  "external_paraphrased",
+                  "uncertain"
+                ],
+                "title": "Owner",
+                "type": "string"
+              },
+              "relation": {
+                "enum": [
+                  "own_reasoning",
+                  "endorses",
+                  "critiques",
+                  "rejects",
+                  "quotes_only",
+                  "asks_or_requests"
+                ],
+                "title": "Relation",
+                "type": "string"
+              },
+              "start": {
+                "minimum": 0,
+                "title": "Start",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "candidate_id",
+              "owner",
+              "relation",
+              "eligibility",
+              "start",
+              "end",
+              "hash"
+            ],
+            "title": "EvidenceSpan",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "spans": {
+            "items": {
+              "$ref": "#/$defs/EvidenceSpan"
+            },
+            "maxItems": 100,
+            "title": "Spans",
+            "type": "array"
+          }
+        },
+        "title": "AttributeEvidenceResult",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$defs": {
+          "TranscriptTurn": {
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "enum": [
+                  "user",
+                  "assistant"
+                ],
+                "title": "Role",
+                "type": "string"
+              },
+              "text": {
+                "maxLength": 12000,
+                "minLength": 1,
+                "title": "Text",
+                "type": "string"
+              },
+              "turn_no": {
+                "minimum": 0,
+                "title": "Turn No",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "turn_no",
+              "role",
+              "text"
+            ],
+            "title": "TranscriptTurn",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "eligible_span_ids": {
+            "items": {
+              "maxLength": 69,
+              "minLength": 69,
+              "pattern": "^span_[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "title": "Eligible Span Ids",
+            "type": "array"
+          },
+          "transcript_turns": {
+            "items": {
+              "$ref": "#/$defs/TranscriptTurn"
+            },
+            "title": "Transcript Turns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "transcript_turns",
+          "eligible_span_ids"
+        ],
+        "title": "score_six_dimensionsArguments",
+        "type": "object"
+      },
+      "name": "score_six_dimensions",
+      "output_schema": {
+        "$defs": {
+          "SixDimensionScore": {
+            "additionalProperties": false,
+            "properties": {
+              "confidence": {
+                "maximum": 1,
+                "minimum": 0,
+                "title": "Confidence",
+                "type": "number"
+              },
+              "dimension_key": {
+                "enum": [
+                  "problem_definition",
+                  "evidence_evaluation",
+                  "reasoning_argumentation",
+                  "multiple_perspectives",
+                  "integrative_decision",
+                  "dynamic_adjustment"
+                ],
+                "title": "Dimension Key",
+                "type": "string"
+              },
+              "evidence_span_ids": {
+                "items": {
+                  "maxLength": 69,
+                  "minLength": 69,
+                  "pattern": "^span_[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "maxItems": 5,
+                "title": "Evidence Span Ids",
+                "type": "array"
+              },
+              "reason": {
+                "maxLength": 2000,
+                "minLength": 1,
+                "title": "Reason",
+                "type": "string"
+              },
+              "score": {
+                "anyOf": [
+                  {
+                    "maximum": 5,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Score"
+              },
+              "status": {
+                "enum": [
+                  "SCORED",
+                  "IE",
+                  "ERROR"
+                ],
+                "title": "Status",
+                "type": "string"
+              }
+            },
+            "required": [
+              "dimension_key",
+              "status",
+              "reason",
+              "confidence"
+            ],
+            "title": "SixDimensionScore",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "dimensions": {
+            "items": {
+              "$ref": "#/$defs/SixDimensionScore"
+            },
+            "maxItems": 6,
+            "minItems": 6,
+            "title": "Dimensions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "dimensions"
+        ],
+        "title": "ScoreSixDimensionsResult",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$defs": {
+          "EvidenceSpan": {
+            "additionalProperties": false,
+            "properties": {
+              "candidate_id": {
+                "maxLength": 69,
+                "minLength": 69,
+                "pattern": "^span_[0-9a-f]{64}$",
+                "title": "Candidate Id",
+                "type": "string"
+              },
+              "eligibility": {
+                "enum": [
+                  "eligible",
+                  "context_only",
+                  "manual_review"
+                ],
+                "title": "Eligibility",
+                "type": "string"
+              },
+              "end": {
+                "exclusiveMinimum": 0,
+                "title": "End",
+                "type": "integer"
+              },
+              "hash": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "title": "Hash",
+                "type": "string"
+              },
+              "owner": {
+                "enum": [
+                  "participant_owned",
+                  "external_quoted",
+                  "external_paraphrased",
+                  "uncertain"
+                ],
+                "title": "Owner",
+                "type": "string"
+              },
+              "relation": {
+                "enum": [
+                  "own_reasoning",
+                  "endorses",
+                  "critiques",
+                  "rejects",
+                  "quotes_only",
+                  "asks_or_requests"
+                ],
+                "title": "Relation",
+                "type": "string"
+              },
+              "start": {
+                "minimum": 0,
+                "title": "Start",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "candidate_id",
+              "owner",
+              "relation",
+              "eligibility",
+              "start",
+              "end",
+              "hash"
+            ],
+            "title": "EvidenceSpan",
+            "type": "object"
+          },
+          "SixDimensionScore": {
+            "additionalProperties": false,
+            "properties": {
+              "confidence": {
+                "maximum": 1,
+                "minimum": 0,
+                "title": "Confidence",
+                "type": "number"
+              },
+              "dimension_key": {
+                "enum": [
+                  "problem_definition",
+                  "evidence_evaluation",
+                  "reasoning_argumentation",
+                  "multiple_perspectives",
+                  "integrative_decision",
+                  "dynamic_adjustment"
+                ],
+                "title": "Dimension Key",
+                "type": "string"
+              },
+              "evidence_span_ids": {
+                "items": {
+                  "maxLength": 69,
+                  "minLength": 69,
+                  "pattern": "^span_[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "maxItems": 5,
+                "title": "Evidence Span Ids",
+                "type": "array"
+              },
+              "reason": {
+                "maxLength": 2000,
+                "minLength": 1,
+                "title": "Reason",
+                "type": "string"
+              },
+              "score": {
+                "anyOf": [
+                  {
+                    "maximum": 5,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Score"
+              },
+              "status": {
+                "enum": [
+                  "SCORED",
+                  "IE",
+                  "ERROR"
+                ],
+                "title": "Status",
+                "type": "string"
+              }
+            },
+            "required": [
+              "dimension_key",
+              "status",
+              "reason",
+              "confidence"
+            ],
+            "title": "SixDimensionScore",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "evidence_spans": {
+            "items": {
+              "$ref": "#/$defs/EvidenceSpan"
+            },
+            "title": "Evidence Spans",
+            "type": "array"
+          },
+          "six_dimension_scores": {
+            "items": {
+              "$ref": "#/$defs/SixDimensionScore"
+            },
+            "title": "Six Dimension Scores",
+            "type": "array"
+          }
+        },
+        "required": [
+          "six_dimension_scores",
+          "evidence_spans"
+        ],
+        "title": "generate_reportArguments",
+        "type": "object"
+      },
+      "name": "generate_report",
+      "output_schema": {
+        "$defs": {
+          "ReportDimension": {
+            "additionalProperties": false,
+            "properties": {
+              "dimension_key": {
+                "enum": [
+                  "problem_definition",
+                  "evidence_evaluation",
+                  "reasoning_argumentation",
+                  "multiple_perspectives",
+                  "integrative_decision",
+                  "dynamic_adjustment"
+                ],
+                "title": "Dimension Key",
+                "type": "string"
+              },
+              "dimension_name": {
+                "minLength": 1,
+                "title": "Dimension Name",
+                "type": "string"
+              },
+              "evidences": {
+                "items": {
+                  "$ref": "#/$defs/ReportEvidence"
+                },
+                "title": "Evidences",
+                "type": "array"
+              },
+              "observable_behaviors": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Observable Behaviors",
+                "type": "array"
+              },
+              "reason": {
+                "minLength": 1,
+                "title": "Reason",
+                "type": "string"
+              },
+              "score": {
+                "anyOf": [
+                  {
+                    "maximum": 5,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Score"
+              },
+              "status": {
+                "enum": [
+                  "sufficient",
+                  "limited",
+                  "unmeasured"
+                ],
+                "title": "Status",
+                "type": "string"
+              },
+              "strength": {
+                "minLength": 1,
+                "title": "Strength",
+                "type": "string"
+              },
+              "suggestion": {
+                "minLength": 1,
+                "title": "Suggestion",
+                "type": "string"
+              }
+            },
+            "required": [
+              "dimension_key",
+              "dimension_name",
+              "status",
+              "reason",
+              "strength",
+              "suggestion",
+              "evidences",
+              "observable_behaviors"
+            ],
+            "title": "ReportDimension",
+            "type": "object"
+          },
+          "ReportEvidence": {
+            "additionalProperties": false,
+            "properties": {
+              "quote": {
+                "maxLength": 12000,
+                "minLength": 1,
+                "title": "Quote",
+                "type": "string"
+              },
+              "source_type": {
+                "const": "user",
+                "title": "Source Type",
+                "type": "string"
+              },
+              "turn_index": {
+                "minimum": 0,
+                "title": "Turn Index",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "turn_index",
+              "quote",
+              "source_type"
+            ],
+            "title": "ReportEvidence",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "dimensions": {
+            "items": {
+              "$ref": "#/$defs/ReportDimension"
+            },
+            "maxItems": 6,
+            "minItems": 6,
+            "title": "Dimensions",
+            "type": "array"
+          },
+          "disclaimer": {
+            "minLength": 1,
+            "title": "Disclaimer",
+            "type": "string"
+          },
+          "experimental_notice": {
+            "minLength": 1,
+            "title": "Experimental Notice",
+            "type": "string"
+          },
+          "manual_review_recommended": {
+            "title": "Manual Review Recommended",
+            "type": "boolean"
+          },
+          "priorities": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Priorities",
+            "type": "array"
+          },
+          "session_uuid": {
+            "maxLength": 36,
+            "minLength": 36,
+            "title": "Session Uuid",
+            "type": "string"
+          },
+          "strengths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Strengths",
+            "type": "array"
+          },
+          "summary": {
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_uuid",
+          "experimental_notice",
+          "summary",
+          "dimensions",
+          "manual_review_recommended",
+          "disclaimer"
+        ],
+        "title": "StructuredReport",
+        "type": "object"
+      }
+    }
+  ]
+}
