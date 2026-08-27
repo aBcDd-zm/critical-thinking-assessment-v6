@@ -1,0 +1,437 @@
+{
+  "calls": [
+    {
+      "duration_ms": 14,
+      "gateway_mode": "mock",
+      "model_calls": 0,
+      "request": {
+        "transcript_turns": [
+          {
+            "role": "assistant",
+            "text": "请讲讲你如何处理这件事？",
+            "turn_no": 0
+          },
+          {
+            "role": "user",
+            "text": "我先界定核心问题和目标，也会核实数据来源并交叉验证证据。",
+            "turn_no": 1
+          },
+          {
+            "role": "assistant",
+            "text": "你当时怎么形成判断？",
+            "turn_no": 2
+          },
+          {
+            "role": "user",
+            "text": "我会写下假设，因为要找反例检验推理；也会比较家人、导师和团队的不同立场。",
+            "turn_no": 3
+          },
+          {
+            "role": "assistant",
+            "text": "最后怎么行动，之后如何变化？",
+            "turn_no": 4
+          },
+          {
+            "role": "user",
+            "text": "我权衡风险后决定优先执行方案，并设定触发条件，复盘后再调整。",
+            "turn_no": 5
+          }
+        ]
+      },
+      "response": {
+        "spans": [
+          {
+            "candidate_id": "span_1b3d17bbc92a08e151f9d6bac3fd19b2b4c6447fd59d75bcf0cec8ccd1d026d2",
+            "eligibility": "eligible",
+            "end": 28,
+            "hash": "c82eacd9c16b13091d595c4dce70a5f060b2badfd7212c1680d15f1c8d5a3274",
+            "owner": "participant_owned",
+            "relation": "own_reasoning",
+            "start": 0
+          },
+          {
+            "candidate_id": "span_ae5ba3297aec53862a33ea069e84c88fa38a8c335130c13f9f5d739bf6b5edbd",
+            "eligibility": "eligible",
+            "end": 36,
+            "hash": "841c4b689d2c37b8869136f0aa0434f9d856455c4691c146b0265d7173fbdf8e",
+            "owner": "participant_owned",
+            "relation": "own_reasoning",
+            "start": 0
+          },
+          {
+            "candidate_id": "span_83b1862c1085200e4e2713c371e7812839813c644866ed8349a5a301f81327da",
+            "eligibility": "eligible",
+            "end": 30,
+            "hash": "c01d776239504876aa62d65cbb24f855310e85479c992aaea445762599241652",
+            "owner": "participant_owned",
+            "relation": "own_reasoning",
+            "start": 0
+          }
+        ]
+      },
+      "tool": "attribute_evidence"
+    },
+    {
+      "duration_ms": 4,
+      "gateway_mode": "mock",
+      "model_calls": 0,
+      "request": {
+        "eligible_span_ids": [
+          "span_1b3d17bbc92a08e151f9d6bac3fd19b2b4c6447fd59d75bcf0cec8ccd1d026d2",
+          "span_ae5ba3297aec53862a33ea069e84c88fa38a8c335130c13f9f5d739bf6b5edbd",
+          "span_83b1862c1085200e4e2713c371e7812839813c644866ed8349a5a301f81327da"
+        ],
+        "transcript_turns": [
+          {
+            "role": "assistant",
+            "text": "请讲讲你如何处理这件事？",
+            "turn_no": 0
+          },
+          {
+            "role": "user",
+            "text": "我先界定核心问题和目标，也会核实数据来源并交叉验证证据。",
+            "turn_no": 1
+          },
+          {
+            "role": "assistant",
+            "text": "你当时怎么形成判断？",
+            "turn_no": 2
+          },
+          {
+            "role": "user",
+            "text": "我会写下假设，因为要找反例检验推理；也会比较家人、导师和团队的不同立场。",
+            "turn_no": 3
+          },
+          {
+            "role": "assistant",
+            "text": "最后怎么行动，之后如何变化？",
+            "turn_no": 4
+          },
+          {
+            "role": "user",
+            "text": "我权衡风险后决定优先执行方案，并设定触发条件，复盘后再调整。",
+            "turn_no": 5
+          }
+        ]
+      },
+      "response": {
+        "dimensions": [
+          {
+            "confidence": 0.55,
+            "dimension_key": "problem_definition",
+            "evidence_span_ids": [
+              "span_1b3d17bbc92a08e151f9d6bac3fd19b2b4c6447fd59d75bcf0cec8ccd1d026d2"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "evidence_evaluation",
+            "evidence_span_ids": [
+              "span_1b3d17bbc92a08e151f9d6bac3fd19b2b4c6447fd59d75bcf0cec8ccd1d026d2"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "reasoning_argumentation",
+            "evidence_span_ids": [
+              "span_ae5ba3297aec53862a33ea069e84c88fa38a8c335130c13f9f5d739bf6b5edbd"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "multiple_perspectives",
+            "evidence_span_ids": [
+              "span_ae5ba3297aec53862a33ea069e84c88fa38a8c335130c13f9f5d739bf6b5edbd"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "integrative_decision",
+            "evidence_span_ids": [
+              "span_83b1862c1085200e4e2713c371e7812839813c644866ed8349a5a301f81327da"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "dynamic_adjustment",
+            "evidence_span_ids": [
+              "span_83b1862c1085200e4e2713c371e7812839813c644866ed8349a5a301f81327da"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          }
+        ]
+      },
+      "tool": "score_six_dimensions"
+    },
+    {
+      "duration_ms": 7,
+      "gateway_mode": "mock",
+      "model_calls": 0,
+      "request": {
+        "evidence_spans": [
+          {
+            "candidate_id": "span_1b3d17bbc92a08e151f9d6bac3fd19b2b4c6447fd59d75bcf0cec8ccd1d026d2",
+            "eligibility": "eligible",
+            "end": 28,
+            "hash": "c82eacd9c16b13091d595c4dce70a5f060b2badfd7212c1680d15f1c8d5a3274",
+            "owner": "participant_owned",
+            "relation": "own_reasoning",
+            "start": 0
+          },
+          {
+            "candidate_id": "span_ae5ba3297aec53862a33ea069e84c88fa38a8c335130c13f9f5d739bf6b5edbd",
+            "eligibility": "eligible",
+            "end": 36,
+            "hash": "841c4b689d2c37b8869136f0aa0434f9d856455c4691c146b0265d7173fbdf8e",
+            "owner": "participant_owned",
+            "relation": "own_reasoning",
+            "start": 0
+          },
+          {
+            "candidate_id": "span_83b1862c1085200e4e2713c371e7812839813c644866ed8349a5a301f81327da",
+            "eligibility": "eligible",
+            "end": 30,
+            "hash": "c01d776239504876aa62d65cbb24f855310e85479c992aaea445762599241652",
+            "owner": "participant_owned",
+            "relation": "own_reasoning",
+            "start": 0
+          }
+        ],
+        "six_dimension_scores": [
+          {
+            "confidence": 0.55,
+            "dimension_key": "problem_definition",
+            "evidence_span_ids": [
+              "span_1b3d17bbc92a08e151f9d6bac3fd19b2b4c6447fd59d75bcf0cec8ccd1d026d2"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "evidence_evaluation",
+            "evidence_span_ids": [
+              "span_1b3d17bbc92a08e151f9d6bac3fd19b2b4c6447fd59d75bcf0cec8ccd1d026d2"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "reasoning_argumentation",
+            "evidence_span_ids": [
+              "span_ae5ba3297aec53862a33ea069e84c88fa38a8c335130c13f9f5d739bf6b5edbd"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "multiple_perspectives",
+            "evidence_span_ids": [
+              "span_ae5ba3297aec53862a33ea069e84c88fa38a8c335130c13f9f5d739bf6b5edbd"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "integrative_decision",
+            "evidence_span_ids": [
+              "span_83b1862c1085200e4e2713c371e7812839813c644866ed8349a5a301f81327da"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          },
+          {
+            "confidence": 0.55,
+            "dimension_key": "dynamic_adjustment",
+            "evidence_span_ids": [
+              "span_83b1862c1085200e4e2713c371e7812839813c644866ed8349a5a301f81327da"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "SCORED"
+          }
+        ]
+      },
+      "response": {
+        "dimensions": [
+          {
+            "dimension_key": "problem_definition",
+            "dimension_name": "问题界定",
+            "evidences": [
+              {
+                "quote": "我先界定核心问题和目标，也会核实数据来源并交叉验证证据。",
+                "source_type": "user",
+                "turn_index": 1
+              }
+            ],
+            "observable_behaviors": [
+              "区分现象与核心问题",
+              "明确判定标准",
+              "列出待澄清边界"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "sufficient",
+            "strength": "从经归属验证的参与者自有推理中可见相关行为。",
+            "suggestion": "继续明确目标、范围和需要核实的边界。"
+          },
+          {
+            "dimension_key": "evidence_evaluation",
+            "dimension_name": "证据评估",
+            "evidences": [
+              {
+                "quote": "我先界定核心问题和目标，也会核实数据来源并交叉验证证据。",
+                "source_type": "user",
+                "turn_index": 1
+              }
+            ],
+            "observable_behaviors": [
+              "识别来源与口径",
+              "比较冲突证据",
+              "限定结论强度"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "sufficient",
+            "strength": "从经归属验证的参与者自有推理中可见相关行为。",
+            "suggestion": "继续核实来源、样本范围和仍不确定的信息。"
+          },
+          {
+            "dimension_key": "reasoning_argumentation",
+            "dimension_name": "推理与论证",
+            "evidences": [
+              {
+                "quote": "我会写下假设，因为要找反例检验推理；也会比较家人、导师和团队的不同立场。",
+                "source_type": "user",
+                "turn_index": 3
+              }
+            ],
+            "observable_behaviors": [
+              "拆分主张与根据",
+              "识别隐含假设",
+              "提出可反驳条件"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "sufficient",
+            "strength": "从经归属验证的参与者自有推理中可见相关行为。",
+            "suggestion": "继续区分结论、依据与可能改变结论的假设。"
+          },
+          {
+            "dimension_key": "multiple_perspectives",
+            "dimension_name": "多元视角",
+            "evidences": [
+              {
+                "quote": "我会写下假设，因为要找反例检验推理；也会比较家人、导师和团队的不同立场。",
+                "source_type": "user",
+                "turn_index": 3
+              }
+            ],
+            "observable_behaviors": [
+              "识别相关方",
+              "准确重构不同立场",
+              "比较影响分配"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "sufficient",
+            "strength": "从经归属验证的参与者自有推理中可见相关行为。",
+            "suggestion": "继续补充不同相关方和选择可能带来的影响。"
+          },
+          {
+            "dimension_key": "integrative_decision",
+            "dimension_name": "综合决策",
+            "evidences": [
+              {
+                "quote": "我权衡风险后决定优先执行方案，并设定触发条件，复盘后再调整。",
+                "source_type": "user",
+                "turn_index": 5
+              }
+            ],
+            "observable_behaviors": [
+              "比较方案与约束",
+              "说明权衡逻辑",
+              "定义执行与回退"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "sufficient",
+            "strength": "从经归属验证的参与者自有推理中可见相关行为。",
+            "suggestion": "继续把目标、约束、风险和回退条件放在一起权衡。"
+          },
+          {
+            "dimension_key": "dynamic_adjustment",
+            "dimension_name": "动态调整",
+            "evidences": [
+              {
+                "quote": "我权衡风险后决定优先执行方案，并设定触发条件，复盘后再调整。",
+                "source_type": "user",
+                "turn_index": 5
+              }
+            ],
+            "observable_behaviors": [
+              "设定观察信号",
+              "区分波动与反证",
+              "按条件修正行动"
+            ],
+            "reason": "从经归属验证的参与者自有推理中可见相关行为。",
+            "score": 3,
+            "status": "sufficient",
+            "strength": "从经归属验证的参与者自有推理中可见相关行为。",
+            "suggestion": "继续提前写下会触发调整的信号和下一步行动。"
+          }
+        ],
+        "disclaimer": "数字结果不是人格判断、职业建议或综合排名；请结合具体情境谨慎理解。",
+        "experimental_notice": "思衡 V6 是探索性、非标准化的自然访谈演示，不支持跨用户比较或正式效度结论。",
+        "manual_review_recommended": false,
+        "priorities": [],
+        "session_uuid": "1f035e13-573e-5c79-9d9a-a494f1d057bd",
+        "strengths": [],
+        "summary": "报告只整理本次访谈中可核对的用户原话；缺少证据的视角不会被补问或强行评分。"
+      },
+      "tool": "generate_report"
+    }
+  ],
+  "protocol_version": "2025-11-25",
+  "server": "siheng-v6-scoring",
+  "summary": {
+    "duration_ms": 373,
+    "model_calls": {
+      "by_tool": {
+        "attribute_evidence": 0,
+        "generate_report": 0,
+        "score_six_dimensions": 0
+      },
+      "total": 0
+    },
+    "status": "PASSED",
+    "tool_calls": 3
+  },
+  "transcript_classification": "synthetic_deidentified",
+  "transport": "stdio"
+}
