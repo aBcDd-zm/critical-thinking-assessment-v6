@@ -9,10 +9,12 @@ natural conversation should continue or close.
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
 import hashlib
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Literal, Optional, TypeVar
 
@@ -36,7 +38,7 @@ INCREMENTAL_EVIDENCE_PROMPT_VERSION = "v6.2.1"
 EVIDENCE_ATTRIBUTION_PROMPT_ID = "natural_evidence_attribution_v6.2.1"
 EVIDENCE_ATTRIBUTION_PROMPT_VERSION = "v6.2.1"
 EVIDENCE_ATTRIBUTION_SCHEMA_VERSION = "evidence-attribution-select-v3-id"
-EVIDENCE_CANDIDATE_RULE_VERSION = "evidence-span-boundaries-v1"
+EVIDENCE_CANDIDATE_RULE_VERSION = "evidence-span-boundaries-v3"
 ATTRIBUTED_EVIDENCE_PROMPT_ID = "natural_attributed_evidence_v6.2.2"
 ATTRIBUTED_EVIDENCE_PROMPT_VERSION = "v6.2.2"
 ATTRIBUTED_EVIDENCE_SCHEMA_VERSION = "attributed-evidence-span-ref-v1"
@@ -126,6 +128,7 @@ class StructuredCallResult(Generic[T]):
     repair_used: bool
     latency_ms: int
     attempt_count: int = 1
+    fallback_used: bool = False
 
 
 class EvidenceAttributionSelection(BaseModel):
@@ -178,17 +181,289 @@ _EXPLICIT_ATTRIBUTION_BOUNDARIES = (
 )
 _EXPLICIT_UNCERTAIN_MARKERS = ("分不清", "不确定是谁", "混在一起")
 _PARTICIPANT_REASONING_BOUNDARY = re.compile(
-    r"(?:但是|但|不过|然而)?我(?:自己)?"
-    r"(?:仍然|依然|还是)?"
+    r"(?:但是|但|不过|然而|相反|可是|"
+    r"可(?=(?:我|本人|在我看来|依我看|就我而言))|而)?(?:"
+    r"(?:我(?:自己|个人|本人)?|本人)(?:明确|仍然|依然|还是|只|暂时|最终|"
+    r"并不|不|没有|没|未)?"
     r"(?:认为|觉得|会|不会|决定|选择|不同意|不赞同|拒绝|"
-    r"赞同|采纳|质疑|接受|不接受|倾向)"
+    r"赞同|采纳|质疑|接受|不接受|倾向|判断|主张)|"
+    r"(?:我(?:自己|个人|本人)?的|我个人(?:的)?|我的|本人(?:的)?)"
+    r"(?:判断|理由|选择|看法|观点|想法|结论|意见)"
+    r"(?:是(?!否|什么|不是)|为(?!什么|何))|"
+    r"在我看来|依我看|就我而言)"
 )
+_EXTERNAL_SOURCE_PATTERN = (
+    r"(?:AI|ChatGPT|DeepSeek|Claude|Gemini|Copilot|豆包|通义|Kimi|"
+    r"文心一言|腾讯元宝|智谱清言|讯飞星火|AI助手|助手|聊天机器人|"
+    r"搜索引擎|模型|大模型|"
+    r"论文|文献|报告|研究|文章|新闻报道|网上资料|资料|导师|同事|"
+    r"朋友|别人|专家|外部数据)"
+)
+_GENERIC_TOOL_SOURCE_PATTERN = r"(?:[A-Za-z][A-Za-z0-9._-]{1,30})"
+_EXTERNAL_REPORTING_GAP = r"[^，,。！？；;\n]{0,18}?"
 _EXTERNAL_STATEMENT_BOUNDARY = re.compile(
-    r"(?:AI|ChatGPT|DeepSeek|模型|论文|文献|报告|导师|同事|朋友|"
-    r"别人|专家).{0,18}?(?:说|写|回答|建议|认为|指出|显示|生成)",
+    rf"{_EXTERNAL_SOURCE_PATTERN}{_EXTERNAL_REPORTING_GAP}"
+    r"(?:说|写|写道|回答|回复|答复|建议|认为|指出|显示|表明|"
+    r"声称|表示|提到|强调|生成|输出|问(?!题)|提问|主张|判断|评估|"
+    r"分析(?:结果)?(?:是|为|如下)?|(?:给出(?:的)?)?"
+    r"(?:答案|答复|结论|观点|方案|内容)(?:是|为|如下)?)|"
+    rf"(?:根据|据){_EXTERNAL_SOURCE_PATTERN}(?:所述|显示|表明|指出)?",
     re.I,
 )
 _CLEAR_CLAUSE_BOUNDARIES = frozenset("\n。！？；;,，:：")
+_STRONG_CLAUSE_BOUNDARIES = frozenset("\n。！？；;")
+_EXTERNAL_QUOTE_PAIRS = {
+    "“": "”",
+    "‘": "’",
+    "「": "」",
+    "『": "』",
+    '"': '"',
+    "'": "'",
+    "`": "`",
+    "【": "】",
+    "《": "》",
+    "〈": "〉",
+    "［": "］",
+    "[": "]",
+    "（": "）",
+    "(": ")",
+}
+_EXPLICIT_EXTERNAL_OWNERSHIP = re.compile(
+    rf"(?:{_EXTERNAL_SOURCE_PATTERN}|上文|外部)"
+    r".{0,180}?(?:是|属于|来自|源自|都是)(?:外部|外部材料|论文材料)",
+    re.I | re.S,
+)
+_EXTERNAL_SOURCE_DECLARATION = re.compile(
+    rf"(?:"
+    r"(?:以下|下面|上面|前文|上文|这段|这些内容)"
+    r"(?:都)?(?:是|为|来自|源自)"
+    rf"(?:{_EXTERNAL_SOURCE_PATTERN}|外部材料|外部内容)"
+    r"(?:的)?(?:原话|原文|内容|表述|材料)?|"
+    r"(?:外部材料|外部内容)"
+    r"(?:(?:如下|是|为)|(?=[:：])|(?:里|中)(?:的)?)|"
+    r"(?:这是|这部分是)(?:外部材料|外部内容)|"
+    rf"{_EXTERNAL_SOURCE_PATTERN}(?:的)?(?:原话|原文|输出的内容|内容)"
+    r"(?:如下|是|为|[:：])?|"
+    rf"(?:摘自|引用自){_EXTERNAL_SOURCE_PATTERN}|"
+    rf"这部分(?:来自|源自){_EXTERNAL_SOURCE_PATTERN}"
+    r")",
+    re.I,
+)
+_EXTERNAL_REQUEST_DECLARATION = re.compile(
+    rf"(?:我问|我(?:请|让)|请|让|我向).{{0,6}}?{_EXTERNAL_SOURCE_PATTERN}"
+    r"(?:.{0,8}?(?:回答|判断|评估|分析|问|提问|咨询))?|"
+    rf"(?:我向|我问|请|让).{{0,6}}?{_GENERIC_TOOL_SOURCE_PATTERN}"
+    r"(?:.{0,8}?(?:回答|判断|评估|分析|问|提问|咨询))",
+    re.I,
+)
+_EXTERNAL_DIRECT_CONTENT = re.compile(
+    rf"{_EXTERNAL_SOURCE_PATTERN}{_EXTERNAL_REPORTING_GAP}"
+    r"(?:说(?!的)|写道|回答(?=\s*[:：是为“‘\"]|称|说)|"
+    r"回复(?=\s*[:：是为“‘\"]|称|说)|指出|显示|表明|生成|"
+    r"问(?!题)|提问|主张|认为|(?:分析|评估)(?:结果)?\s*(?:是|为|如下|[:：])|"
+    r"(?<!的)建议(?=\s*(?:应|要|先|直接|立即|可以|不要|不必|采用|上线|试点))|"
+    r"(?:答案|答复|结论|观点|方案)\s*(?:是|为|[:：]))|"
+    rf"(?:根据|据){_EXTERNAL_SOURCE_PATTERN}",
+    re.I,
+)
+_EXTERNAL_COMMA_REPORTING_SUFFIX = re.compile(
+    r"(?:说|称|道|如下|(?:的)?(?:内容)?(?:是|为))?"
+)
+
+
+def _external_source_matches(content: str) -> list[re.Match[str]]:
+    return sorted(
+        [
+            *_EXTERNAL_STATEMENT_BOUNDARY.finditer(content),
+            *_EXTERNAL_SOURCE_DECLARATION.finditer(content),
+            *_EXTERNAL_REQUEST_DECLARATION.finditer(content),
+        ],
+        key=lambda match: (match.start(), match.end()),
+    )
+
+
+def _external_reporting_ranges(content: str) -> list[tuple[int, int]]:
+    """Return explicit external speech scopes for boundary suppression.
+
+    This is deliberately conservative: first-person wording inside a quoted or
+    colon-introduced external statement must never be detached from its source
+    cue and mistaken for the participant's own reasoning.
+    """
+
+    next_strong_boundary = [len(content)] * (len(content) + 1)
+    next_boundary = len(content)
+    for index in range(len(content) - 1, -1, -1):
+        if content[index] in _STRONG_CLAUSE_BOUNDARIES:
+            next_boundary = index + 1
+        next_strong_boundary[index] = next_boundary
+    closer_positions: dict[str, list[int]] = {
+        closer: [] for closer in set(_EXTERNAL_QUOTE_PAIRS.values())
+    }
+    for index, character in enumerate(content):
+        if character in closer_positions:
+            closer_positions[character].append(index)
+
+    ranges: list[tuple[int, int]] = []
+    for source_match in _external_source_matches(content):
+        scope_limit = next_strong_boundary[source_match.end()]
+        intro_limit = min(scope_limit, source_match.end() + 16)
+        intro = content[source_match.end() : intro_limit]
+        quote_positions = [
+            (intro.find(opener), opener, closer)
+            for opener, closer in _EXTERNAL_QUOTE_PAIRS.items()
+            if intro.find(opener) >= 0
+        ]
+        if quote_positions:
+            relative_open, opener, closer = min(quote_positions, key=lambda item: item[0])
+            open_index = source_match.end() + relative_open
+            possible_closers = closer_positions[closer]
+            closer_index = bisect_right(possible_closers, open_index)
+            close_index = (
+                possible_closers[closer_index]
+                if closer_index < len(possible_closers)
+                else -1
+            )
+            ranges.append(
+                (
+                    open_index + len(opener),
+                    close_index if close_index >= 0 else len(content),
+                )
+            )
+            continue
+        colon_offsets = [offset for offset in (intro.find("："), intro.find(":")) if offset >= 0]
+        if colon_offsets:
+            colon_index = source_match.end() + min(colon_offsets)
+            ranges.append((colon_index + 1, len(content)))
+            continue
+        comma_offsets = [
+            offset for offset in (intro.find("，"), intro.find(",")) if offset >= 0
+        ]
+        if comma_offsets:
+            comma_offset = min(comma_offsets)
+            reporting_suffix = intro[:comma_offset].strip()
+            if _EXTERNAL_COMMA_REPORTING_SUFFIX.fullmatch(reporting_suffix) is None:
+                continue
+            comma_index = source_match.end() + comma_offset
+            range_start = comma_index + 1
+            range_end = scope_limit
+            for participant_match in _PARTICIPANT_REASONING_BOUNDARY.finditer(
+                content, range_start, scope_limit
+            ):
+                if participant_match.group(0).startswith(
+                    ("但", "不过", "然而", "相反", "可是", "可", "而")
+                ):
+                    range_end = participant_match.start()
+                    break
+            if range_start < range_end:
+                ranges.append((range_start, range_end))
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _participant_reasoning_matches(
+    content: str,
+    *,
+    reporting_ranges: list[tuple[int, int]] | None = None,
+) -> list[re.Match[str]]:
+    authoritative_ranges = (
+        _external_reporting_ranges(content)
+        if reporting_ranges is None
+        else reporting_ranges
+    )
+    range_starts = [start for start, _end in authoritative_ranges]
+    matches: list[re.Match[str]] = []
+    for match in _PARTICIPANT_REASONING_BOUNDARY.finditer(content):
+        range_index = bisect_right(range_starts, match.start()) - 1
+        if (
+            range_index >= 0
+            and match.start() < authoritative_ranges[range_index][1]
+        ):
+            continue
+        matches.append(match)
+    return matches
+
+
+def _candidate_has_explicit_external_origin(quote: str) -> bool:
+    stripped = quote.lstrip()
+    return bool(
+        _EXTERNAL_STATEMENT_BOUNDARY.search(quote)
+        or _EXTERNAL_SOURCE_DECLARATION.search(quote)
+        or _EXTERNAL_REQUEST_DECLARATION.search(quote)
+        or _EXPLICIT_EXTERNAL_OWNERSHIP.search(quote)
+        or stripped.startswith(_EXPLICIT_ATTRIBUTION_BOUNDARIES)
+    )
+
+
+_PARTICIPANT_FORMATTING_PREFIX = re.compile(
+    r"\s*(?:(?:[-*•]|\d+[.)、])\s*)?"
+    r"(?:(?:总体上|总的来说|总体而言)[,，:：]?\s*)?"
+)
+_PARTICIPANT_NARRATIVE_PREFIX = re.compile(
+    r"\s*(?:(?:[-*•]|\d+[.)、])\s*)?"
+    r"(?:(?:总体上|总的来说|总体而言)[,，:：]?\s*)?"
+    r"(?:因为|由于|当时|后来|同时|所以|但是)"
+)
+_PARTICIPANT_NARRATIVE_START = re.compile(
+    r"\s*(?:(?:[-*•]|\d+[.)、])\s*)?"
+    r"(?:(?:总体上|总的来说|总体而言)[,，:：]?\s*)?"
+    r"(?:因为|由于|当时|后来|同时|所以|但是)?我"
+)
+_PARTICIPANT_LEAD_IN = re.compile(
+    r"\s*(?:(?:[-*•]|\d+[.)、])\s*)?"
+    r"(?:就我而言|在我看来|依我看|"
+    r"我(?:自己|个人|本人)?(?:明确)?(?:认为|觉得|主张|判断))"
+    r"[,，:：]?\s*"
+)
+
+
+def _participant_match_is_clear_owned_reasoning(
+    match: re.Match[str],
+    quote: str,
+) -> bool:
+    prefix = quote[: match.start()]
+    match_is_immediate = bool(
+        _PARTICIPANT_FORMATTING_PREFIX.fullmatch(prefix)
+        or _PARTICIPANT_NARRATIVE_PREFIX.fullmatch(prefix)
+    )
+    participant_narrative_precedes_match = bool(
+        _PARTICIPANT_NARRATIVE_START.match(quote)
+        and not _candidate_has_explicit_external_origin(prefix)
+    )
+    if not match_is_immediate and not participant_narrative_precedes_match:
+        return False
+    remaining = quote[match.end() :]
+    direct_match = _EXTERNAL_DIRECT_CONTENT.search(remaining)
+    if direct_match is not None:
+        has_embedded_quote_or_colon = any(
+            symbol in remaining
+            for symbol in (*_EXTERNAL_QUOTE_PAIRS, "：", ":")
+        )
+        explicit_challenge = any(
+            action in match.group(0)
+            for action in ("不同意", "不赞同", "拒绝", "质疑")
+        )
+        reasoned_adoption = any(
+            action in match.group(0)
+            for action in ("采纳", "接受", "赞同")
+        ) and any(
+            reason_marker in remaining
+            for reason_marker in ("因为", "理由", "基于", "考虑到")
+        )
+        if has_embedded_quote_or_colon or not (
+            explicit_challenge or reasoned_adoption
+        ):
+            return False
+    if any(
+        opener in remaining
+        for opener in _EXTERNAL_QUOTE_PAIRS
+    ) and _candidate_has_explicit_external_origin(remaining):
+        return False
+    return True
 
 
 def attribution_span_candidate_id(
@@ -219,7 +494,11 @@ def attribution_span_candidate_id(
     ).hexdigest()
 
 
-def _candidate_boundary_priorities(content: str) -> dict[int, int]:
+def _candidate_boundary_priorities(
+    content: str,
+    *,
+    max_boundaries: int | None = None,
+) -> dict[int, int]:
     """Return deterministic, high-confidence ownership boundaries.
 
     The service does not claim these boundaries prove authorship. They only
@@ -231,23 +510,46 @@ def _candidate_boundary_priorities(content: str) -> dict[int, int]:
 
     def add(position: int, priority: int) -> None:
         if 0 < position < len(content):
+            is_new = position not in priorities
             priorities[position] = max(priority, priorities.get(position, 0))
+            if (
+                is_new
+                and max_boundaries is not None
+                and len(priorities) > max_boundaries
+            ):
+                raise ValueError("attribution_candidate_limit_exceeded")
 
     for marker in _EXPLICIT_ATTRIBUTION_BOUNDARIES:
         for match in re.finditer(re.escape(marker), content):
             add(match.start(), 100)
 
-    for match in _PARTICIPANT_REASONING_BOUNDARY.finditer(content):
+    reporting_ranges = _external_reporting_ranges(content)
+    for match in _participant_reasoning_matches(
+        content,
+        reporting_ranges=reporting_ranges,
+    ):
         position = match.start()
         matched = match.group(0)
         prefix = content[:position].rstrip()
-        starts_contrast = matched.startswith(("但", "不过", "然而"))
-        if starts_contrast or (prefix and prefix[-1] in _CLEAR_CLAUSE_BOUNDARIES):
+        starts_contrast = matched.startswith(
+            ("但", "不过", "然而", "相反", "可是", "可", "而")
+        )
+        follows_external_action = bool(
+            re.search(r"(?:之后|然后|后)\s*$", prefix)
+            and _EXTERNAL_REQUEST_DECLARATION.search(prefix)
+        )
+        if (
+            starts_contrast
+            or follows_external_action
+            or (prefix and prefix[-1] in _CLEAR_CLAUSE_BOUNDARIES)
+        ):
             add(position, 90)
 
     for match in _EXTERNAL_STATEMENT_BOUNDARY.finditer(content):
         position = match.start()
         prefix = content[:position].rstrip()
+        if _PARTICIPANT_LEAD_IN.fullmatch(prefix) is not None:
+            continue
         if prefix and prefix[-1] in _CLEAR_CLAUSE_BOUNDARIES:
             add(position, 80)
     return priorities
@@ -267,7 +569,6 @@ def build_attribution_span_candidates(
 
     normalized: list[tuple[int, str, int]] = []
     seen_turn_indices: set[int] = set()
-    boundary_options: list[tuple[int, int, int, int]] = []
     for row_order, turn in enumerate(user_turns):
         turn_index = int(turn["turn_index"])
         content = str(turn["content"])
@@ -277,15 +578,21 @@ def build_attribution_span_candidates(
             raise ValueError("duplicate_attribution_turn_index")
         seen_turn_indices.add(turn_index)
         normalized.append((turn_index, content, row_order))
-        for position, priority in _candidate_boundary_priorities(content).items():
-            boundary_options.append((priority, turn_index, position, row_order))
 
     if len(normalized) > _MAX_ATTRIBUTION_SPAN_CANDIDATES:
         raise ValueError("too_many_nonempty_user_turns_for_attribution_contract")
 
     extra_budget = _MAX_ATTRIBUTION_SPAN_CANDIDATES - len(normalized)
-    if fail_on_candidate_limit and len(boundary_options) > extra_budget:
-        raise ValueError("attribution_candidate_limit_exceeded")
+    boundary_options: list[tuple[int, int, int, int]] = []
+    for turn_index, content, row_order in normalized:
+        remaining_budget = extra_budget - len(boundary_options)
+        for position, priority in _candidate_boundary_priorities(
+            content,
+            max_boundaries=remaining_budget if fail_on_candidate_limit else None,
+        ).items():
+            boundary_options.append((priority, turn_index, position, row_order))
+            if fail_on_candidate_limit and len(boundary_options) > extra_budget:
+                raise ValueError("attribution_candidate_limit_exceeded")
     selected_boundaries: dict[int, set[int]] = {
         turn_index: set() for turn_index, _content, _order in normalized
     }
@@ -313,6 +620,22 @@ def build_attribution_span_candidates(
         )
         candidates: list[dict[str, Any]] = []
         for start, end, quote in raw_candidates:
+            participant_matches = _participant_reasoning_matches(quote)
+            participant_match = participant_matches[0] if participant_matches else None
+            force_candidate_uncertain = bool(
+                _candidate_has_explicit_external_origin(quote)
+                and participant_match is not None
+                and not _participant_match_is_clear_owned_reasoning(
+                    participant_match,
+                    quote,
+                )
+            )
+            eligibility_ceiling = (
+                "context_only"
+                if _candidate_has_explicit_external_origin(quote)
+                and participant_match is None
+                else None
+            )
             quote_hash = hashlib.sha256(quote.encode("utf-8")).hexdigest()
             occurrence = occurrence_by_hash.get(quote_hash, 0) + 1
             occurrence_by_hash[quote_hash] = occurrence
@@ -332,7 +655,10 @@ def build_attribution_span_candidates(
                     "end": end,
                     "quote_hash": quote_hash,
                     "occurrence": occurrence,
-                    "force_uncertain": force_whole_turn_uncertain,
+                    "force_uncertain": (
+                        force_whole_turn_uncertain or force_candidate_uncertain
+                    ),
+                    "eligibility_ceiling": eligibility_ceiling,
                 }
             )
         result[turn_index] = candidates
@@ -399,6 +725,13 @@ def source_clarification_required(
     )
     if latest_user is None:
         return False
+    if _latest_user_follows_source_clarification(transcript):
+        # One neutral clarification is the audit boundary for a continuous
+        # mixed-source episode.  If the participant still cannot separate the
+        # sources, attribution must abstain/manual-review; the interviewer
+        # returns to the decision mainline instead of asking the same semantic
+        # question again.
+        return False
     content = str(latest_user["content"])
     compact = re.sub(r"\s+", "", content)
     external_source_labeled = bool(
@@ -436,6 +769,446 @@ def source_clarification_required(
     )
 
 
+def _normalize_interviewer_message_for_repetition(message: str) -> str:
+    """Canonicalize surface-only differences before exact repeat detection."""
+
+    normalized = unicodedata.normalize("NFKC", message).casefold()
+    visible = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
+    pieces: list[str] = []
+    index = 0
+    while index < len(visible):
+        character = visible[index]
+        if not character.isspace():
+            pieces.append(character)
+            index += 1
+            continue
+        whitespace_end = index + 1
+        while whitespace_end < len(visible) and visible[whitespace_end].isspace():
+            whitespace_end += 1
+        previous = pieces[-1] if pieces else ""
+        following = visible[whitespace_end] if whitespace_end < len(visible) else ""
+        if (
+            previous.isascii()
+            and previous.isalnum()
+            and following.isascii()
+            and following.isalnum()
+            and (not pieces or pieces[-1] != " ")
+        ):
+            pieces.append(" ")
+        index = whitespace_end
+    return "".join(pieces)
+
+
+_INTERVIEWER_ACKNOWLEDGEMENT_PREFIX = re.compile(
+    r"^(?:(?:嗯+|哦+|好(?:的)?|明白(?:了)?|我明白(?:了)?|我在听|"
+    r"谢谢(?:你)?(?:的)?(?:(?:这些|这个|上述)?(?:说明|信息|分享|补充|回答)|"
+    r"告诉我(?:这些|这一点|这个情况|这些信息)?)?)"
+    r"[,.，。!！:：;；、]+)+",
+    re.I,
+)
+
+
+def _interviewer_repetition_keys(message: str) -> set[str]:
+    """Return exact and acknowledgement-stripped keys for one primary question."""
+
+    normalized = _normalize_interviewer_message_for_repetition(message)
+    if not normalized:
+        return set()
+    keys = {normalized}
+    without_acknowledgement = _INTERVIEWER_ACKNOWLEDGEMENT_PREFIX.sub("", normalized)
+    if without_acknowledgement:
+        keys.add(without_acknowledgement)
+    question_mark = normalized.find("?")
+    if question_mark >= 0:
+        question_prefix = normalized[:question_mark]
+        last_boundary = max(
+            question_prefix.rfind(marker)
+            for marker in (",", "，", ".", "。", "!", "！", ":", "：", ";", "；", "、")
+        )
+        if last_boundary >= 0:
+            question_suffix = normalized[last_boundary + 1 : question_mark + 1]
+            visible_length = sum(
+                1
+                for character in question_suffix
+                if character.isalnum() or "\u3400" <= character <= "\u9fff"
+            )
+            if visible_length >= 12:
+                keys.add(question_suffix)
+    # Long Chinese questions that differ only by an internal structural
+    # particle (for example, ``各方的收益`` vs ``各方收益``) are the
+    # same primary question. Keep this as a secondary, namespaced exact key so
+    # numeric and substantive wording still have to match in full.
+    for key in tuple(keys):
+        visible_length = sum(
+            1
+            for character in key
+            if character.isalnum() or "\u3400" <= character <= "\u9fff"
+        )
+        if visible_length < 16:
+            continue
+        without_structural_de = re.sub(
+            r"(?<=[\u3400-\u9fff])的(?=[\u3400-\u9fff])",
+            "",
+            key,
+        )
+        keys.add(f"structural-de:{without_structural_de}")
+    return keys
+
+
+_V621_CONTINUITY_FALLBACKS: tuple[tuple[str, str], ...] = (
+    ("这次补充里，哪项新信息最可能推翻你当前的选择，为什么？", "basis"),
+    ("基于刚才的补充，你下一步会先做什么来检验当前判断？", "action"),
+    ("如果接下来出现相反结果，你会怎样调整现在的选择？", "adjustment"),
+    ("你准备观察什么具体结果，来判断这项选择是否值得继续？", "outcome"),
+    ("在当前约束下，你最愿意承担哪项代价，又最不能接受什么风险？", "tradeoff"),
+)
+
+
+def _exception_chain_contains(error: BaseException, marker: str) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if marker in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _v621_continuity_fallback(payload: dict[str, Any]) -> NaturalInterviewerOutput:
+    """Return one audited server question after repeat-only model exhaustion."""
+
+    if payload.get("source_clarification_required") is True:
+        raise ModelGatewayError("v621_continuity_fallback_not_allowed_for_source_clarification")
+    anchor_candidates = payload.get("anchor_candidates") or []
+    if not anchor_candidates:
+        raise ModelGatewayError("v621_continuity_fallback_requires_anchor_candidate")
+    transcript = payload.get("transcript") or []
+    prior_question_keys = set().union(
+        *(
+            _interviewer_repetition_keys(str(item.get("content") or ""))
+            for item in transcript
+            if item.get("role") == "assistant"
+        ),
+        set(),
+    )
+    returning_from_source_clarification = _latest_user_follows_source_clarification(
+        transcript
+    )
+    relation = "return" if returning_from_source_clarification else "core"
+    selected_anchor = {**anchor_candidates[-1], "text_hash": None}
+    user_answer_count = sum(1 for item in transcript if item.get("role") == "user")
+    alternatives = [
+        *_V621_CONTINUITY_FALLBACKS,
+        (
+            f"结合你刚才的第{user_answer_count}次回答，哪项依据、行动或变化还需要补充？",
+            "other",
+        ),
+    ]
+    for question, focus_kind in alternatives:
+        if _interviewer_repetition_keys(question).intersection(prior_question_keys):
+            continue
+        output = NaturalInterviewerOutput.model_validate(
+            {
+                "interviewer_message": question,
+                "session_action": "continue",
+                "finish_reason": None,
+                "navigation": {
+                    "decision_anchor": selected_anchor,
+                    "focus_kind": focus_kind,
+                    "mainline_relation": relation,
+                },
+            }
+        )
+        _validate_v621_interviewer_contract(output, payload)
+        return output
+    raise ModelGatewayError("v621_continuity_fallback_exhausted")
+
+
+def _is_source_clarification_question(message: str) -> bool:
+    """Recognize the neutral source-ownership question emitted by V6.2.1."""
+
+    compact = _normalize_interviewer_message_for_repetition(message)
+    external_owner = (
+        r"(?:外部(?:材料|内容|说法|观点|信息|来源)?|"
+        r"(?:ai|chatgpt|deepseek|论文)(?:材料|内容|说法|观点|建议|表述)?)"
+    )
+    participant_owner = (
+        r"(?:(?:你)?自己(?:的)?(?:判断|理由|选择|看法|观点|表述|采纳)|"
+        r"你的(?:判断|理由|选择|看法)|本人(?:判断|理由|选择|看法))"
+    )
+    paired_ownership_question = bool(
+        re.search(
+            r"哪些(?:内容|说法|信息|观点)?(?:是|属于|来自|源自)"
+            r".{0,4}" + external_owner,
+            compact,
+            re.I,
+        )
+        and re.search(
+            r"哪些(?:内容|说法|信息|观点)?(?:是|属于|来自|源自)"
+            r".{0,4}" + participant_owner,
+            compact,
+            re.I,
+        )
+    )
+    return paired_ownership_question
+
+
+def _latest_user_follows_source_clarification(
+    transcript: list[dict[str, Any]],
+) -> bool:
+    """Return whether the latest answer directly follows a source clarification."""
+
+    if _latest_user_requests_question_repetition({"transcript": transcript}):
+        # Replaying the immediately preceding question for accessibility does
+        # not consume the single clarification attempt.
+        return False
+    latest_user_position = next(
+        (
+            index
+            for index in range(len(transcript) - 1, -1, -1)
+            if transcript[index].get("role") == "user"
+            and str(transcript[index].get("content") or "").strip()
+        ),
+        None,
+    )
+    if latest_user_position is None:
+        return False
+    for item in reversed(transcript[:latest_user_position]):
+        if item.get("role") not in {"user", "assistant"}:
+            continue
+        return item.get("role") == "assistant" and _is_source_clarification_question(
+            str(item.get("content") or "")
+        )
+    return False
+
+
+def _latest_user_requests_question_repetition(payload: dict[str, Any]) -> bool:
+    """Allow an accessibility-driven request to hear or see the same question again."""
+
+    latest_user = next(
+        (
+            str(item.get("content") or "")
+            for item in reversed(payload.get("transcript") or [])
+            if item.get("role") == "user"
+        ),
+        "",
+    )
+    compact = _normalize_interviewer_message_for_repetition(latest_user)
+    if any(
+        marker in compact
+        for marker in (
+            "不要重复",
+            "别重复",
+            "不用重复",
+            "不必重复",
+            "不要再问",
+            "不要再说",
+            "别再问",
+            "别再说",
+            "别重问",
+        )
+    ):
+        return False
+    short_request = compact.strip(",.，。!！?？:：;；、")
+    if short_request in {
+        "没听清",
+        "没有听清",
+        "我没听清",
+        "我没有听清",
+        "刚才没听清",
+        "刚才没有听清",
+        "没看清",
+        "没有看清",
+        "我没看清",
+        "我没有看清",
+        "刚才没看清",
+        "刚才没有看清",
+        "再说一遍",
+        "再问一次",
+        "重复一下",
+        "请重复一下",
+        "请再说一遍",
+        "请再问一次",
+        "请重新问一遍",
+        "请重问一遍",
+        "麻烦重复一下",
+        "麻烦再说一遍",
+        "麻烦再问一次",
+        "能再说一遍吗",
+        "可以再说一遍吗",
+        "你能再说一遍吗",
+        "你可以再说一遍吗",
+    }:
+        return True
+    direct_request_boundary = r"(?:^|[,，.。!！?？:：;；、])"
+    repeat_action = r"(?:重复|再说|再问|重新问|重问|把刚才.{0,8}(?:说|问))"
+    anchored_question = r"(?:刚才|上一个|上个|上次).{0,8}(?:问题|问法)"
+    modal_request = r"(?:你能|你可以|能|可以|我能请你|我可以请你)"
+    request_clause_character = r"[^,，.。!！?？:：;；、]"
+    has_question_anchor = bool(re.search(anchored_question, compact))
+    accessibility_preface = bool(
+        re.search(
+            r"(?:^|[,，.。!！?？:：;；、])(?:抱歉|不好意思)?"
+            r"(?:我|刚才我)?(?:没|没有)(?:听|看)清",
+            compact,
+        )
+    )
+    if any(marker in compact for marker in ("我的回答", "我的话", "我的说法")) and not has_question_anchor:
+        return False
+    if re.search(
+        r"(?:客户|同事|对方|老师|导师|他|她|别人).{0,12}"
+        r"(?:说|问|问题|原话)[：:]",
+        compact,
+    ):
+        return False
+    if not (has_question_anchor or accessibility_preface):
+        return False
+    terminal_politeness = r"(?:谢谢|麻烦了|拜托了)?[.。!！?？]*$"
+    if re.search(
+        direct_request_boundary
+        + r"(?:请|麻烦|能否|能不能|可不可以|我能请你|我可以请你)"
+        + r"(?="
+        + request_clause_character
+        + r"{0,50}"
+        + repeat_action
+        + r")"
+        + request_clause_character
+        + r"{0,60}"
+        + terminal_politeness,
+        compact,
+    ) or re.search(
+        direct_request_boundary
+        + modal_request
+        + r"(?="
+        + request_clause_character
+        + r"{0,50}"
+        + anchored_question
+        + r")(?="
+        + request_clause_character
+        + r"{0,50}"
+        + repeat_action
+        + r")"
+        + request_clause_character
+        + r"{0,60}(?:吗|[?？])"
+        + terminal_politeness,
+        compact,
+    ):
+        return True
+    return False
+
+
+def _latest_user_requests_interview_end(payload: dict[str, Any]) -> bool:
+    latest_user = next(
+        (
+            str(item.get("content") or "")
+            for item in reversed(payload.get("transcript") or [])
+            if item.get("role") == "user"
+        ),
+        "",
+    )
+    clause = _latest_direct_control_clause(latest_user)
+    if not clause:
+        return False
+    direct_end_patterns = (
+        r"(?:我)?(?:现在)?不(?:想|愿)(?:再)?继续(?:回答|访谈)(?:了|啦|吧)?",
+        r"(?:请|麻烦)?(?:现在|这次|本次)?(?:帮我)?"
+        r"(?:结束|停止)(?:这次|本次)?(?:访谈|对话)"
+        r"(?:并(?:生成|出)(?:这次|本次)?报告)?(?:吧|了)?",
+        r"(?:我|我们)?(?:现在)?(?:想|想要|希望|决定)"
+        r"(?:结束|停止)(?:这次|本次)?(?:访谈|对话)(?:吧|了)?",
+        r"(?:这次|本次)?(?:访谈|对话)(?:就)?到这里(?:吧|了)?",
+        r"(?:请|麻烦)?(?:现在)?(?:帮我)?(?:生成|出)"
+        r"(?:这次|本次)?报告(?:吧|了)?",
+        r"(?:可以|能否|能不能)(?:现在)?(?:结束|停止)"
+        r"(?:这次|本次)?(?:访谈|对话)(?:并(?:生成|出)报告)?(?:了|吗|吧)?",
+    )
+    return any(re.fullmatch(pattern, clause) for pattern in direct_end_patterns)
+
+
+def _latest_user_explicitly_switches_decision(payload: dict[str, Any]) -> bool:
+    latest_user = next(
+        (
+            str(item.get("content") or "")
+            for item in reversed(payload.get("transcript") or [])
+            if item.get("role") == "user"
+        ),
+        "",
+    )
+    clause = _latest_direct_control_clause(latest_user)
+    if not clause:
+        return False
+    direct_switch_patterns = (
+        r"(?:请|麻烦)?(?:现在)?(?:我们)?(?:换|改谈)"
+        r"(?:到)?(?:个|一个|另一个|另一件|新的)?"
+        r"(?:话题|问题|决定|事情)(?:吧|了)?",
+        r"(?:我|我们)(?:现在)?(?:想|想要|希望)"
+        r"(?:换|改谈)(?:到)?(?:个|一个|另一个|另一件|新的)?"
+        r"(?:话题|问题|决定|事情)(?:吧|了)?",
+        r"(?:我|我们)(?:现在)?(?:想|想要|希望|来)"
+        r"(?:谈|说)(?:另一个|另一件|新的)(?:话题|问题|决定|事情)(?:吧|了)?",
+        r"(?:这个|这件事|这个决定)(?:先)?不谈了?"
+        r"(?:请|我们)?(?:换|改谈)(?:个|一个|另一个|另一件|新的)?"
+        r"(?:话题|问题|决定|事情)(?:吧)?",
+    )
+    return any(re.fullmatch(pattern, clause) for pattern in direct_switch_patterns)
+
+
+def _latest_direct_control_clause(message: str) -> str:
+    """Return only the final direct clause, excluding narrative lead-in text."""
+
+    normalized = _normalize_interviewer_message_for_repetition(message).strip()
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"[,，.。!！?？﹖؟:：;；、]+", normalized)
+        if clause.strip()
+    ]
+    if not clauses:
+        return ""
+    if clauses[-1] in {"谢谢", "谢谢你", "麻烦了", "拜托了", "感谢"}:
+        clauses.pop()
+    if not clauses:
+        return ""
+    safe_direct_prefixes = (
+        r"(?:我)?(?:现在)?不(?:想|愿)(?:再)?继续(?:回答|访谈)?(?:了|啦)?",
+        r"(?:我)?(?:已经)?(?:回答|说)(?:完|清楚)(?:了)?",
+        r"(?:所以|因此|那么|那就|那|好吧|好的)",
+    )
+    if any(
+        not any(re.fullmatch(pattern, prefix) for pattern in safe_direct_prefixes)
+        for prefix in clauses[:-1]
+    ):
+        # A preceding clause makes authorship ambiguous (quotation, pasted
+        # instruction, event narrative, or another person's request).  Since
+        # the UI has an explicit finish control, fail closed instead of
+        # treating the final quoted command as the participant's intent.
+        return ""
+    clause = clauses[-1]
+    clause = re.sub(r"^(?:所以|因此|那么|那就|那|好吧|好的)", "", clause)
+    clause = re.sub(r"(?:谢谢(?:你)?|麻烦了|拜托了|感谢)$", "", clause)
+    return clause.strip()
+
+
+def _question_mark_count(message: str) -> int:
+    """Count Unicode question-mark variants after compatibility normalization."""
+
+    normalized = unicodedata.normalize("NFKC", message)
+    return sum(character in {"?", "؟"} for character in normalized)
+
+
+def _substantive_visible_character_count(message: str) -> int:
+    normalized = unicodedata.normalize("NFKC", message)
+    return sum(
+        character.isalnum() or "\u3400" <= character <= "\u9fff"
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
+
+
 def _validate_v621_interviewer_contract(
     output: NaturalInterviewerOutput,
     payload: dict[str, Any],
@@ -443,16 +1216,81 @@ def _validate_v621_interviewer_contract(
     """Make the source-clarification navigation repairable inside one model call."""
 
     message = output.interviewer_message
-    question_count = message.count("？") + message.count("?")
+    question_count = _question_mark_count(message)
     if question_count > 1:
         raise ValueError(
             "v621_interviewer_must_ask_one_primary_question:"
             "interviewer_message只能保留一个开放问题和一个问号；"
             "请把外部来源、用户判断和采纳理由合成一句，删除其他问句"
         )
+    message_keys = _interviewer_repetition_keys(message)
+    prior_assistant_messages = [
+        str(turn.get("content", ""))
+        for turn in payload.get("transcript") or []
+        if turn.get("role") == "assistant"
+    ]
+    repeats_prior_question = bool(message_keys) and any(
+        _interviewer_repetition_keys(previous).intersection(message_keys)
+        for previous in prior_assistant_messages
+    )
+    repeats_latest_question = bool(
+        prior_assistant_messages
+        and _interviewer_repetition_keys(prior_assistant_messages[-1]).intersection(
+            message_keys
+        )
+    )
     navigation = output.navigation
+    latest_user_requested_finish = _latest_user_requests_interview_end(payload)
+    model_claims_user_requested_finish = (
+        output.session_action == "finish" and output.finish_reason == "user_requested"
+    )
+    if latest_user_requested_finish and not model_claims_user_requested_finish:
+        raise ValueError("v621_user_requested_finish_required")
+    if model_claims_user_requested_finish and not latest_user_requested_finish:
+        raise ValueError("v621_user_requested_finish_without_user_intent")
+    user_requested_finish = (
+        latest_user_requested_finish and model_claims_user_requested_finish
+    )
+    explicit_user_switch = _latest_user_explicitly_switches_decision(payload)
+    returning_from_source_clarification = (
+        not user_requested_finish
+        and _latest_user_follows_source_clarification(
+            payload.get("transcript") or []
+        )
+    )
+    valid_return_relation = bool(
+        navigation is not None
+        and (
+            navigation.mainline_relation == "return"
+            or (
+                navigation.mainline_relation == "user_switch"
+                and explicit_user_switch
+            )
+        )
+    )
+    if returning_from_source_clarification and (
+        navigation is None
+        or not valid_return_relation
+        or _is_source_clarification_question(message)
+        or repeats_prior_question
+    ):
+        raise ValueError(
+            "v621_source_clarification_must_return_to_mainline:"
+            "已经完成一次来源澄清尝试；不要重复或改写来源归属问题，"
+            "请把 mainline_relation 设为 return，并提出关于最终选择、"
+            "关键依据、实际行动、结果或调整的一个不同开放问题"
+        )
     if navigation is None:
         raise ValueError("v621_navigation_required")
+    repetition_was_requested = _latest_user_requests_question_repetition(payload)
+    if repeats_prior_question and not (
+        repetition_was_requested and repeats_latest_question
+    ):
+        raise ValueError(
+            "v621_interviewer_repeats_prior_question:"
+            "interviewer_message不得重复 transcript 中已问过的访谈问题；"
+            "请基于用户最新回答提出一个不同的开放问题"
+        )
     anchor = navigation.decision_anchor
     anchor_key = (anchor.turn_index, anchor.quote, anchor.start, anchor.end)
     candidate_keys = {
@@ -475,7 +1313,22 @@ def _validate_v621_interviewer_contract(
         or navigation.mainline_relation != "source_clarification"
     ):
         raise ValueError("v621_source_clarification_navigation_required")
-    if any(marker in message for marker in ("还是", "或者", "二选一")):
+    if any(
+        marker in message
+        for marker in (
+            "还是",
+            "或者",
+            "二选一",
+            "哪一方",
+            "哪个更",
+            "谁更",
+            "更可靠",
+            "更相信",
+            "更依赖",
+            "更认同",
+            "更赞同",
+        )
+    ):
         raise ValueError("v621_source_clarification_must_not_be_binary")
     lower = message.casefold()
     if not any(term.casefold() in lower for term in ("外部", "AI", "论文", "来源")):
@@ -485,6 +1338,8 @@ def _validate_v621_interviewer_contract(
         for term in ("自己", "你的判断", "本人", "你采纳", "你的理由", "采纳理由")
     ):
         raise ValueError("v621_source_clarification_participant_signal_missing")
+    if not _is_source_clarification_question(message):
+        raise ValueError("v621_source_clarification_ownership_contrast_missing")
 
 
 def _validate_v621_opening_contract(output: NaturalInterviewerOutput) -> None:
@@ -494,6 +1349,13 @@ def _validate_v621_opening_contract(output: NaturalInterviewerOutput) -> None:
         raise ValueError("opening_must_invite_and_continue")
     if output.navigation is not None:
         raise ValueError("opening_navigation_must_be_null")
+    message = output.interviewer_message.strip()
+    question_count = _question_mark_count(message)
+    if question_count != 1 or _substantive_visible_character_count(message) < 8:
+        raise ValueError(
+            "opening_must_have_single_primary_question:"
+            "开场只能保留一个开放问题和一个问号；请把邀请与核心问题合并成一句"
+        )
 
 
 def _dimension_contract() -> str:
@@ -928,7 +1790,7 @@ V6.2.1 严格取证规则：
    从上下文推测用户“可能会”怎样做，都不构成相应行为证据。
 3. 一条只与多个维度话题相关、但没有分别直接体现各维度行为的原话，不能同时使多个维度 sufficient=true。
    同一较长原话只有在其中分别清楚陈述了不同的具体行为时，才可为多个维度提供各自可核验的直接证据。
-4. 综合决策必须至少直接呈现实际选择、行动、优先级、权衡条件或风险控制之一；只说事情很重要、存在风险
+4. \u7efc\u5408\u51b3\u7b56必须至少直接呈现实际选择、行动、优先级、权衡条件或风险控制之一；只说事情很重要、存在风险
    或需要权衡，必须为 IE。动态调整必须直接呈现已经如何调整，或明确的新信息触发器及对应调整动作；
    只承认信息会变化、方案可能失败或需要再看，必须为 IE。
 5. 低分表示用户已经获得展示机会且原话直接呈现了较低层级行为；证据缺失永远不等于低能力。
@@ -1051,18 +1913,42 @@ class ModelGatewayService:
                 repair_used=False,
                 latency_ms=int((time.monotonic() - started) * 1000),
             )
-        return self._typed_call(
-            system_prompt=system_prompt,
-            payload=payload,
-            schema=NaturalInterviewerOutput,
-            max_tokens=settings.deepseek_interview_max_tokens,
-            thinking=settings.deepseek_interview_thinking,
-            total_timeout_seconds=settings.deepseek_interview_total_timeout_seconds,
-            primary_timeout_seconds=settings.deepseek_interview_primary_timeout_seconds,
-            output_validator=output_validator,
-            retry_strategy=self._RETRY_INTERVIEW_RESILIENT,
-            max_attempts=3,
-        )
+        try:
+            return self._typed_call(
+                system_prompt=system_prompt,
+                payload=payload,
+                schema=NaturalInterviewerOutput,
+                max_tokens=settings.deepseek_interview_max_tokens,
+                thinking=settings.deepseek_interview_thinking,
+                total_timeout_seconds=settings.deepseek_interview_total_timeout_seconds,
+                primary_timeout_seconds=settings.deepseek_interview_primary_timeout_seconds,
+                output_validator=output_validator,
+                retry_strategy=self._RETRY_INTERVIEW_RESILIENT,
+                max_attempts=3,
+            )
+        except ModelGatewayError as exc:
+            repeat_exhausted = _exception_chain_contains(
+                exc,
+                "v621_interviewer_repeats_prior_question",
+            )
+            if not (
+                selected_version == "v6.2.1"
+                and bool(payload.get("transcript"))
+                and repeat_exhausted
+            ):
+                raise
+            fallback = _v621_continuity_fallback(payload)
+            if output_validator is not None:
+                output_validator(fallback)
+            return StructuredCallResult(
+                output=fallback,
+                provider="deepseek",
+                model=settings.deepseek_model,
+                repair_used=True,
+                latency_ms=exc.latency_ms,
+                attempt_count=exc.attempt_count,
+                fallback_used=True,
+            )
 
     def generate_final_scorer(
         self, payload: dict[str, Any]
@@ -1327,6 +2213,27 @@ class ModelGatewayService:
             contract_repair_used = True
             return True
 
+        def is_interviewer_continuity_contract_failure(error: Exception) -> bool:
+            if retry_strategy != self._RETRY_INTERVIEW_RESILIENT:
+                return False
+            detail = str(error)
+            return any(
+                code in detail
+                for code in (
+                    "v621_interviewer_repeats_prior_question",
+                    "v621_source_clarification_must_return_to_mainline",
+                    "decision anchor offsets must exactly bound quote",
+                    "decision anchor end must be greater than start",
+                    "v621_navigation_anchor_not_in_server_candidates",
+                    "v621_navigation_anchor_text_hash_must_be_null",
+                    "navigation.decision_anchor.turn_index",
+                    "navigation.decision_anchor.quote",
+                    "navigation.decision_anchor.start",
+                    "navigation.decision_anchor.end",
+                    "navigation.decision_anchor.text_hash",
+                )
+            )
+
         while True:
             elapsed = time.monotonic() - started
             remaining = (
@@ -1445,7 +2352,12 @@ class ModelGatewayService:
                         latency_ms=int((time.monotonic() - started) * 1000),
                         attempt_count=attempt_count,
                     ) from exc
-                if retry_available("contract"):
+                additional_continuity_repair = (
+                    contract_repair_used
+                    and attempt_count < max_attempts
+                    and is_interviewer_continuity_contract_failure(exc)
+                )
+                if retry_available("contract") or additional_continuity_repair:
                     repair_used = True
                     messages.append(
                         {
@@ -1613,7 +2525,6 @@ class ModelGatewayService:
         )
         if latest_user is None:
             raise ModelGatewayError("v621_navigation_requires_user_turn")
-        content = str(latest_user["content"])
         latest_candidates = [
             candidate
             for candidate in payload.get("anchor_candidates") or []
@@ -1622,18 +2533,14 @@ class ModelGatewayService:
         if not latest_candidates:
             raise ModelGatewayError("v621_navigation_requires_anchor_candidate")
         selected_anchor = latest_candidates[-1]
-        mixed_source = payload.get("source_clarification_required") is True or bool(
-            re.search(
-                r"(?:AI|ChatGPT|DeepSeek|论文|文献|他人|导师).{0,18}"
-                r"(?:说|写|回答|指出|建议|认为|生成)",
-                content,
-                re.I,
-            )
+        source_clarification_required_now = (
+            payload.get("source_clarification_required") is True
         )
-        source_already_clarified = any(
-            item.get("role") == "assistant"
-            and "哪些是外部材料" in str(item.get("content") or "")
-            for item in payload["transcript"]
+        returning_from_source_clarification = (
+            not source_clarification_required_now
+            and _latest_user_follows_source_clarification(
+                payload.get("transcript") or []
+            )
         )
         return {
             "decision_anchor": {
@@ -1642,15 +2549,104 @@ class ModelGatewayService:
             },
             "focus_kind": (
                 "source_ownership"
-                if mixed_source and not source_already_clarified
+                if source_clarification_required_now
                 else "decision_problem"
             ),
             "mainline_relation": (
                 "source_clarification"
-                if mixed_source and not source_already_clarified
-                else ("return" if source_already_clarified else "core")
+                if source_clarification_required_now
+                else ("return" if returning_from_source_clarification else "core")
             ),
         }
+
+    @staticmethod
+    def _mock_source_clarification_question(payload: dict[str, Any]) -> str:
+        """Produce distinct mock clarifications while the server flag remains true."""
+
+        prior_question_keys = set().union(
+            *(
+                _interviewer_repetition_keys(str(item.get("content") or ""))
+                for item in payload.get("transcript") or []
+                if item.get("role") == "assistant"
+            ),
+            set(),
+        )
+        alternatives = (
+            "先把来源分清：其中哪些是外部材料，哪些是你自己的判断与采纳理由？",
+            "来源仍需要再分清：请说明哪些内容来自外部材料以及哪些是你自己的判断，并给出采纳理由？",
+            "请重新指出哪些说法来自外部来源以及哪些是你自己的判断，并解释为何采纳？",
+        )
+        for alternative in alternatives:
+            if not _interviewer_repetition_keys(alternative).intersection(
+                prior_question_keys
+            ):
+                return alternative
+        user_answer_count = sum(
+            1
+            for item in payload.get("transcript") or []
+            if item.get("role") == "user"
+        )
+        return (
+            f"结合你第{user_answer_count}次回答，请指出哪些内容来自外部来源以及"
+            "哪些是你自己的判断，并解释采纳理由？"
+        )
+
+    @staticmethod
+    def _mock_non_repeating_question(
+        payload: dict[str, Any],
+        candidate: str,
+    ) -> str:
+        """Keep deterministic mock dialogue inside the real V6.2.1 contract."""
+
+        prior_question_keys = set().union(
+            *(
+                _interviewer_repetition_keys(str(item.get("content") or ""))
+                for item in payload.get("transcript") or []
+                if item.get("role") == "assistant"
+            ),
+            set(),
+        )
+        if not _interviewer_repetition_keys(candidate).intersection(
+            prior_question_keys
+        ):
+            return candidate
+
+        alternatives = (
+            "你刚补充了新的信息，其中哪一条依据最影响你现在的取舍？",
+            "如果把这些因素排出先后，你会把什么放在第一位，为什么？",
+            "你准备怎样核实这个判断，而不是只依赖目前的印象？",
+            "目前还有什么信息会直接改变你的选择？",
+            "你会怎样落实这项决定，并判断是否需要调整？",
+            "回看这次经历，你现在最需要补充的判断依据是什么？",
+        )
+        for alternative in alternatives:
+            if not _interviewer_repetition_keys(alternative).intersection(
+                prior_question_keys
+            ):
+                return alternative
+
+        user_answer_count = sum(
+            1
+            for item in payload.get("transcript") or []
+            if item.get("role") == "user"
+        )
+        return (
+            f"结合你刚才第{user_answer_count}次回答，"
+            "还有哪项依据、行动或变化需要补充？"
+        )
+
+    @staticmethod
+    def _mock_question_for_prompt(
+        payload: dict[str, Any],
+        candidate: str,
+        *,
+        prompt_version: str,
+    ) -> str:
+        """Keep pre-V6.2.1 deterministic mock replay byte-for-byte stable."""
+
+        if prompt_version != "v6.2.1":
+            return candidate
+        return ModelGatewayService._mock_non_repeating_question(payload, candidate)
 
     @staticmethod
     def _mock_interviewer(
@@ -1691,31 +2687,39 @@ class ModelGatewayService:
         normalized = latest.replace(" ", "")
         if is_explicit_uncertainty_answer(latest):
             return NaturalInterviewerOutput(
-                interviewer_message=(
-                    "没关系，可以先不急着得出结论。"
-                    "此刻你最想先弄清的是什么？"
+                interviewer_message=ModelGatewayService._mock_question_for_prompt(
+                    payload,
+                    (
+                        "没关系，可以先不急着得出结论。"
+                        "此刻你最想先弄清的是什么？"
+                    ),
+                    prompt_version=prompt_version,
                 ),
                 session_action="continue",
                 finish_reason=None,
             )
         user_requested = (
-            any(
-                marker in normalized
-                for marker in (
-                    "结束访谈",
-                    "结束这次访谈",
-                    "结束本次访谈",
-                    "结束对话",
-                    "不想继续回答",
-                    "不想继续访谈",
-                    "访谈到这里",
-                    "生成报告",
+            _latest_user_requests_interview_end({"transcript": transcript})
+            if prompt_version == "v6.2.1"
+            else (
+                any(
+                    marker in normalized
+                    for marker in (
+                        "结束访谈",
+                        "结束这次访谈",
+                        "结束本次访谈",
+                        "结束对话",
+                        "不想继续回答",
+                        "不想继续访谈",
+                        "访谈到这里",
+                        "生成报告",
+                    )
                 )
-            )
-            if prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1"}
-            else any(
-                marker in normalized
-                for marker in ("结束", "到这里", "不想继续", "先这样")
+                if prompt_version in {"v6.1.1", "v6.2.0"}
+                else any(
+                    marker in normalized
+                    for marker in ("结束", "到这里", "不想继续", "先这样")
+                )
             )
         )
         if user_requested:
@@ -1724,32 +2728,13 @@ class ModelGatewayService:
                 session_action="finish",
                 finish_reason="user_requested",
             )
-        mixed_source = bool(
-            re.search(
-                r"(?:AI|ChatGPT|DeepSeek|论文|文献|他人|导师).{0,30}"
-                r"(?:说|写|回答|给出|指出|建议|认为|生成)",
-                latest,
-                re.I,
-            )
-            and any(
-                marker in latest
-                for marker in ("我认为", "我觉得", "我会", "我决定", "我选择", "我质疑")
-            )
-        )
-        source_already_clarified = any(
-            item.get("role") == "assistant"
-            and "哪些是外部材料" in str(item.get("content") or "")
-            for item in transcript
-        )
         if (
             prompt_version == "v6.2.1"
-            and (mixed_source or payload.get("source_clarification_required") is True)
-            and not source_already_clarified
+            and payload.get("source_clarification_required") is True
         ):
             return NaturalInterviewerOutput(
-                interviewer_message=(
-                    "先把来源分清：其中哪些是外部材料，"
-                    "哪些是你自己的判断与采纳理由？"
+                interviewer_message=ModelGatewayService._mock_source_clarification_question(
+                    payload
                 ),
                 session_action="continue",
                 finish_reason=None,
@@ -1762,9 +2747,13 @@ class ModelGatewayService:
         if prior_probe:
             if prompt_version in {"v6.2.0", "v6.2.1"}:
                 return NaturalInterviewerOutput(
-                    interviewer_message=(
-                        "我们再把这次经历往深处看一点：还有哪条重要依据、权衡或变化，"
-                        "是你觉得没有说清的？"
+                    interviewer_message=ModelGatewayService._mock_question_for_prompt(
+                        payload,
+                        (
+                            "我们再把这次经历往深处看一点："
+                            "还有哪条重要依据、权衡或变化，是你觉得没有说清的？"
+                        ),
+                        prompt_version=prompt_version,
                     ),
                     session_action="continue",
                     finish_reason=None,
@@ -1791,18 +2780,27 @@ class ModelGatewayService:
             for marker in ("已经想清楚", "决定了", "没有补充")
         ) and len(latest) > 10:
             return NaturalInterviewerOutput(
-                interviewer_message=(
-                    "你已经把现在的取舍想得很清楚了。为了看看这个判断在什么情况下"
-                    "需要重看：如果出现哪种情况，最可能让你改变现在的决定？"
+                interviewer_message=ModelGatewayService._mock_question_for_prompt(
+                    payload,
+                    (
+                        "你已经把现在的取舍想得很清楚了。为了看看这个判断在什么情况下"
+                        "需要重看：如果出现哪种情况，最可能让你改变现在的决定？"
+                    ),
+                    prompt_version=prompt_version,
                 ),
                 session_action="continue",
                 finish_reason=None,
             )
+        fallback_question = (
+            "先把焦点放回这件具体经历：当时你真正需要作出的判断是什么？"
+            if prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1"}
+            else "听起来这件事对你确实很重要。此刻你最想先厘清的是什么？"
+        )
         return NaturalInterviewerOutput(
-            interviewer_message=(
-                "先把焦点放回这件具体经历：当时你真正需要作出的判断是什么？"
-                if prompt_version in {"v6.1.1", "v6.2.0", "v6.2.1"}
-                else "听起来这件事对你确实很重要。此刻你最想先厘清的是什么？"
+            interviewer_message=ModelGatewayService._mock_question_for_prompt(
+                payload,
+                fallback_question,
+                prompt_version=prompt_version,
             ),
             session_action="continue",
             finish_reason=None,
@@ -2026,6 +3024,81 @@ class ModelGatewayService:
                     0.45,
                     "现有文字无法可靠拆分观点来源。",
                 )
+            participant_matches = _participant_reasoning_matches(compact)
+            clear_participant_reasoning = bool(
+                participant_matches
+                and _participant_match_is_clear_owned_reasoning(
+                    participant_matches[0],
+                    compact,
+                )
+            )
+            if clear_participant_reasoning:
+                if any(
+                    marker in compact
+                    for marker in (
+                        "不同意",
+                        "不赞同",
+                        "拒绝",
+                        "不会直接采用",
+                        "不会采用",
+                        "不接受",
+                    )
+                ):
+                    return (
+                        "participant_owned",
+                        "rejects",
+                        external_label,
+                        0.9,
+                        "该段表达了参与者自己的否定判断。",
+                    )
+                if any(
+                    marker in compact
+                    for marker in (
+                        "质疑",
+                        "不可靠",
+                        "有风险",
+                        "有问题",
+                        "不成立",
+                        "存在偏差",
+                        "忽略",
+                        "缺少",
+                        "不足",
+                        "不合理",
+                    )
+                ):
+                    return (
+                        "participant_owned",
+                        "critiques",
+                        external_label,
+                        0.9,
+                        "该段表达了参与者对外部材料的批评理由。",
+                    )
+                if any(
+                    marker in compact
+                    for marker in ("赞同", "采纳", "接受")
+                ):
+                    relation = (
+                        "own_reasoning"
+                        if any(
+                            marker in compact
+                            for marker in ("因为", "理由", "基于", "考虑到")
+                        )
+                        else "endorses"
+                    )
+                    return (
+                        "participant_owned",
+                        relation,
+                        external_label,
+                        0.88,
+                        "该段表达了参与者的采纳判断。",
+                    )
+                return (
+                    "participant_owned",
+                    "own_reasoning",
+                    external_label,
+                    0.85,
+                    "该段表达了参与者自己的判断或做法。",
+                )
             if external_label:
                 quoted = any(
                     marker in compact
@@ -2119,7 +3192,7 @@ class ModelGatewayService:
                     relation = "quotes_only"
                     source_label = None
                     confidence = min(confidence, 0.45)
-                    reason = "整轮来源混合且无可靠切分点。"
+                    reason = "候选片段来源混合且无可靠切分点。"
                 spans.append(
                     {
                         "candidate_id": str(candidate["candidate_id"]),

@@ -373,7 +373,7 @@ export const DIMENSIONS = [
   { key: "evidence_evaluation", name: "证据评估" },
   { key: "reasoning_argumentation", name: "推理与论证" },
   { key: "multiple_perspectives", name: "多元视角" },
-  { key: "integrative_decision", name: "综合决策" },
+  { key: "integrative_decision", name: "整合决策" },
   { key: "dynamic_adjustment", name: "动态调整" },
 ] as const;
 

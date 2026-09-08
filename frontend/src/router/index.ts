@@ -49,7 +49,7 @@ router.beforeEach(async (to) => {
 });
 
 router.afterEach((to) => {
-  document.title = `${String(to.meta.title ?? "思衡 V6")} · 思衡 V6`;
+  document.title = `${String(to.meta.title ?? "思衡")} · 思衡`;
 });
 
 if (typeof window !== "undefined") {

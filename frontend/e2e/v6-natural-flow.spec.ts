@@ -36,7 +36,7 @@ function snapshot(state: MockState) {
 }
 
 function report() {
-  const names = ["问题界定", "证据评估", "推理与论证", "多元视角", "综合决策", "动态调整"];
+  const names = ["问题界定", "证据评估", "推理与论证", "多元视角", "整合决策", "动态调整"];
   const keys = ["problem_definition", "evidence_evaluation", "reasoning_argumentation", "multiple_perspectives", "integrative_decision", "dynamic_adjustment"];
   return {
     session_uuid: UUID,

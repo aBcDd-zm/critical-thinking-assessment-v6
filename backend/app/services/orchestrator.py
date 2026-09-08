@@ -498,7 +498,7 @@ def materialize_attribution_output(
                     else selection.confidence
                 ),
                 "reason": (
-                    "服务端候选标记：整轮来源混合且无可靠切分点。"
+                    "服务端候选标记：候选片段来源混合且无可靠切分点。"
                     if forced_uncertain
                     else selection.reason
                 ),
@@ -522,6 +522,15 @@ def validate_attribution_output(
     }
     previous_end_by_turn: dict[int, int] = {}
     represented_user_turns: set[int] = set()
+    candidate_policies = {
+        (
+            int(candidate["turn_index"]),
+            int(candidate["start"]),
+            int(candidate["end"]),
+            str(candidate["quote"]),
+        ): candidate
+        for candidate in (span_candidates or [])
+    }
     validated: list[ValidatedAttributionSpan] = []
     for span in sorted(output.spans, key=lambda item: (item.turn_index, item.start, item.end)):
         source = user_turns.get(span.turn_index)
@@ -542,6 +551,18 @@ def validate_attribution_output(
         eligibility, validation_status, validation_reason = (
             classify_span_eligibility(span)
         )
+        candidate_policy = candidate_policies.get(
+            (span.turn_index, span.start, span.end, span.quote)
+        )
+        if candidate_policy is not None:
+            if candidate_policy.get("force_uncertain") is True:
+                eligibility = "manual_review"
+                validation_status = "manual_review"
+                validation_reason = "server_mixed_source_requires_manual_review"
+            elif candidate_policy.get("eligibility_ceiling") == "context_only":
+                eligibility = "context_only"
+                validation_status = "validated"
+                validation_reason = "server_explicit_external_context_ceiling"
         validated.append(
             ValidatedAttributionSpan(
                 output=span,
@@ -1281,6 +1302,8 @@ class InterviewOrchestrator:
         transcript: list[dict[str, Any]] | None = None,
     ) -> InterviewResult:
         quality_flags = _validate_interviewer_output(call.output, latest_user_text)
+        if call.fallback_used:
+            quality_flags.append("server_continuity_fallback_after_repeat_exhaustion")
         prompt_template_id, resolved_version, _ = resolve_natural_interviewer_prompt(
             prompt_version
         )
@@ -1613,7 +1636,7 @@ class InterviewOrchestrator:
                 item
                 for item in (
                     ended_early_notice,
-                    "思衡 V6 是探索性、非标准化的自然访谈演示，不支持跨用户比较或正式效度结论。",
+                    "思衡是探索性、非标准化的自然访谈演示，不支持跨用户比较或正式效度结论。",
                 )
                 if item
             ),

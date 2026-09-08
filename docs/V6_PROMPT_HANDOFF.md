@@ -74,7 +74,7 @@ EVIDENCE_ATTRIBUTION_MODE=enforce
 
 ### `natural_evidence_attribution_v6.2.1`
 
-输入是有序 user turns、各自前一条访谈问题，以及服务端预计算的无缝、非重叠 `span_candidates`。每个候选 ID 绑定候选规则版本与 `turn_index/start/end/quote_hash/occurrence`。模型必须对每个 ID 恰好输出一次，只回传 `candidate_id` 与 owner、relation、elicitation、来源标签、置信度、简短理由；不回显原文和偏移，不自行再切分或挑选“可评分”片段。服务端按 ID 权威物化原 span 后，验证角色、原文切片、偏移、occurrence、哈希、候选完整性与指纹，再独立计算资格；绝不按首次 substring 自动纠偏。缺失、重复、未知 ID 或高置信候选总数超过 100 时 fail closed。对应紧凑输出 schema 为 `evidence-attribution-select-v3-id`，候选规则为 `evidence-span-boundaries-v1`。
+输入是有序 user turns、各自前一条访谈问题，以及服务端预计算的无缝、非重叠 `span_candidates`。每个候选 ID 绑定候选规则版本与 `turn_index/start/end/quote_hash/occurrence`。模型必须对每个 ID 恰好输出一次，只回传 `candidate_id` 与 owner、relation、elicitation、来源标签、置信度、简短理由；不回显原文和偏移，不自行再切分或挑选“可评分”片段。服务端按 ID 权威物化原 span 后，验证角色、原文切片、偏移、occurrence、哈希、候选完整性与指纹，再独立计算资格；绝不按首次 substring 自动纠偏。缺失、重复、未知 ID 或高置信候选总数超过 100 时 fail closed。显式外部候选的服务端资格上限为 `context_only`；无法可靠切分的混合候选强制 `uncertain/manual_review`。对应紧凑输出 schema 为 `evidence-attribution-select-v3-id`，候选规则为 `evidence-span-boundaries-v3`。
 
 ### `natural_attributed_evidence_v6.2.2`
 

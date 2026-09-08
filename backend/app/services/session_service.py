@@ -76,7 +76,7 @@ class ServiceError(Exception):
 _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 TECHNICAL_USER_TURN_CAP = 40
 REPORT_READINESS_RULE_VERSION = "incremental-evidence-v3-min8-strict"
-EVIDENCE_ELIGIBILITY_RULE_VERSION = "participant-owned-reasoning-v1"
+EVIDENCE_ELIGIBILITY_RULE_VERSION = "participant-owned-reasoning-v2"
 # This is a minimum, not the production lease itself. The effective lease also
 # covers every sequential evidence-model budget for the mode bound at opening:
 # enforce has two calls, while historical shadow sessions still have three.
@@ -375,7 +375,7 @@ def session_snapshot(session: AssessmentSession) -> dict[str, Any]:
         "closure_suggestion": active_closure_suggestion(session),
         "manual_review_recommended": session.manual_review_recommended,
         "experimental_notice": (
-            "思衡 V6 是探索性、非标准化的自然访谈演示，"
+            "思衡是探索性、非标准化的自然访谈演示，"
             "不支持跨用户比较或正式效度结论。"
         ),
         "current_turn": serialize_turn(turns[-1]) if turns else None,
@@ -775,6 +775,10 @@ class SessionService:
                     if result.session_action == SUGGEST_FINISH_ACTION
                     else "natural_interview_turn"
                 )
+                continuity_fallback_used = (
+                    "server_continuity_fallback_after_repeat_exhaustion"
+                    in result.quality_flags
+                )
                 db.add(
                     AgentTrace(
                         session_id=session.id,
@@ -793,12 +797,21 @@ class SessionService:
                             "quality_flags": result.quality_flags,
                             "attempt_count": result.attempt_count,
                             **(
+                                {"fallback_used": True}
+                                if continuity_fallback_used
+                                else {}
+                            ),
+                            **(
                                 {"navigation": result.navigation}
                                 if result.navigation is not None
                                 else {}
                             ),
                         },
-                        renderer_status="repaired" if result.repair_used else "accepted",
+                        renderer_status=(
+                            "fallback"
+                            if continuity_fallback_used
+                            else ("repaired" if result.repair_used else "accepted")
+                        ),
                         repair_used=result.repair_used,
                         latency_ms=result.latency_ms,
                     )

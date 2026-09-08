@@ -45,7 +45,7 @@ onMounted(load);
 
 <template>
   <section class="console-page dashboard-page">
-    <div class="console-page-heading"><div><span class="eyebrow">REVIEW OVERVIEW</span><h2>复核概览</h2><p>汇总 V6 自然访谈的运行状态、复核待办与链路记录，不呈现能力排名。</p></div><button class="secondary-button small" :disabled="loading" @click="load">刷新数据</button></div>
+    <div class="console-page-heading"><div><span class="eyebrow">REVIEW OVERVIEW</span><h2>复核概览</h2><p>汇总自然访谈的运行状态、复核待办与链路记录，不呈现能力排名。</p></div><button class="secondary-button small" :disabled="loading" @click="load">刷新数据</button></div>
     <p v-if="error" class="error-banner">{{ error }}</p>
     <section v-else-if="loading" class="console-loading"><span class="loading-ring" />正在汇总复核数据…</section>
     <template v-else-if="data">

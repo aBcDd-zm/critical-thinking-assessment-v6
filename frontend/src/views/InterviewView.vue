@@ -654,7 +654,7 @@ onBeforeUnmount(() => {
 <template>
   <main class="interview-page">
     <header class="interview-header">
-      <button type="button" class="brand compact brand-button" @click="leaveEarly"><span>思衡</span><small>V6</small></button>
+      <button type="button" class="brand compact brand-button" @click="leaveEarly"><span>思衡</span></button>
       <span v-if="session" class="round-count" aria-live="polite">已进行 {{ roundCount }} 轮问答</span>
       <button type="button" class="quiet-button" @click="leaveEarly">退出不生成报告</button>
     </header>

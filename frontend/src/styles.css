@@ -220,6 +220,13 @@ input:focus, textarea:focus, select:focus { border-color: var(--forest); box-sha
 .dimension-body blockquote small { display: block; margin-top: 7px; color: var(--muted); }
 .report-disclaimer { margin-top: 34px; border-top: 1px solid var(--line); padding-top: 18px; color: var(--muted); font-size: 12px; }
 .report-disclaimer p { margin: 0; }
+.report-shell.submission-screenshot { padding-top: 18px; padding-bottom: 24px; }
+.report-shell.submission-screenshot .report-header { margin-bottom: 18px; }
+.report-shell.submission-screenshot .report-summary { padding-top: 22px; padding-bottom: 22px; }
+.report-shell.submission-screenshot .dimension-section { margin-top: 24px; }
+.report-shell.submission-screenshot .dimension-list { gap: 8px; margin-top: 14px; }
+.report-shell.submission-screenshot .dimension-head { padding-top: 15px; padding-bottom: 15px; }
+.report-shell.submission-screenshot .report-disclaimer { margin-top: 20px; padding-top: 12px; }
 
 .admin-page { min-height: 100vh; background: #f4f2ec; }
 .admin-header { width: calc(100% - 64px); max-width: 1500px; border-bottom: 1px solid var(--line); }

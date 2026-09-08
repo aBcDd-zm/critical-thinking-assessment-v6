@@ -228,7 +228,7 @@ test("管理员可从优先复核进入详情、保存复核并导出匿名数�
   await expect(page).toHaveURL(/\/admin\/sessions\?manual_review_recommended=true$/);
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "匿名导出" }).click();
-  expect((await download).suggestedFilename()).toBe("v6-anonymous-export.zip");
+  expect((await download).suggestedFilename()).toBe("siheng-anonymous-export.zip");
 
   await page.getByRole("button", { name: "退出", exact: true }).click();
   await expect(page).toHaveURL(/\/admin\/login$/);

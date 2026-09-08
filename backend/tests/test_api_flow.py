@@ -1990,6 +1990,61 @@ def test_failed_interviewer_call_preserves_user_turn_and_same_id_recovers(client
     assert failed_trace["output_contract"]["recoverable"] is True
 
 
+def test_continuity_fallback_is_persisted_as_an_explicit_trace_status(
+    client,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "natural_interviewer_prompt_version", "v6.2.1")
+    monkeypatch.setattr(settings, "evidence_attribution_mode", "enforce")
+    session_uuid = create_session(client)
+    gateway = api_router.sessions.orchestrator.gateway
+
+    def fallback_result(payload, **_kwargs):
+        anchor = {**payload["anchor_candidates"][-1], "text_hash": None}
+        return StructuredCallResult(
+            output=NaturalInterviewerOutput.model_validate(
+                {
+                    "interviewer_message": "这次补充里，哪项新信息最可能推翻你当前的选择，为什么？",
+                    "session_action": "continue",
+                    "finish_reason": None,
+                    "navigation": {
+                        "decision_anchor": anchor,
+                        "focus_kind": "basis",
+                        "mainline_relation": "core",
+                    },
+                }
+            ),
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            repair_used=True,
+            latency_ms=5_971,
+            attempt_count=3,
+            fallback_used=True,
+        )
+
+    monkeypatch.setattr(gateway, "generate_interviewer", fallback_result)
+    response = send(
+        client,
+        session_uuid,
+        "我会先做小范围试点，再根据投诉和响应时间调整。",
+        "continuity-fallback-trace",
+    )
+    assert response.status_code == 200
+    assert parse_events(response)[-1]["event"] == "agent_completed", response.text
+
+    login_admin(client)
+    detail = client.get(f"/api/v1/admin/sessions/{session_uuid}").json()
+    trace = next(
+        item for item in detail["traces"] if item["action"] == "natural_interview_turn"
+    )
+    assert trace["renderer_status"] == "fallback"
+    assert trace["repair_used"] is True
+    assert trace["output_contract"]["fallback_used"] is True
+    assert "server_continuity_fallback_after_repeat_exhaustion" in (
+        trace["output_contract"]["quality_flags"]
+    )
+
+
 def test_transient_model_connection_error_has_a_clear_recoverable_message(
     client, monkeypatch
 ) -> None:

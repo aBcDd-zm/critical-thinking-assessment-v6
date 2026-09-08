@@ -64,7 +64,7 @@ V6.2 的精确子串校验只能证明一段文字出现在某条用户消息中
 
 - `natural_opening` trace 同时冻结访谈 Prompt 与 `disabled|shadow|enforce` 归属模式；已创建会话禁止中途换版。缺少该绑定字段的历史会话确定性按 `disabled` 读取。
 - 已完成报告不重评；旧证据标记为 `legacy_unclassified`，绝不能回填为 `participant_owned`。
-- 新资产指纹同时包含归属 Prompt、紧凑 ID 分类 schema（`evidence-attribution-select-v3-id`）、候选规则（`evidence-span-boundaries-v1`）、资格规则、评分 Prompt、评分 schema（`attributed-evidence-span-ref-v1`）、模型和最低轮次规则。
+- 新资产指纹同时包含归属 Prompt、紧凑 ID 分类 schema（`evidence-attribution-select-v3-id`）、候选规则（`evidence-span-boundaries-v3`）、资格规则（`participant-owned-reasoning-v2`）、评分 Prompt、评分 schema（`attributed-evidence-span-ref-v1`）、模型和最低轮次规则。候选规则 v3 会在明确的“我自己的判断”转折处切分，并保留外部引语或请求的来源作用域；显式外部候选即使被模型误标为本人推理，服务端也会封顶为 `context_only`；若来源混合仍无法可靠切分，无论内外文字先后顺序，均强制进入 `uncertain/manual_review`，不得自动评分。
 - 代码、开发示例和生产样例已统一为 `v6.2.1 + enforce`：新会话正式评分只接收 eligible span ID，归属失败时禁止自动评分或回退 legacy。`shadow|disabled` 仍保留供已绑定会话和显式回滚，切换不会改写旧开场 trace。
 
 ## 验收边界

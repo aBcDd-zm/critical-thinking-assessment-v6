@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -22,6 +22,8 @@ DimensionKey = Literal[
     "integrative_decision",
     "dynamic_adjustment",
 ]
+
+_DIMENSION_FOCUS_LABELS = frozenset(get_args(DimensionKey))
 
 
 MIN_ANSWER_VISIBLE_CHARACTERS = 20
@@ -115,6 +117,23 @@ class NaturalInterviewNavigation(StrictModelOutput):
         "source_clarification",
         "user_switch",
     ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def neutralize_dimension_label_as_focus_kind(cls, value: Any) -> Any:
+        """Prevent a scoring dimension from becoming interview navigation."""
+
+        if not isinstance(value, dict):
+            return value
+        focus_kind = value.get("focus_kind")
+        if focus_kind not in _DIMENSION_FOCUS_LABELS:
+            return value
+        normalized = dict(value)
+        # Navigation is audit-only.  A leaked rubric key must never become a
+        # hidden measurement target, so retain the turn while neutralizing the
+        # non-contract label instead of treating it as a valid semantic alias.
+        normalized["focus_kind"] = "other"
+        return normalized
 
 
 class NaturalInterviewerOutput(StrictModelOutput):
@@ -375,6 +394,20 @@ class AttributedFinalScorerOutput(StrictModelOutput):
     dimensions: list[AttributedScoringDimensionOutput] = Field(min_length=6, max_length=6)
     strengths: list[SummaryWithEvidenceOutput] = Field(default_factory=list, max_length=2)
     priorities: list[SummaryWithEvidenceOutput] = Field(default_factory=list, max_length=2)
+
+    @model_validator(mode="before")
+    @classmethod
+    def bound_evidence_summary_lists(cls, value: Any) -> Any:
+        """Apply the same public two-item bound as the legacy scorer contract."""
+
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        for field_name in ("strengths", "priorities"):
+            items = normalized.get(field_name)
+            if isinstance(items, list) and len(items) > 2:
+                normalized[field_name] = items[:2]
+        return normalized
 
     @model_validator(mode="after")
     def dimensions_are_exactly_the_contract(self) -> "AttributedFinalScorerOutput":

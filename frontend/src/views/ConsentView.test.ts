@@ -41,7 +41,9 @@ describe("ConsentView", () => {
     expect(wrapper.text()).toContain("这不是与 AI 随意聊天");
     expect(wrapper.text()).not.toContain("内容初步谈清");
     expect(wrapper.text()).toContain("隐私摘要");
-    expect(wrapper.text()).toContain("发送给已配置的模型服务");
+    expect(wrapper.text()).toContain("发送给 DeepSeek");
+    expect(wrapper.text()).toContain("语音服务商豆包");
+    expect(wrapper.text()).toContain("模型服务商与语音服务商侧的删除以其各自条款为准");
     expect(wrapper.text()).toContain("获授权的管理人员可能查看完整逐字稿");
     expect(wrapper.find("details").attributes("open")).toBeUndefined();
     expect(wrapper.get("input[autocomplete=off]").attributes("required")).toBeDefined();
@@ -60,7 +62,7 @@ describe("ConsentView", () => {
     await flushPromises();
 
     expect(mocks.createSession).toHaveBeenCalledWith({
-      consent_version: "v6-natural-interview-guidance-2026-08",
+      consent_version: "v6-natural-interview-guidance-2026-08-v2",
       consent_given: true,
       participant: { display_name: "参与编号-07" },
     });

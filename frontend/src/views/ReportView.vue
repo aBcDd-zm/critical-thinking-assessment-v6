@@ -23,6 +23,7 @@ const report = ref<AssessmentReport | null>(null);
 const loading = ref(true);
 const downloading = ref(false);
 const error = ref("");
+const submissionScreenshotMode = import.meta.env.VITE_SUBMISSION_SCREENSHOT_MODE === "true";
 let reportRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 function retryableReportError(cause: unknown): boolean {
@@ -45,7 +46,7 @@ const dimensions = computed<ReportDimension[]>(() => {
     const item = byKey.get(meta.key);
     return {
       dimension_key: meta.key,
-      dimension_name: item?.dimension_name || meta.name,
+      dimension_name: meta.name,
       status: item?.status || "unmeasured",
       score: item?.status === "sufficient" ? item.score : null,
       reason: item?.reason || "本次对话中没有获得足够的可追溯证据，因此不做判断。",
@@ -90,7 +91,7 @@ async function downloadPdf() {
   error.value = "";
   try {
     const blob = await getReportPdf(uuid);
-    downloadBlob(blob, `思衡V6-自然访谈报告-${uuid.slice(0, 8)}.pdf`);
+    downloadBlob(blob, `思衡-自然访谈报告-${uuid.slice(0, 8)}.pdf`);
   } catch (cause) {
     error.value = cause instanceof ApiError ? cause.message : "PDF 下载失败，请稍后重试。";
   } finally {
@@ -111,7 +112,7 @@ onBeforeUnmount(() => {
 <template>
   <main class="report-page">
     <section v-if="loading" class="center-state"><span class="loading-ring" />正在读取报告…</section>
-    <section v-else-if="report" class="report-shell">
+    <section v-else-if="report" class="report-shell" :class="{ 'submission-screenshot': submissionScreenshotMode }">
       <header class="report-header">
         <a class="brand" href="/assessment" aria-label="开始新访谈"><span>思衡</span></a>
         <button class="secondary-button small" :disabled="downloading" @click="downloadPdf">{{ downloading ? "正在生成…" : "下载 PDF" }}</button>

@@ -18,7 +18,7 @@ async function logout() {
     <aside class="console-sidebar" aria-label="后台导航">
       <RouterLink class="console-brand" to="/admin/dashboard">
         <span>思衡</span>
-        <small>V6 REVIEW CONSOLE</small>
+        <small>复核台</small>
       </RouterLink>
       <nav class="console-nav">
         <RouterLink to="/admin/dashboard"><b>01</b><span>数据概览</span></RouterLink>
@@ -31,7 +31,7 @@ async function logout() {
     </aside>
     <div class="console-workspace">
       <header class="console-topbar">
-        <div><span class="eyebrow">V6 NATURAL INTERVIEW</span><h1>复核运营后台</h1></div>
+        <div><span class="eyebrow">自然访谈与证据复核</span><h1>复核运营后台</h1></div>
         <div class="console-account topbar-account"><span class="status-dot" />{{ adminName }}<button type="button" @click="logout">退出</button></div>
       </header>
       <RouterView />

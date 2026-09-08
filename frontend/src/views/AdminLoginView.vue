@@ -31,7 +31,7 @@ async function submit() {
 <template>
   <main class="admin-login-page">
     <section class="admin-login-card" aria-labelledby="admin-login-title">
-      <RouterLink class="console-brand login-brand" to="/assessment"><span>思衡</span><small>V6 REVIEW CONSOLE</small></RouterLink>
+      <RouterLink class="console-brand login-brand" to="/assessment"><span>思衡</span><small>复核台</small></RouterLink>
       <div><span class="eyebrow">ADMINISTRATOR ACCESS</span><h1 id="admin-login-title">进入复核运营后台</h1><p>仅供获授权人员查看会话、证据和研究复核记录。</p></div>
       <form @submit.prevent="submit">
         <label><span>管理员账号</span><input v-model="username" autocomplete="username" required :disabled="loading" /></label>

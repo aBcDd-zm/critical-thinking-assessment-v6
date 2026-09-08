@@ -29,6 +29,11 @@ const review = reactive<{ review_status: ReviewStatus; review_notes: string; rev
 const scores = ref<ExpertScore[]>(DIMENSIONS.map((item) => ({ dimension_key: item.key, score: null, comment: "" })));
 
 const participant = computed(() => detail.value?.participant ?? {});
+const submissionScreenshotMode = import.meta.env.VITE_SUBMISSION_SCREENSHOT_MODE === "true";
+const participantDisplayName = computed(() => {
+  if (submissionScreenshotMode) return "[已去标识]";
+  return participant.value.display_name || "匿名参与者";
+});
 const naturalTraces = computed(() =>
   [...(detail.value?.traces ?? [])]
     .filter((trace) => [
@@ -336,7 +341,7 @@ onMounted(load);
     <section v-if="loading" class="center-state">正在读取记录…</section>
     <section v-else-if="detail" class="admin-shell">
       <div class="detail-title">
-        <div><span class="eyebrow">V6 NATURAL INTERVIEW REVIEW</span><h1>{{ participant.display_name || "匿名参与者" }}的自然访谈</h1><p>{{ phaseName(detail.phase) }} · {{ answerCount(detail) }} 次已保存回答</p></div>
+        <div><span class="eyebrow">自然访谈与证据复核</span><h1>{{ participantDisplayName }}的自然访谈</h1><p>{{ phaseName(detail.phase) }} · {{ answerCount(detail) }} 次已保存回答</p></div>
         <div class="detail-stats"><span><strong>{{ inputStats.text }}</strong>文字输入</span><span><strong>{{ inputStats.voice }}</strong>语音输入</span><span><strong>{{ formatMs(inputStats.duration) }}</strong>累计作答</span><button v-if="canRetryReport" type="button" class="primary-button small" :disabled="reportRetrying" @click="retryReport">{{ reportRetrying ? "正在生成…" : "生成/重试报告" }}</button></div>
       </div>
 
@@ -418,7 +423,7 @@ onMounted(load);
         </article>
         <article class="trace-review scoring-run-card">
           <h2 class="audit-heading">独立终评运行</h2>
-          <table class="admin-table"><thead><tr><th>尝试</th><th>状态</th><th>逐字稿指纹</th><th>模型 / Prompt</th><th>每项模型置信度</th><th>格式修复</th><th>人工复核</th><th>错误</th></tr></thead><tbody><tr v-for="run in scoringRuns" :key="run.id ?? run.attempt_number"><td>#{{ run.attempt_number }}</td><td><span class="table-badge">{{ run.status }}</span></td><td><code>{{ run.transcript_fingerprint || '—' }}</code></td><td>{{ run.model || '—' }}<small><code>{{ run.prompt_template_id || '—' }} / {{ run.prompt_version || '—' }}</code></small></td><td><ul v-if="scoringDimensions(run).length" class="confidence-list"><li v-for="item in scoringDimensions(run)" :key="item.dimension_key"><span>{{ nameFor(item.dimension_key) }}</span><b>{{ item.confidence === null ? '—' : item.confidence.toFixed(2) }}</b><small>未校准 · {{ item.score === null ? '未建议分数' : `模型原始建议 ${item.score} 分` }}</small></li></ul><span v-else>—</span></td><td>{{ run.repair_used ? '是' : '否' }}</td><td>{{ run.manual_review_recommended ? '建议' : '否' }}</td><td class="run-error">{{ run.error || '—' }}</td></tr><tr v-if="!scoringRuns.length"><td colspan="8" class="empty-cell">暂无独立终评运行</td></tr></tbody></table>
+          <table class="admin-table"><thead><tr><th>尝试</th><th>状态</th><th>逐字稿指纹</th><th>模型 / Prompt</th><th>每项模型置信度</th><th>格式修复</th><th v-if="!submissionScreenshotMode">人工复核</th><th v-if="!submissionScreenshotMode">错误</th></tr></thead><tbody><tr v-for="run in scoringRuns" :key="run.id ?? run.attempt_number"><td>#{{ run.attempt_number }}</td><td><span class="table-badge">{{ run.status }}</span></td><td><code>{{ run.transcript_fingerprint || '—' }}</code></td><td>{{ run.model || '—' }}<small><code>{{ run.prompt_template_id || '—' }} / {{ run.prompt_version || '—' }}</code></small></td><td><ul v-if="scoringDimensions(run).length" class="confidence-list"><li v-for="item in scoringDimensions(run)" :key="item.dimension_key"><span>{{ nameFor(item.dimension_key) }}</span><b>{{ item.confidence === null ? '—' : item.confidence.toFixed(2) }}</b><small>未校准 · {{ item.score === null ? '未建议分数' : `模型原始建议 ${item.score} 分` }}</small></li></ul><span v-else>—</span></td><td>{{ run.repair_used ? '是' : '否' }}</td><td v-if="!submissionScreenshotMode">{{ run.manual_review_recommended ? '建议' : '否' }}</td><td v-if="!submissionScreenshotMode" class="run-error">{{ run.error || '—' }}</td></tr><tr v-if="!scoringRuns.length"><td :colspan="submissionScreenshotMode ? 6 : 8" class="empty-cell">暂无独立终评运行</td></tr></tbody></table>
           <p class="audit-note">以上是终评器的原始快照。数字置信度未经校准，任何数字分数都必须有精确的输入片段、明确归属和充分证据才能进入参与者报告。</p>
         </article>
       </section>

@@ -162,6 +162,8 @@ def test_case_15_separates_owned_reasoning_ai_questions_and_external_text() -> N
         "这是一次聊天时我向它描述的内容"
     )
     assert candidates[2]["quote"].startswith("上文利用")
+    assert candidates[0]["force_uncertain"] is False
+    assert candidates[0]["eligibility_ceiling"] is None
     previous_end = 0
     for candidate in candidates:
         assert candidate["start"] == previous_end
@@ -281,6 +283,679 @@ def test_mock_uses_whole_turn_uncertain_when_a_turn_cannot_be_split() -> None:
     assert "每个 span_candidate 必须恰好输出一次" in EVIDENCE_ATTRIBUTION_SYSTEM_PROMPT
 
 
+def test_explicit_source_clarification_splits_external_quote_from_own_reasoning() -> None:
+    content = (
+        "AI说的‘直接全量上线最省时间，不需要再做小范围验证’和论文里的三角验证表述"
+        "都是外部材料。我自己的判断是不全量上线，因为样本偏差、隐私投诉和回滚成本还"
+        "没有被验证；我只采纳多来源交叉核验的方法，因为它能降低单一问卷样本偏差。"
+    )
+    candidates = build_attribution_span_candidates(
+        [{"turn_index": 7, "content": content}]
+    )[7]
+
+    assert "".join(candidate["quote"] for candidate in candidates) == content
+    external = next(
+        candidate
+        for candidate in candidates
+        if "直接全量上线最省时间" in candidate["quote"]
+    )
+    own_reasoning = next(
+        candidate
+        for candidate in candidates
+        if "我自己的判断是不全量上线" in candidate["quote"]
+    )
+    assert "我自己的判断" not in external["quote"]
+    assert "直接全量上线最省时间" not in own_reasoning["quote"]
+    assert external["end"] == own_reasoning["start"]
+    assert external["eligibility_ceiling"] == "context_only"
+    malicious = EvidenceAttributionSelectionOutput.model_validate(
+        {
+            "spans": [
+                {
+                    "candidate_id": candidate["candidate_id"],
+                    "owner": "participant_owned",
+                    "relation": "own_reasoning",
+                    "elicitation_level": "focused_probe",
+                    "source_label": None,
+                    "confidence": 1.0,
+                    "reason": "故意把所有候选都报为本人推理。",
+                }
+                for candidate in candidates
+            ]
+        }
+    )
+    validated = validate_attribution_output(
+        materialize_attribution_output(malicious, candidates),
+        [{"turn_index": 7, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    eligibility_by_quote = {
+        item.output.quote: item.eligibility for item in validated
+    }
+    assert eligibility_by_quote[external["quote"]] == "context_only"
+    assert eligibility_by_quote[own_reasoning["quote"]] == "eligible"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "AI回答：我自己的判断是应该立即上线，因为成本更低。",
+        "AI回答：“考虑成本，我自己的判断是立即上线。”",
+        "论文写道：“前提成立；我的判断是应当采用方案A。”",
+        "AI问：我自己的判断是否可靠？",
+        "请AI回答：我的观点是什么？",
+        "同事问：我的选择为什么失败？",
+        "我问AI：我的判断是不是可靠？",
+        "请AI判断：我的判断是不是太保守？",
+        "我让AI评估：我的选择是不是合理？",
+        "我向Gemini咨询：我的判断是不是可靠？",
+    ],
+)
+def test_external_reporting_scope_never_detaches_first_person_as_eligible(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 11,
+                "content": content,
+                "preceding_question": "哪些是外部材料，哪些是你自己的判断？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    assert len(candidates) == 1
+    assert candidates[0]["eligibility_ceiling"] == "context_only"
+    malicious = EvidenceAttributionSelectionOutput.model_validate(
+        {
+            "spans": [
+                {
+                    "candidate_id": candidates[0]["candidate_id"],
+                    "owner": "participant_owned",
+                    "relation": "own_reasoning",
+                    "elicitation_level": "focused_probe",
+                    "source_label": None,
+                    "confidence": 1.0,
+                    "reason": "试图把外部引语当成本人判断。",
+                }
+            ]
+        }
+    )
+    validated = validate_attribution_output(
+        materialize_attribution_output(malicious, candidates),
+        [{"turn_index": 11, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert validated[0].eligibility == "context_only"
+    assert validated[0].validation_reason == "server_explicit_external_context_ceiling"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "下面是论文原文：“我自己的判断是应立即上线。”",
+        "以下为AI原话：应立即上线。",
+        "这段来自AI：我的观点是不用试点。",
+        "外部材料如下：我的结论是直接上线。",
+        "AI回答：“第一句。我自己的判断是立即上线。",
+        "AI回答：第一句。我的判断是立即上线。",
+        "AI原话如下：我的判断是立即上线。",
+        "论文原文如下：我的结论是立即上线。",
+        "摘自论文：我的判断是立即上线。",
+        "引用自论文：我的判断是立即上线。",
+        "这是外部内容：我的判断是立即上线。",
+        "这部分来自AI：我的判断是立即上线。",
+        "AI原话《立即上线，不必试点》",
+        "论文原文〈应当立即上线〉",
+        "AI原话［立即上线］",
+    ],
+)
+def test_declared_or_unclosed_external_scope_is_never_eligible(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 14,
+                "content": content,
+                "preceding_question": "哪些是外部内容？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    assert len(candidates) == 1
+    assert candidates[0]["eligibility_ceiling"] == "context_only"
+    malicious = EvidenceAttributionSelectionOutput.model_validate(
+        {
+            "spans": [
+                {
+                    "candidate_id": candidates[0]["candidate_id"],
+                    "owner": "participant_owned",
+                    "relation": "own_reasoning",
+                    "elicitation_level": "focused_probe",
+                    "source_label": None,
+                    "confidence": 1.0,
+                    "reason": "试图把声明为外部的内容当成本人推理。",
+                }
+            ]
+        }
+    )
+    validated = validate_attribution_output(
+        materialize_attribution_output(malicious, candidates),
+        [{"turn_index": 14, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert validated[0].eligibility == "context_only"
+
+
+def test_declared_external_block_stays_context_only_when_scope_is_ambiguous() -> None:
+    content = (
+        "以下都是外部材料：研究表明应立即上线；"
+        "而我自己的判断是先做试点。"
+    )
+    candidates = build_attribution_span_candidates(
+        [{"turn_index": 16, "content": content}]
+    )[16]
+    assert len(candidates) >= 1
+    assert all(
+        candidate["eligibility_ceiling"] == "context_only"
+        or candidate["force_uncertain"] is True
+        for candidate in candidates
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "AI给出的答案是立即上线而我自己的判断是先做可回滚试点。",
+        "论文的结论是立即上线而我自己的判断是先做可回滚试点。",
+        "AI主张立即上线而我个人的判断是先做试点。",
+        "研究表明应立即上线而我自己的判断是先做试点。",
+        "文章写道应立即上线而我自己的判断是先做试点。",
+        "助手说应立即上线而我自己的判断是先做试点。",
+        "AI的答复是立即上线而我自己的判断是先做试点。",
+        "AI给出的方案是立即上线而我自己的判断是先做试点。",
+        "根据研究应立即上线而我自己的判断是先做试点。",
+        "据论文所述应立即上线而我自己的判断是先做试点。",
+        "AI分析结果如下应立即上线而我自己的判断是先做试点。",
+        "Claude说应立即上线而我自己的判断是先做试点。",
+        "Gemini回答应立即上线而我自己的判断是先做试点。",
+        "Copilot建议应立即上线而我自己的判断是先做试点。",
+        "文心一言回复应立即上线而我自己的判断是先做试点。",
+        "聊天机器人回答应立即上线而我自己的判断是先做试点。",
+        "搜索引擎给出的答案是立即上线而我自己的判断是先做试点。",
+        "新闻报道指出应立即上线而我自己的判断是先做试点。",
+        "网上资料显示应立即上线而我自己的判断是先做试点。",
+        "AI声称应立即上线而我自己的判断是先做试点。",
+        "AI表示应立即上线而我自己的判断是先做试点。",
+        "AI提到应立即上线而我自己的判断是先做试点。",
+        "AI强调应立即上线而我自己的判断是先做试点。",
+        "AI输出的内容是立即上线而我自己的判断是先做试点。",
+        "腾讯元宝回答应立即上线而我自己的判断是先做试点。",
+        "智谱清言建议应立即上线而我自己的判断是先做试点。",
+        "讯飞星火回复应立即上线而我自己的判断是先做试点。",
+        "外部数据显示应立即上线而我自己的判断是先做试点。",
+        "AI说应立即上线，但我的意见是先做试点。",
+        "AI说应立即上线，但我主张先做试点。",
+        "AI说应立即上线，但我判断应先做试点。",
+    ],
+)
+def test_external_then_participant_reasoning_gets_separate_server_gates(
+    content: str,
+) -> None:
+    candidates = build_attribution_span_candidates(
+        [{"turn_index": 13, "content": content}]
+    )[13]
+    assert len(candidates) == 2
+    assert candidates[0]["eligibility_ceiling"] == "context_only"
+    assert candidates[1]["eligibility_ceiling"] is None
+    assert "我" in candidates[1]["quote"]
+
+
+def test_unsplittable_external_first_candidate_is_forced_uncertain() -> None:
+    content = "AI说应该立即上线我自己的判断是先做可回滚试点"
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 9,
+                "content": content,
+                "preceding_question": "哪些是外部材料，哪些是你自己的判断？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+
+    assert len(candidates) == 1
+    assert candidates[0]["force_uncertain"] is True
+    malicious = EvidenceAttributionSelectionOutput.model_validate(
+        {
+            "spans": [
+                {
+                    "candidate_id": candidates[0]["candidate_id"],
+                    "owner": "participant_owned",
+                    "relation": "own_reasoning",
+                    "elicitation_level": "focused_probe",
+                    "source_label": None,
+                    "confidence": 1.0,
+                    "reason": "试图把混合片段作为本人推理。",
+                }
+            ]
+        }
+    )
+    output = materialize_attribution_output(malicious, candidates)
+
+    assert output.spans[0].owner == "uncertain"
+    validated = validate_attribution_output(
+        output,
+        [{"turn_index": 9, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert validated[0].eligibility == "manual_review"
+
+
+def test_unsplittable_participant_first_mixture_is_forced_uncertain() -> None:
+    content = "我自己的判断是先试点AI说应该直接全量上线"
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 10,
+                "content": content,
+                "preceding_question": "你最后怎么判断？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+
+    assert len(candidates) == 1
+    assert candidates[0]["force_uncertain"] is True
+    selection = EvidenceAttributionSelectionOutput.model_validate(
+        {
+            "spans": [
+                {
+                    "candidate_id": candidates[0]["candidate_id"],
+                    "owner": "participant_owned",
+                    "relation": "own_reasoning",
+                    "elicitation_level": "spontaneous",
+                    "source_label": None,
+                    "confidence": 1.0,
+                    "reason": "试图让未切分的参与者在前混合片段入分。",
+                }
+            ]
+        }
+    )
+    validated = validate_attribution_output(
+        materialize_attribution_output(selection, candidates),
+        [{"turn_index": 10, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert validated[0].eligibility == "manual_review"
+    assert validated[0].validation_reason == "server_mixed_source_requires_manual_review"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我认为AI回答：“我的判断是立即上线。”",
+        "我采纳AI的建议“立即上线”，因为成本更低。",
+        "我认为AI回答【我的判断是立即上线】",
+        "我认为AI回答（我的判断是立即上线）",
+        "我认为AI回答`我的判断是立即上线`",
+        "我认为AI回答'我的判断是立即上线'",
+        "我认为AI回答《我的判断是立即上线》",
+        "我认为AI原话【我的判断是立即上线】",
+        "我认为AI回答是立即上线，因为没有风险。",
+        "我认为AI回答称这个方案没有问题。",
+        "我认为AI回答称该数据不存在偏差。",
+        "我认为AI回答称它没有忽略隐私。",
+        "我认为AI回答称这个方案不算有问题。",
+        "我认为AI回答称未发现存在偏差。",
+        "我认为AI回答称证据并非不足。",
+        "我认为AI回答称该方案并非不可行。",
+    ],
+)
+def test_participant_preface_cannot_make_embedded_external_quote_eligible(
+    content: str,
+) -> None:
+    candidates = build_attribution_span_candidates(
+        [{"turn_index": 18, "content": content}]
+    )[18]
+    assert len(candidates) == 1
+    assert candidates[0]["force_uncertain"] is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我认为AI的建议有风险，因为样本只有3人。",
+        "我不赞同论文的结论，因为样本存在偏差。",
+        "我采纳AI建议中的交叉核验，因为它能降低样本偏差。",
+        "我的判断是AI的建议有风险，因为样本不足。",
+        "在我看来AI的建议有风险，因为样本有偏差。",
+        "依我看论文结论不可靠，因为缺少反例。",
+        "我的观点是模型的回答忽略隐私风险。",
+        "我本人认为AI建议有风险。",
+        "我明确认为AI建议有风险。",
+        "- 我认为AI的建议有风险，因为样本不足。",
+        "1. 我认为AI的建议有风险，因为样本不足。",
+        "总体上我认为AI的建议有风险，因为样本不足。",
+        "  我认为AI的建议有风险，因为样本不足。",
+        "我本人的判断是AI的建议有风险。",
+        "我个人意见是AI的建议有风险。",
+        "就我而言，AI建议有风险，因为样本不足。",
+        "我的判断是SWOT分析结果支持先做试点。",
+        "我认为ROI分析结果说明先做试点更安全。",
+        "本人认为OKR评估结果不支持全量上线。",
+        "我认为Python分析结果需要先复核。",
+        "我认为研究问题应该聚焦样本偏差。",
+        "我的判断是研究问题需要重新定义。",
+        "我认为报告问题在于数据口径不一致。",
+        "我质疑论文的主张，因为样本有偏差。",
+        "我质疑论文主张全面上线，因为样本有偏差。",
+        "我不赞同AI说立即上线，因为没有回滚机制。",
+        "我采纳AI建议先交叉核验，因为能降低样本偏差。",
+    ],
+)
+def test_clear_participant_critique_or_adoption_remains_candidate_evidence(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 12,
+                "content": content,
+                "preceding_question": "你采纳了什么，为什么？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    assert len(candidates) == 1
+    assert candidates[0]["force_uncertain"] is False
+    assert candidates[0]["eligibility_ceiling"] is None
+    selection = EvidenceAttributionSelectionOutput.model_validate(
+        {
+            "spans": [
+                {
+                    "candidate_id": candidates[0]["candidate_id"],
+                    "owner": "participant_owned",
+                    "relation": "own_reasoning",
+                    "elicitation_level": "focused_probe",
+                    "source_label": None,
+                    "confidence": 0.9,
+                    "reason": "参与者对外部建议给出了自己的批评或采纳理由。",
+                }
+            ]
+        }
+    )
+    validated = validate_attribution_output(
+        materialize_attribution_output(selection, candidates),
+        [{"turn_index": 12, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert validated[0].eligibility == "eligible"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我质疑论文的主张，因为样本有偏差。",
+        "我不赞同AI说立即上线，因为没有回滚机制。",
+        "我采纳AI建议先交叉核验，因为能降低样本偏差。",
+        "就我而言，AI建议有风险，因为样本不足。",
+    ],
+)
+def test_mock_preserves_clear_participant_critique_or_reasoned_adoption(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 20,
+                "content": content,
+                "preceding_question": "你为什么赞同或反对？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    validated = validate_attribution_output(
+        _materialized_mock_output(payload),
+        [{"turn_index": 20, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert validated[0].eligibility == "eligible"
+
+
+def test_non_explicit_participant_preface_does_not_unlock_direct_ai_claim() -> None:
+    content = "我认为AI建议立即上线有风险，因为样本不足。"
+    candidates = build_attribution_span_candidates(
+        [{"turn_index": 21, "content": content}]
+    )[21]
+    assert len(candidates) == 1
+    assert candidates[0]["force_uncertain"] is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "因为我转述AI回答我的判断是立即上线。",
+        "因为我复制了AI回答我的判断是立即上线。",
+        "当时我记录的AI回答我的观点是直接上线。",
+        "后来我转述论文写道我的结论是立即上线。",
+        "所以我引用AI回答我的判断是无需试点。",
+    ],
+)
+def test_narrative_prefix_cannot_unlock_reported_external_first_person(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 22,
+                "content": content,
+                "preceding_question": "这是谁的判断？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    assert all(
+        candidate["force_uncertain"]
+        or candidate["eligibility_ceiling"] == "context_only"
+        for candidate in candidates
+    )
+    validated = validate_attribution_output(
+        _materialized_mock_output(payload),
+        [{"turn_index": 22, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert all(span.eligibility != "eligible" for span in validated)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "外部材料：我的判断是立即上线。",
+        "外部内容：我的观点是无需试点。",
+        "因为我复制外部材料：我的判断是立即上线。",
+        "因为我转述了外部材料里的“我的判断是立即上线”。",
+        "当时我引用外部内容中的“我的观点是直接上线”。",
+    ],
+)
+def test_explicit_external_material_label_cannot_become_scoring_evidence(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 23,
+                "content": content,
+                "preceding_question": "这是谁的判断？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    validated = validate_attribution_output(
+        _materialized_mock_output(payload),
+        [{"turn_index": 23, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert all(span.eligibility != "eligible" for span in validated)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "AI回答说，我的判断是立即上线。",
+        "论文写道，我的结论是立即上线。",
+        "同事说，我自己的判断是马上上线。",
+        "研究表明，我的判断是无需试点。",
+        "外部材料如下，我的观点是直接上线。",
+    ],
+)
+def test_comma_introduced_external_first_person_stays_context_only(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 25,
+                "content": content,
+                "preceding_question": "这句话是谁的？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    validated = validate_attribution_output(
+        _materialized_mock_output(payload),
+        [{"turn_index": 25, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert all(span.eligibility != "eligible" for span in validated)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "AI回答的是，我自己的判断是立即上线。",
+        "AI说的是，我自己的判断是立即上线。",
+        "AI的建议是，我自己的判断是立即上线。",
+        "AI回复内容是，我的观点是无需试点。",
+        "AI输出的是，我的看法是直接上线。",
+    ],
+)
+def test_copular_comma_external_first_person_stays_context_only(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 28,
+                "content": content,
+                "preceding_question": "这句话是谁的？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    validated = validate_attribution_output(
+        _materialized_mock_output(payload),
+        [{"turn_index": 28, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert all(span.eligibility != "eligible" for span in validated)
+
+
+def test_comma_external_scope_ends_at_explicit_participant_contrast() -> None:
+    content = "AI回答说，我的判断是立即上线，但我不赞同，因为无法回滚。"
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 26,
+                "content": content,
+                "preceding_question": "你认可这个外部判断吗？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    assert len(candidates) == 2
+    validated = validate_attribution_output(
+        _materialized_mock_output(payload),
+        [{"turn_index": 26, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert [span.eligibility for span in validated] == [
+        "context_only",
+        "eligible",
+    ]
+    assert validated[1].output.relation == "rejects"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "AI说应该立即上线，但我认为应该先试点，因为能回滚。",
+        "AI说应该立即上线，可是我认为应该先试点，因为能回滚。",
+        "AI说应该立即上线，可我认为应该先试点，因为能回滚。",
+        "AI说应该立即上线，相反我认为应该先试点，因为能回滚。",
+        "论文主张直接上线，可是在我看来样本不足，所以应该先验证。",
+    ],
+)
+def test_common_contrast_words_preserve_owned_reasoning_equivalently(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 27,
+                "content": content,
+                "preceding_question": "你自己的判断是什么？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    assert len(candidates) == 2
+    validated = validate_attribution_output(
+        _materialized_mock_output(payload),
+        [{"turn_index": 27, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert [span.eligibility for span in validated] == [
+        "context_only",
+        "eligible",
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我问了AI之后我认为应该先做试点，因为可以回滚。",
+        "因为我向AI提问后我的判断是先做试点，因为可以回滚。",
+        "后来我让AI分析后我的判断是先验证再上线。",
+    ],
+)
+def test_external_tool_action_then_owned_reasoning_splits_without_punctuation(
+    content: str,
+) -> None:
+    payload = _attribution_payload(
+        [
+            {
+                "turn_index": 24,
+                "content": content,
+                "preceding_question": "你自己怎么判断？",
+            }
+        ]
+    )
+    candidates = _span_candidates(payload)
+    assert len(candidates) == 2
+    assert "".join(candidate["quote"] for candidate in candidates) == content
+    validated = validate_attribution_output(
+        _materialized_mock_output(payload),
+        [{"turn_index": 24, "role": "user", "content": content}],
+        span_candidates=candidates,
+    )
+    assert [span.eligibility for span in validated] == [
+        "context_only",
+        "eligible",
+    ]
+
+
 def test_span_candidates_preserve_repeated_occurrences_and_reject_substitution() -> None:
     content = "AI建议核实，但我不同意。AI建议核实，但我仍然不同意。"
     payload = _attribution_payload(
@@ -348,6 +1023,13 @@ def test_attribution_gateway_requires_canonical_server_span_candidates() -> None
     payload["user_turns"][0]["span_candidates"][0] = {
         **payload["user_turns"][0]["span_candidates"][0],
         "start": 1,
+    }
+    with pytest.raises(ModelGatewayError, match="invalid_attribution_span_candidates"):
+        gateway.generate_evidence_attribution(payload)
+    payload = _attribution_payload([turn])
+    payload["user_turns"][0]["span_candidates"][0] = {
+        **payload["user_turns"][0]["span_candidates"][0],
+        "eligibility_ceiling": None,
     }
     with pytest.raises(ModelGatewayError, match="invalid_attribution_span_candidates"):
         gateway.generate_evidence_attribution(payload)
@@ -1318,6 +2000,20 @@ def _source_clarification_output(
         (
             lambda payload: _source_clarification_output(
                 payload,
+                message="请区分哪些来自外部材料、哪些是你自己的判断，哪一方更可靠？",
+            ),
+            "source_clarification_must_not_be_binary",
+        ),
+        (
+            lambda payload: _source_clarification_output(
+                payload,
+                message="请分清哪些来自外部观点、哪些是你自己的判断，你更相信哪一方？",
+            ),
+            "source_clarification_must_not_be_binary",
+        ),
+        (
+            lambda payload: _source_clarification_output(
+                payload,
                 message="请区分你自己的判断并说说采纳理由？",
             ),
             "external_signal_missing",
@@ -1382,7 +2078,7 @@ def test_v621_source_clarification_accepts_single_open_invitation_without_questi
     )
     output = _source_clarification_output(
         payload,
-        message="请区分外部材料和你自己的判断，并说明采纳理由。",
+        message="请说明哪些来自外部材料、哪些是你自己的判断，并给出采纳理由。",
     )
     _validate_v621_interviewer_contract(output, payload)
 
@@ -1619,7 +2315,7 @@ def test_old_session_asset_is_stable_and_new_prompt_assets_are_frozen(
     monkeypatch.setattr(
         session_service_module,
         "EVIDENCE_CANDIDATE_RULE_VERSION",
-        "evidence-span-boundaries-v2-test",
+        "evidence-span-boundaries-v3-test",
     )
     assert _report_readiness_asset_fingerprint("shadow") != candidate_rule_asset
     assert _report_readiness_asset_fingerprint("disabled") == legacy

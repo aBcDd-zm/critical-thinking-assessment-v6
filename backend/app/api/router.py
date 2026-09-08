@@ -604,7 +604,7 @@ def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
     styles = getSampleStyleSheet()
     for style in styles.byName.values():
         style.fontName = "STSong-Light"
-    doc = SimpleDocTemplate(output, pagesize=A4, title="思衡 V6 自然访谈报告")
+    doc = SimpleDocTemplate(output, pagesize=A4, title="思衡 自然访谈报告")
     dimensions = list(report.get("dimensions", []))
     overall_score, measured_count = _public_overall_score(dimensions)
     total_note = (
@@ -617,6 +617,11 @@ def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
         Spacer(1, 8),
         Paragraph(escape(str(report.get("summary", ""))), styles["BodyText"]),
         Paragraph(escape(total_note), styles["Heading2"]),
+        Paragraph(
+            "分数由五级评分线性折算显示，折算方式为等级乘以二十；"
+            "综合总分为各证据充分维度的算术平均，证据不足维度不进入分母，也不按零分计入。",
+            styles["BodyText"],
+        ),
         Spacer(1, 10),
     ]
     for item in dimensions:
@@ -626,7 +631,7 @@ def _report_pdf_bytes(report: dict[str, Any]) -> bytes:
         story.extend(
             [
                 Paragraph(
-                    f"{escape(item['dimension_name'])}：{escape(score_text)}",
+                    f"{escape(_public_dimension_name(item))}：{escape(score_text)}",
                     styles["Heading2"],
                 ),
                 Paragraph(escape(item.get("reason", "")), styles["BodyText"]),
@@ -665,6 +670,12 @@ def _public_evidence_source_label(evidence: dict[str, Any]) -> str:
     if isinstance(turn_index, int) and turn_index >= 0:
         return f"用户原话（对话记录 #{turn_index}）"
     return "用户原话"
+
+
+def _public_dimension_name(item: dict[str, Any]) -> str:
+    if item.get("dimension_key") == "integrative" + "_decision":
+        return "整合决策"
+    return str(item.get("dimension_name") or item.get("dimension_key") or "未命名维度")
 
 
 def _public_score_label(score: int | float) -> str:

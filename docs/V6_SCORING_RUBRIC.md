@@ -66,7 +66,7 @@
 
 无效高水平证据：只从单一部门或个人便利出发。
 
-### 综合决策 `integrative_decision`
+### 整合决策 `integrative_decision`
 
 | 分数 | 行为标准 |
 | ---: | --- |

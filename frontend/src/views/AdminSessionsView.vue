@@ -15,6 +15,12 @@ const error = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
 const route = useRoute();
 const router = useRouter();
+const submissionScreenshotMode = import.meta.env.VITE_SUBMISSION_SCREENSHOT_MODE === "true";
+
+function participantLabel(displayName?: string | null) {
+  if (submissionScreenshotMode) return "[已去标识]";
+  return displayName || "匿名参与者";
+}
 
 const phaseLabel: Record<string, string> = {
   interviewing: "访谈中",
@@ -66,7 +72,7 @@ async function submitFilters() {
 async function exportAnonymous() {
   busy.value = true;
   try {
-    downloadBlob(await getAnonymousExport(), "v6-anonymous-export.zip");
+    downloadBlob(await getAnonymousExport(), "siheng-anonymous-export.zip");
     message.value = "匿名数据已导出；默认不包含自由文本、原话或实际谈论内容。";
   } catch {
     error.value = "匿名导出失败。";
@@ -110,11 +116,11 @@ onMounted(() => {
 <template>
   <main class="admin-page">
     <header class="admin-header">
-      <a class="brand compact" href="/admin"><span>思衡</span><small>V6 复核台</small></a>
+      <a class="brand compact" href="/admin"><span>思衡</span><small>复核台</small></a>
       <div><span class="local-trust-badge">仅限本地可信环境</span><RouterLink class="quiet-link" to="/assessment">用户端</RouterLink><button class="secondary-button small" :disabled="busy" @click="exportAnonymous">匿名导出</button></div>
     </header>
     <section class="admin-shell">
-      <div class="admin-title"><div><span class="eyebrow">V6 NATURAL INTERVIEW REVIEW</span><h1>自然访谈与证据复核</h1><p>完整对话只在本地可信复核环境中查看；匿名导出默认排除自由文本。</p></div><div class="admin-title-actions"><button class="secondary-button" :disabled="busy" @click="exportAnonymous">匿名导出</button><button class="secondary-button" :disabled="busy" @click="fileInput?.click()">导入专家评分 CSV</button><input ref="fileInput" type="file" accept=".csv,text/csv" hidden @change="importCsv" /></div></div>
+      <div class="admin-title"><div><h1>自然访谈与证据复核</h1><p>完整对话只在本地可信复核环境中查看；匿名导出默认排除自由文本。</p></div><div class="admin-title-actions"><button class="secondary-button" :disabled="busy" @click="exportAnonymous">匿名导出</button><button class="secondary-button" :disabled="busy" @click="fileInput?.click()">导入专家评分 CSV</button><input ref="fileInput" type="file" accept=".csv,text/csv" hidden @change="importCsv" /></div></div>
 
       <form class="filter-bar" @submit.prevent="submitFilters">
         <label><span>搜索</span><input v-model="filters.q" placeholder="会话编号或参与者称呼" /></label>
@@ -133,7 +139,7 @@ onMounted(() => {
             <tr v-if="loading"><td colspan="7" class="empty-cell">正在读取…</td></tr>
             <tr v-else-if="!sessions.length"><td colspan="7" class="empty-cell">暂无符合条件的会话</td></tr>
             <tr v-for="item in sessions" v-else :key="item.uuid">
-              <td><code>{{ item.uuid.slice(0, 8) }}</code><small>{{ item.display_name || "匿名参与者" }}</small></td>
+              <td><code>{{ item.uuid.slice(0, 8) }}</code><small>{{ participantLabel(item.display_name) }}</small></td>
               <td><span class="table-badge">{{ phaseLabel[item.phase] || item.phase }}</span></td>
               <td>{{ item.user_answer_count ?? 0 }}</td>
               <td><span :class="item.manual_review_recommended ? 'fallback-yes' : 'fallback-no'">{{ item.manual_review_recommended ? "是" : "否" }}</span></td>

@@ -76,7 +76,7 @@ DIMENSIONS = (
     ),
     Dimension(
         "integrative_decision",
-        "综合决策",
+        "\u7efc\u5408\u51b3\u7b56",
         "在目标、证据、约束和风险之间做出可执行的权衡。",
         ("比较方案与约束", "说明权衡逻辑", "定义执行与回退"),
         {
